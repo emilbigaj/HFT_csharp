@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	
+	<Import Project="..\HFT.targets" />
+
+
+	<ItemGroup>
+        <ProjectReference Include="..\Data\Data.csproj" />
+        <ProjectReference Include="..\Execution\Execution.csproj" />
+        <ProjectReference Include="..\Provider\Provider.csproj" />
+        <ProjectReference Include="..\Socket\Socket.csproj" />
+        <ProjectReference Include="..\Tools\Tools.csproj" />
+    </ItemGroup>
+
+</Project>

@@ -1,0 +1,172 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.SendOrderWidget"
+             x:DataType="local:SendOrderViewModel">
+
+	<UserControl.Resources>
+		<local:SideToBrushConverter x:Key="SideToBrushConverter"/>
+	</UserControl.Resources>
+
+	<UserControl.Styles>
+		<Style Selector="ToggleButton.LockBtn">
+			<Setter Property="Background" Value="#E0E0E0"/>
+			<Setter Property="Foreground" Value="#505050"/>
+			<Setter Property="BorderThickness" Value="0"/>
+			<Setter Property="CornerRadius" Value="3"/>
+		</Style>
+		<Style Selector="ToggleButton.LockBtn:checked /template/ ContentPresenter#PART_ContentPresenter">
+			<Setter Property="Background" Value="#505050"/>
+			<Setter Property="Foreground" Value="#E0E0E0"/>
+		</Style>
+		<Style Selector="ToggleButton.LockBtn:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+			<Setter Property="Background" Value="#D0D0D0"/>
+			<Setter Property="Foreground" Value="#505050"/>
+		</Style>
+		<Style Selector="ToggleButton.LockBtn:checked:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+			<Setter Property="Background" Value="#606060"/>
+			<Setter Property="Foreground" Value="#E0E0E0"/>
+		</Style>
+	</UserControl.Styles>
+
+	<Grid ColumnDefinitions="*, 170">
+
+		<Border Grid.Column="0" Background="White" Padding="5"
+                BorderBrush="#E0E0E0" BorderThickness="0,0,1,0">
+
+			<Grid RowDefinitions="Auto, *, Auto, *, Auto">
+
+				<Grid Grid.Row="0">
+
+					<TabControl SelectedIndex="{Binding SelectedTabIndex}"
+                                Margin="-5,0,-5,0" Padding="0">
+
+						<TabItem Header="Create" FontSize="12" FontWeight="SemiBold" MinHeight="26">
+							<Grid ColumnDefinitions="*" Margin="5,5,5,0">
+								<ComboBox Grid.Column="0" x:Name="InstrumentCombo"
+                                          HorizontalAlignment="Stretch"
+                                          ItemsSource="{Binding SubscribedInstruments}"
+                                          DisplayMemberBinding="{Binding ShortSymbol}"
+                                          SelectedItem="{Binding SelectedCreateOrderInstrument}"
+                                          DropDownOpened="OnInstrumentComboDropDownOpened"/>
+							</Grid>
+						</TabItem>
+
+						<TabItem Header="Amend" FontSize="12" FontWeight="SemiBold"
+                                 MinHeight="26">
+
+							<Grid ColumnDefinitions="*" Margin="5,5,5,0">
+
+								<ComboBox Grid.Column="0" x:Name="OrderCombo"
+                                          HorizontalAlignment="Stretch"
+                                          ItemsSource="{Binding ActiveOrders}"
+                                          SelectedItem="{Binding SelectedOrderToAmend}"
+                                          DropDownOpened="OnOrderComboDropDownOpened"
+                                          Background="{Binding SelectedOrderToAmend.Side, Converter={StaticResource SideToBrushConverter}, TargetNullValue=Transparent, FallbackValue=Transparent}">
+									<ComboBox.Styles>
+										<Style Selector="ComboBoxItem">
+											<Setter Property="Background" Value="{Binding SelectedOrderToAmend.Side, Converter={StaticResource SideToBrushConverter}}"/>
+										</Style>
+									</ComboBox.Styles>
+									<ComboBox.ItemTemplate>
+										<DataTemplate>
+											<TextBlock Text="{Binding DisplayString}"/>
+										</DataTemplate>
+									</ComboBox.ItemTemplate>
+								</ComboBox>
+							</Grid>
+						</TabItem>
+					</TabControl>
+
+					<ToggleButton Classes="LockBtn"
+                                  HorizontalAlignment="Right" VerticalAlignment="Top"
+                                  Margin="0,0,5,0" Padding="0" Width="30" Height="26"
+                                  Content="➖" FontWeight="Bold"
+                                  ToolTip.Tip="Lock Ladder Center"
+                                  IsChecked="{Binding IsAutoCenter}"
+                                  HorizontalContentAlignment="Center"
+                                  VerticalContentAlignment="Center"/>
+				</Grid>
+
+				<Grid Grid.Row="2" ColumnDefinitions="*, 15, *">
+					<Grid Grid.Column="0" RowDefinitions="25, 35, 25">
+						<Button Grid.Row="0" Click="OnPriceUp" Content="▲"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                Background="#AAAAAA" Foreground="White" CornerRadius="3,3,0,0" Padding="0" BorderThickness="0"/>
+						<TextBox Grid.Row="1" x:Name="PriceTextBox" Text="{Binding TicksInputAsString, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="Price"
+                                 HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                 HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                 CornerRadius="0" BorderThickness="1,0,1,0" FontSize="16" FontWeight="SemiBold"/>
+						<Button Grid.Row="2" Click="OnPriceDown" Content="▼"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                Background="#AAAAAA" Foreground="White" CornerRadius="0,0,3,3" Padding="0" BorderThickness="0"/>
+					</Grid>
+
+					<Grid Grid.Column="2" RowDefinitions="25, 35, 25">
+						<Button Grid.Row="0" Click="OnQtyUp" Content="▲"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                Background="#AAAAAA" Foreground="White" CornerRadius="3,3,0,0" Padding="0" BorderThickness="0"/>
+						<TextBox Grid.Row="1" x:Name="QtyTextBox" Text="{Binding QuantityInputAsString, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="Quantity"
+                                 HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                 HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                 CornerRadius="0" BorderThickness="1,0,1,0" FontSize="16" FontWeight="SemiBold"/>
+						<Button Grid.Row="2" Click="OnQtyDown" Content="▼"
+                                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                Background="#AAAAAA" Foreground="White" CornerRadius="0,0,3,3" Padding="0" BorderThickness="0"/>
+					</Grid>
+				</Grid>
+
+				<Panel Grid.Row="3"/>
+
+				<StackPanel Grid.Row="4" Spacing="10">
+
+					<Button IsVisible="{Binding IsCreateMode}"
+                            Content="{Binding CreateButtonText}"
+                            Background="{Binding CreateButtonBrush}"
+                            Foreground="White"
+                            FontWeight="Bold"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            VerticalContentAlignment="Center"
+                            Height="40"
+                            Click="OnSendCreateClick"/>
+
+					<Grid IsVisible="{Binding !IsCreateMode}" ColumnDefinitions="*, 10, *">
+						<Button Grid.Column="0"
+                                Content="Amend"
+                                Background="{Binding AmendButtonBrush}"
+                                Foreground="White"
+                                FontWeight="Bold"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                Height="40"
+                                IsEnabled="{Binding SelectedOrderToAmend, Converter={x:Static ObjectConverters.IsNotNull}}"
+                                Click="OnSendAmendClick"/>
+
+						<Button Grid.Column="1" Grid.ColumnSpan="2"
+                                Content="Cancel"
+                                Background="#DC322F"
+                                Foreground="White"
+                                FontWeight="Bold"
+                                HorizontalAlignment="Stretch"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                Height="40"
+                                IsEnabled="{Binding SelectedOrderToAmend, Converter={x:Static ObjectConverters.IsNotNull}}"
+                                Click="OnSendCancelClick"/>
+					</Grid>
+				</StackPanel>
+
+			</Grid>
+		</Border>
+
+		<local:FastLadderControl Grid.Column="1"
+                                 x:Name="LadderControl"
+                                 IsCompactMode="True"/>
+	</Grid>
+</UserControl>

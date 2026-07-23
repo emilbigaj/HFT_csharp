@@ -1,0 +1,72 @@
+﻿<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.OrdersWidget"
+             x:DataType="local:WidgetOrder">
+
+    <UserControl.Resources>
+        <local:SideToBrushConverter x:Key="SideToBrushConverter"/>
+
+		<StackPanel x:Key="TitleBarButtons" Orientation="Horizontal" Spacing="4" Margin="16,0,0,0">
+			<Button Content="❌" FontFamily="Segoe UI Emoji" Width="28" Height="28" FontSize="17" Padding="0"
+					HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+					ToolTip.Tip="Cancel All Orders" ToolTip.ShowDelay="1000" Click="OnCancelAllClick" />
+		</StackPanel>
+    </UserControl.Resources>
+
+    <UserControl.Styles>
+        <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+        <!-- Shade Row based on Side using correct Selector syntax -->
+        <Style Selector="DataGridRow">
+            <Setter Property="Background" Value="{Binding Side, Converter={StaticResource SideToBrushConverter}}"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Grid>
+        <DataGrid x:Name="OrdersGrid"
+				  x:DataType="local:OrdersWidget"
+                  ScrollViewer.VerticalScrollBarVisibility="Visible"
+                  ScrollViewer.HorizontalScrollBarVisibility="Visible"
+                  ScrollViewer.AllowAutoHide="False"
+                  MinColumnWidth="80"
+                  ItemsSource="{Binding Rows}"
+                  AutoGenerateColumns="False"
+                  CanUserSortColumns="True"
+                  CanUserResizeColumns="True"
+                  CanUserReorderColumns="True"
+                  IsReadOnly="True"
+                  GridLinesVisibility="All"
+                  HeadersVisibility="Column"
+                  RowHeight="24">
+
+            <DataGrid.ContextMenu>
+                <ContextMenu x:Name="GridMenu" Opened="OnContextMenuOpened"/>
+            </DataGrid.ContextMenu>
+
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" Width="Auto"/>
+                <DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" Width="Auto" IsVisible="False"/>
+                <DataGridTextColumn Header="ClientOrderId" Binding="{Binding ClientOrderId}" Width="Auto"/>
+                <DataGridTextColumn Header="Side" Binding="{Binding Side}" Width="Auto"/>
+
+                <DataGridTextColumn Header="StateStatus" Binding="{Binding StateStatus}" Width="Auto"/>
+                <DataGridTextColumn Header="StateSeq" Binding="{Binding StateSeq}" Width="Auto"/>
+                <DataGridTextColumn Header="StatePrice" Binding="{Binding StatePriceStr}" Width="Auto"/>
+                <DataGridTextColumn Header="StateTicks" Binding="{Binding StateTicks}" IsVisible="False" Width="Auto"/>
+				<DataGridTextColumn Header="StateQuantity" Binding="{Binding StateQuantity}" Width="Auto"/>
+				<DataGridTextColumn Header="StateQuantityAhead" Binding="{Binding StateQuantityAhead}" Width="Auto"/>
+                <DataGridTextColumn Header="StateFilled" Binding="{Binding StateFilled}" Width="Auto"/>
+                <DataGridTextColumn Header="StateWorking" Binding="{Binding StateWorking}" Width="Auto"/>
+
+                <DataGridTextColumn Header="TargetAction" Binding="{Binding TargetAction}" Width="Auto"/>
+				<DataGridTextColumn Header="TargetStatus" Binding="{Binding TargetStatus}" Width="Auto"/>
+				<DataGridTextColumn Header="TargetSeq" Binding="{Binding TargetSeq}" Width="Auto"/>
+                <DataGridTextColumn Header="TargetPrice" Binding="{Binding TargetPriceStr}"  Width="Auto"/>
+                <DataGridTextColumn Header="TargetTicks" Binding="{Binding TargetTicks}" IsVisible="False" Width="Auto"/>
+                <DataGridTextColumn Header="TargetQuantity" Binding="{Binding TargetQuantity}" Width="Auto"/>
+
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+
+</UserControl>

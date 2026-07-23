@@ -1,0 +1,27 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/Solution Items/">
+    <File Path="Directory.Build.props" />
+    <File Path="GUI.targets" />
+    <File Path="HFT.targets" />
+    <File Path="Spec.txt" />
+  </Folder>
+  <Project Path="Build/Build.csproj" />
+  <Project Path="Chart/Chart.csproj" />
+  <Project Path="Data/Data.csproj" />
+  <Project Path="Execution/Execution.csproj" />
+  <Project Path="Generator/Generator.csproj" Id="66e37c86-e6d9-4e9d-8492-d8457753c40b" />
+  <Project Path="Logging/Logging.csproj" />
+  <Project Path="Provider/Provider.csproj" />
+  <Project Path="Proxy/Proxy.csproj" Id="3b89e7c0-2a8e-41db-86a5-f5963f693984" />
+  <Project Path="Simulator/Simulator.csproj" Id="d2e99745-e131-464e-ab7b-7c3cb8f71cc1" />
+  <Project Path="Socket/Socket.csproj" />
+  <Project Path="Strategy/Strategy.csproj" />
+  <Project Path="Testing/Testing.csproj" />
+  <Project Path="Tools/Tools.csproj" />
+  <Project Path="Widget/Widget.csproj" />
+  <Project Path="Workspace/Workspace.csproj" />
+</Solution>

@@ -1,0 +1,49 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.RiskLimitsWidget"
+             x:DataType="local:WidgetRiskLimit">
+
+	<UserControl.Styles>
+		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+	</UserControl.Styles>
+
+	<DataGrid x:Name="RiskLimitsGrid"
+			  Background="Transparent"
+			  AutoGenerateColumns="False"
+			  IsReadOnly="True"
+			  GridLinesVisibility="All"
+			  BorderThickness="1"
+			  BorderBrush="Gray"
+			  RowBackground="White"
+			  HeadersVisibility="Column"
+			  CanUserSortColumns="True"
+			  CanUserResizeColumns="True"
+			  CanUserReorderColumns="True"
+			  MinColumnWidth="80"
+			  RowHeight="24">
+
+		<DataGrid.Styles>
+			<Style Selector="DataGridRow:nth-child(2n)">
+				<Setter Property="Background" Value="#F0F0F0" />
+			</Style>
+		</DataGrid.Styles>
+
+		<DataGrid.ContextMenu>
+			<ContextMenu Opened="OnContextMenuOpened" />
+		</DataGrid.ContextMenu>
+
+		<DataGrid.Columns>
+			<DataGridTextColumn Header="ShortSymbol"     Binding="{Binding ShortSymbol}"           Width="Auto"/>
+			<DataGridTextColumn Header="Symbol"          Binding="{Binding Symbol}"                Width="Auto" IsVisible="False"/>
+			<DataGridTextColumn Header="InstrumentId"    Binding="{Binding InstrumentId}"          Width="Auto" IsVisible="False"/>
+			<DataGridTextColumn Header="Position"        Binding="{Binding PositionStr}"           Width="Auto"/>
+			<DataGridTextColumn Header="MaxOrderQty"     Binding="{Binding MaxOrderQuantityStr}"   Width="Auto"/>
+			<DataGridTextColumn Header="MaxPositionQty"  Binding="{Binding MaxPositionQuantityStr}" Width="Auto"/>
+			<DataGridTextColumn Header="Headroom"        Binding="{Binding HeadroomStr}"           Width="Auto"/>
+			<DataGridTextColumn Header="MaxOrders/Day"   Binding="{Binding MaxOrdersPerDayStr}"    Width="Auto"/>
+			<DataGridTextColumn Header="MaxOrders/Sec"   Binding="{Binding MaxOrdersPerSecondStr}" Width="Auto"/>
+			<DataGridTextColumn Header="File"            Binding="{Binding RiskLimitFileName}"     Width="*" IsVisible="False"/>
+		</DataGrid.Columns>
+	</DataGrid>
+</UserControl>

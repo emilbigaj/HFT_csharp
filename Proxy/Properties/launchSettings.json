@@ -1,0 +1,23 @@
+{
+  "profiles": {
+    "Proxy": {
+      "commandName": "Project"
+    },
+    "Proxy Server (WSL)": {
+      "commandName": "WSL2",
+      "commandLineArgs": "Proxy.dll server",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      },
+      "distributionName": "AlmaLinux-10"
+    },
+    "Proxy Client (WSL)": {
+      "commandName": "WSL2",
+      "commandLineArgs": "Proxy.dll client",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      },
+      "distributionName": "AlmaLinux-10"
+    }
+  }
+}

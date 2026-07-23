@@ -1,0 +1,93 @@
+Execution Simulator Overview
+The execution simulator processes historical market-by-price and trade data to maintain an order book reflecting the exact historical state of the market. When a user submits simulated orders, these actions alter the order book, causing it to diverge from the historical state and generate an "alternate reality." The simulator then publishes this updated, alternate market state back to the user.
+
+Terminology
+The simulator distinguishes two related but distinct concepts. Confusing them is the most common source of misunderstanding.
+
+  Ghost: phantom maker orders held inside a per-level queue. They are real orders the user's passive fill displaced; the simulator retains them as invisible queue entries so that the user must queue behind them and cannot dominate the level without consequence. Ghost is queue-resident.
+
+  Mask: a quantity used to subtract historical depth from what is published or counted, representing liquidity the simulator has already consumed in its alternate reality but which still appears in raw historical data. Mask is not in any queue; it is an accumulator that adjusts depth at publication time and during cross processing.
+
+Ledger Catalog
+The simulator maintains one Ghost ledger and two Mask ledgers:
+
+  Per-level Ghost (QueueManager.Ghost): Created when a user's passive order at a price level is hit by a historical trade. The user "steals" a fill that, in real data, was consumed elsewhere in the queue; the bypassed historical makers are retained as invisible phantom liquidity at that level. Decays on MBP activity (orderbook turnover).
+
+  Cross-induced Mask (OrderManager.CrossMask, side-aggregated): Created when real liquidity moves into a price the user is resting at, causing the simulator to cross-fill market-side depth on the user's side. Masks depth on the opposing side during cross processing. Decays with same-side MBP activity, because it is fundamentally tracking the user's queue position on that side.
+
+  Taker Mask (_bidMask, _askMask on the instrument): Created when the user actively takes liquidity, or when a cross-fill at the user's quote is generated. Masks depth on the side that was consumed, both at publication time and during subsequent cross processing. Decays only on historical trades (the real market is presumed to be eating the volume the user already took).
+
+Bookkeeping Invariant
+At every QueueManager the following invariant is preserved across all operations (trade, MBP delta, decay):
+
+    MarketQuantity_at_level = Real_depth_at_level + Ghost_at_level
+
+Every code path that mutates Ghost also mutates MarketQuantity (or vice versa) to preserve this. AddGhost establishes it on trade events; DecayGhost reduces both Ghost and MarketQuantity together; ReduceMarketBy mirrors real cancellations on MarketQuantity without touching Ghost.
+
+Trade Timing Assumption
+The simulator assumes that for any historical trade, the Trade tick arrives before the corresponding MarketByPrice update reflects that trade's effect on depth. Internally, AddGhost reads SideByPrice.GetQuantity at trade time (pre-update) and offsets it against a per-level _traded accumulator; the next MBP delta cancels the trade-induced component via "delta += _traded; _traded = 0". Reordering these inputs in a custom data feed will break Ghost accounting.
+
+Maker Orders
+When a user submits a maker order, it is added to the simulator's queue based on price-time priority. New orders queue strictly behind any existing market depth at that level, including invisible Ghost makers.
+
+Cancel Distribution: When historical depth decreases (cancellations occur), the simulator assumes they are distributed cubically across the queue. Each market order is cancelled at a rate proportional to (quantity_ahead_of_it / total_market_quantity)^3, weighting cancellations heavily toward the back of the order queue. Newly placed user orders, sitting near the back of fresh queue formations, are disproportionately likely to be simulated as passed over or canceled if the market thins out. This protects front-of-queue positions and adversarially punishes deeper queue placement.
+
+Ghost Creation: If a user's passive maker order is filled, it effectively steals a fill that would have otherwise gone to a historical maker. In our alternate reality, we assume those bypassed historical orders remain in the queue as invisible Ghost orders. This prevents the trader from dominating the book without consequence. Per-level Ghost is created in three scenarios:
+  - A historical trade at the user's level fills user quantity: Ghost increases by the user's fill amount.
+  - A historical trade at a less aggressive level consumes phantom market still tracked at this level: Ghost decreases (the simulator is catching up to real).
+  - A cross-fill consumes market-side depth at this level: Ghost decreases here and CrossMask increases on the side.
+
+Initial Depth at Empty Levels: When a user places a passive order at a price less aggressive than any currently known level (for example, bidding below the lowest visible bid), the new QueueManager is seeded with the depth observed at the worst-known level. This is a conservative assumption: the simulator presumes at least as much queue volume sits ahead at that deeper level as exists at the edge of the visible book.
+
+Ghost Decay: Ghost orders are dynamically reduced over time, decaying proportionally to ongoing order book activity. For each MBP delta of magnitude D occurring anywhere in the book, every Ghost-bearing level decays by approximately Ghost * D / TotalMarketQuantity_snapshot, where the snapshot is a Ghost-weighted blend of the book's total depth captured at the moments Ghost was added. This normalization means a fixed-size cancel decays Ghost faster in a thin book than in a deep one. The simulator assumes the alternate reality naturally heals back to historical reality over time as actual market volume absorbs the localized impact.
+
+Execution Logic: If the historical best bid crosses the user's maker sell order (or vice versa), the user's order is immediately filled. When the historical book is itself in a crossed or locked state (best bid >= best ask in raw data), the matching engine is presumed not to be running continuously (an auction phase). For the duration of this state no passive user fills are produced and no Ghost or Mask is accumulated; cross processing resumes once the book uncrosses.
+
+More-Aggressive Walk on Historical Trades: When a historical trade arrives at price T, the simulator first consumes any tracked liquidity at prices more aggressive than T. These represent user orders and Ghost market that real data has already cleared in flight but the simulator was still carrying. Trade quantity is allocated through those levels in price-priority order before reaching the reported level T; only the residual quantity reaches the trade-level QueueManager.
+
+Crossed Market Sweeps: During a crossed book event (a real aggressive price crossing into our user's quote without the raw book being in auction), the matching engine first deducts any existing Mask quantities from the historical aggressor level (Taker Mask on this side plus CrossMask from the opposing manager) before executing the user's order against the remaining valid volume.
+
+Order Amendments: Modifying an existing maker order to decrease its quantity safely preserves its exact position in the queue. However, increasing the quantity or altering the price forces a full cancellation and re-insertion, instantly dropping the order to the absolute back of the queue.
+
+Restoration of Depth: When a user's maker order is canceled or completed, the simulator flags the specific price level. On the very next market data update, the underlying historical depth is overwritten back into the published book at that level before user quantities are re-applied. This ordering matters when a user immediately re-enters at the same level: the flag-and-restore step runs first, then the new user quantity is layered on top, ensuring the alternate reality dynamically mends itself without double-counting.
+
+Queue Visibility: The simulator actively calculates and publishes exact queue position updates (via an "Ahead of Order" message) back to the client. The reported quantity-ahead includes both real market depth and Ghost market still in the queue, so the user's queue estimate is conservative by construction.
+
+User Visibility and Impact: To maintain a conservative, adversarial simulation, traders cannot see or trade against extra Ghost orders. If a trader submits a new maker order, it must queue behind any existing invisible Ghost makers at that price level. The core purpose of Ghost orders is to realistically increase queue wait times, heavily penalizing the trader for liquidity they previously absorbed.
+
+Taker Orders
+Users can actively cross the spread to take liquidity from the historical order book.
+
+Liquidity Consumption: The simulator ensures a user cannot double-dip historical liquidity. If a trader aggressively sweeps a level, the spread visibly widens, punishing overly aggressive sizing.
+
+Walking the Book: If a taker order's quantity exceeds the available liquidity at the best historical price level, the simulator natively walks the order book. It sweeps consecutive levels, accumulating distinct fills (and generating corresponding Taker Mask) until the requested quantity is entirely satisfied.
+
+Masked Liquidity: Every time a user takes historical liquidity, the system records the consumed volume into the per-side Taker Mask (_bidMask or _askMask). This quantity is removed (masked) from the historical state in all subsequent published depth, strictly enforcing liquidity conservation.
+
+Top-Down Peeling: The simulator processes masked taker liquidity strictly from the top of the book downwards. When masking consumed liquidity from the user, it peels volume starting directly from the best bid or ask, accurately simulating how aggressive sweeping degrades the top-of-book pricing.
+
+Mask Decay: Taker Mask is reduced dynamically whenever actual historical trades occur (subtracting the trade quantity from the side's Taker Mask balance). The simulator assumes the historical trade essentially "ate" the volume the user already took, allowing the book to gradually resynchronize with pristine historical data. Note this decay clock differs from Ghost decay, which runs on MBP activity rather than trades.
+
+Immediate Latency Impact: Taker fills are generated immediately upon crossing the historical spread, but the corresponding fill notifications are subjected to strict Exchange-to-NIC microsecond latency delays before reaching the strategy.
+
+User Visibility and Impact: The user explicitly sees the impact of their aggressive actions; any historical quantities they have taken are visibly removed from the order book published to them. This prevents strategies from backtesting against the assumption of infinite liquidity at the historical top-of-book.
+
+Ghost Lifecycle Summary
+
+  Event                                                          Effect on per-level Ghost
+  -------------------------------------------------------------  -----------------------------------------------------
+  Historical trade at user's level fills user quantity           += user_fill (via AddGhost)
+  Historical trade at less aggressive level consumes phantom     -= phantom_consumed (via ReduceGhost)
+  Cross-fill at user's level consumes market-side depth          -= consumed; opposing-side CrossMask += consumed
+  Any MBP delta anywhere in the book                             -= Ghost * |delta| / TotalMarketQuantity_snapshot
+  User maker order canceled or fully filled with Ghost > 0       Level marked for removal; QM retained until Ghost decays to zero
+
+Mask Lifecycle Summary
+
+  Event                                                          Effect on Mask
+  -------------------------------------------------------------  -----------------------------------------------------
+  User actively takes liquidity                                  Taker Mask on consumed side += fill_quantity
+  Cross-fill against user maker                                  Taker Mask on aggressor side += user_fill
+  Cross-fill consumes market-side depth at user's level          CrossMask on user's side += consumed
+  Historical trade on a side                                     Taker Mask on that side -= min(trade_quantity, mask)
+  Same-side MBP delta with CrossMask > 0                         CrossMask -= the Ghost-decay quantity at that QM

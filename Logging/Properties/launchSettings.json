@@ -1,0 +1,15 @@
+{
+  "profiles": {
+    "Logging": {
+      "commandName": "Project"
+    },
+    "Logging RivalServer (WSL)": {
+      "commandName": "WSL2",
+      "commandLineArgs": "Logging.dll /mnt/Z/Servers/Realtime/RivalServer/LoggingServer",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      },
+      "distributionName": "AlmaLinux-10"
+    }
+  }
+}

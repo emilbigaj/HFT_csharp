@@ -1,0 +1,43 @@
+==== README ===
+
+This is a HFT library. It is designed to run in Windows strictly for simulation only. When running in simulation latency and jitter is not of concern.
+
+In realtime mode it will be running colocated on an AlamaLinux-10 in CME DC3. In Realtime latency and jitter are of SUPREME IMPORTANCE. 
+
+The Server running this in Realtime Mode in DC3 has an AMD EPYC 9375f 32-core, 127 gb Ram, Solarflare NICs and highly optimized OS for pinning isolated cores without OS interrupts.
+
+
+
+Processes
+
+1. Algo Client process = Scenario → Strategy → Algo Client. This is the hot path. NO GC.
+2. Workspace = independent cold GC-happy process. In Realtime we start it separately so Avalonia's GC can't touch the hot path.
+3. LoggingServer = independent cold GC-happy process.
+
+
+Threads (inside the Algo Client process)
+
+Hot Thread: 1 client per process, 1 thread per client. This is the hot path.
+
+No allocs, no new, no strings no execption throwing hacks etc, Must be ultra optimized.
+If it throws, forget latency — shit has hit the fan, turn it off, debug, rebuild.
+Console.WriteLine you see here is debug only and will be removed before production.
+
+Cold Threads: anything started inside StartBackgroundThread.
+
+Don't worry about HFT techniques here.
+Must not alloc or new except in error states.
+
+
+
+Data Structures
+
+Single producer, multiple consumer by default.
+Unless it's got a MultiSeqWriter — then it's multi producer.
+
+
+MODES:
+Set by Clock
+
+Simulation => we want it to run fast so we get a quick backtest but obviously its not latenct critical
+Realtime => this is produciton mode, we want ultra low latency and jitter.

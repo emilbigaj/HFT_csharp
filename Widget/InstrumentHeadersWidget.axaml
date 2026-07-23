@@ -1,0 +1,61 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.InstrumentHeadersWidget"
+             x:DataType="local:WidgetInstrumentHeader">
+
+	<UserControl.Styles>
+		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+	</UserControl.Styles>
+	
+	<DataGrid x:Name="HeadersGrid"
+			  Background="Transparent"
+			  AutoGenerateColumns="False"
+			  IsReadOnly="True"
+			  GridLinesVisibility="All"
+			  BorderThickness="1"
+			  BorderBrush="Gray"
+			  RowBackground="White"
+			  HeadersVisibility="Column">
+
+
+		<DataGrid.Styles>
+			<Style Selector="DataGridRow:nth-child(2n)">
+				<Setter Property="Background" Value="#F0F0F0" />
+			</Style>
+		</DataGrid.Styles>
+
+		<DataGrid.ContextMenu>
+			<ContextMenu Opened="OnContextMenuOpened" />
+		</DataGrid.ContextMenu>
+
+		<DataGrid.Columns>
+			<DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" />
+			<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" />
+			<DataGridTextColumn Header="InstrumentType" Binding="{Binding InstrumentType}" />
+			<DataGridTextColumn Header="CoreGroupId" Binding="{Binding CoreGroupId}" />
+			<DataGridTextColumn Header="InstrumentHeaderId" Binding="{Binding InstrumentHeaderId}" />
+			<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentIdStr}" />
+			<DataGridTextColumn Header="Exchange" Binding="{Binding Exchange}" />
+			<DataGridTextColumn Header="Root" Binding="{Binding Root}" />
+			<DataGridTextColumn Header="TradingStatus" Binding="{Binding TradingStatus}" />
+
+			<DataGridTextColumn Header="TickSize" Binding="{Binding TickSize}" />
+			<DataGridTextColumn Header="InverseTickSize" Binding="{Binding InverseTickSize}" IsVisible="False" />
+
+			<DataGridTextColumn Header="Multiplier" Binding="{Binding Multiplier}" IsVisible="True" />
+			<DataGridTextColumn Header="ExpiryDate" Binding="{Binding ExpiryDateStr}" IsVisible="False" />
+			<DataGridTextColumn Header="ExpiryType" Binding="{Binding ExpiryType}" IsVisible="False" />
+
+			<DataGridTextColumn Header="LongExpiryDate" Binding="{Binding LongExpiryDateStr}" IsVisible="False" />
+			<DataGridTextColumn Header="LongExpiryType" Binding="{Binding LongExpiryType}" IsVisible="False" />
+			<DataGridTextColumn Header="ShortExpiryDate" Binding="{Binding ShortExpiryDateStr}" IsVisible="False" />
+			<DataGridTextColumn Header="ShortExpiryType" Binding="{Binding ShortExpiryType}" IsVisible="False" />
+			<DataGridTextColumn Header="LongInstrumentId" Binding="{Binding LongInstrumentId}" IsVisible="False" />
+			<DataGridTextColumn Header="ShortInstrumentId" Binding="{Binding ShortInstrumentId}" IsVisible="False" />
+
+			<DataGridTextColumn Header="BaseCurrency" Binding="{Binding BaseCurrency}" IsVisible="False" />
+			<DataGridTextColumn Header="QuoteCurrency" Binding="{Binding QuoteCurrency}" IsVisible="False" />
+		</DataGrid.Columns>
+	</DataGrid>
+</UserControl>

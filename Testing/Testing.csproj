@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<Import Project="..\HFT.targets" />
+
+
+	<ItemGroup>
+		<ProjectReference Include="..\Chart\Chart.csproj" />
+		<ProjectReference Include="..\Data\Data.csproj" />
+		<ProjectReference Include="..\Logging\Logging.csproj" />
+		<ProjectReference Include="..\Provider\Provider.csproj" />
+		<ProjectReference Include="..\Simulator\Simulator.csproj" />
+		<ProjectReference Include="..\Tools\Tools.csproj" />
+		<ProjectReference Include="..\Widget\Widget.csproj" />
+		<ProjectReference Include="..\Workspace\Workspace.csproj" />
+		<ProjectReference Include="..\Strategy\Strategy.csproj" />
+	</ItemGroup>
+
+</Project>

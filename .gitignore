@@ -1,0 +1,26 @@
+# ---- Build output ----
+[Bb]in/
+[Oo]bj/
+deploy_stage/
+*.dll
+*.exe
+*.pdb
+
+# ---- Visual Studio / IDE ----
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.lscache
+.idea/
+
+# ---- Claude Code (local machine settings only) ----
+.claude/settings.local.json
+
+# ---- OS ----
+Thumbs.db
+.DS_Store
+
+# ---- Local runtime data / logs ----
+*.log

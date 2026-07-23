@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "Testing": {
+      "commandName": "Project"
+    },
+    "Testing (WSL)": {
+      "commandName": "WSL2",
+      "distributionName": "AlmaLinux-10"
+    }
+  }
+}

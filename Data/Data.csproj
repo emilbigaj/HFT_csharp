@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<Import Project="..\HFT.targets" />
+
+	<ItemGroup>
+	  <PackageReference Include="ZstdSharp.Port" Version="0.8.7" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <ProjectReference Include="..\Socket\Socket.csproj" />
+	  <ProjectReference Include="..\Tools\Tools.csproj" />
+	</ItemGroup>
+
+
+
+</Project>

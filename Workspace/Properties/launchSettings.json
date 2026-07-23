@@ -1,0 +1,42 @@
+{
+  "profiles": {
+    "Workspace ROC Server": {
+      "commandName": "Project",
+      "commandLineArgs": "-s ROCServer -m Simulation"
+    },
+    "Workspace ROC Client": {
+      "commandName": "Project",
+      "commandLineArgs": "-s ROCServer_Web -m Simulation -c ROCClient"
+    },
+    "Workspace Proxy Server (WSL)": {
+      "commandName": "WSL2",
+      "commandLineArgs": "Workspace.dll -s Proxy -m Simulation",
+      "distributionName": "AlmaLinux-10"
+    },
+    "Workspace Proxy Client (WSL)": {
+      "commandName": "WSL2",
+      "commandLineArgs": "Workspace.dll -s Proxy -c Proxy -m Simulation",
+      "distributionName": "AlmaLinux-10"
+    },
+    "Workspace RivalClient (WSL)": {
+      "commandName": "WSL2",
+      "commandLineArgs": "Workspace.dll -s RivalServer -c RivalClient -m Realtime",
+      "distributionName": "AlmaLinux-10"
+    },
+    "Workspace RivalServer (WSL)": {
+      "commandName": "WSL2",
+      "commandLineArgs": "Workspace.dll -s RivalServer -m Realtime",
+      "distributionName": "AlmaLinux-10"
+    },
+    "Workspace ROCClient (WSL)": {
+      "commandName": "WSL2",
+      "commandLineArgs": "Workspace.dll -s ROCServer -c ROCClient -m Realtime",
+      "distributionName": "AlmaLinux-10"
+    },
+    "Workspace ROCServer (WSL)": {
+      "commandName": "WSL2",
+      "commandLineArgs": "Workspace.dll -s ROCServer -m Realtime",
+      "distributionName": "AlmaLinux-10"
+    }
+  }
+  }

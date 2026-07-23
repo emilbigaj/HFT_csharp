@@ -1,0 +1,28 @@
+﻿<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:chart="clr-namespace:Chart;assembly=Chart"
+             x:Class="Widget.ChartWidget">
+	
+    <UserControl.ContextMenu>
+        <ContextMenu>
+            <MenuItem Header="Add Chart" Click="OnAddChartClick"/>
+            <MenuItem Header="Remove Chart" Click="OnRemoveChartClick"/>
+            <Separator/>
+            <MenuItem Header="Add Series..." Click="OnAddSeriesClick"/>
+            <MenuItem Header="Remove Series..." Click="OnRemoveSeriesClick"/>
+        </ContextMenu>
+    </UserControl.ContextMenu>
+
+    <Border Background="#FFFFFFFF" Padding="0">
+        <Grid>
+            <chart:ChartControl x:Name="ChartControlHost"/>
+            <TextBlock x:Name="EmptyLabel"
+                       Text="Right-click to add charts"
+                       Foreground="#FF808080"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       IsHitTestVisible="False"
+                       IsVisible="True"/>
+        </Grid>
+    </Border>
+</UserControl>

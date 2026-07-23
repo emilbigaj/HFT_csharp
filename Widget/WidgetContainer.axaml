@@ -1,0 +1,82 @@
+﻿<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.WidgetContainer">
+	<Border x:Name="RootBorder"
+            Background="White"
+            BorderBrush="#808080"
+            BorderThickness="2"
+            CornerRadius="8"
+            BoxShadow="0 4 10 0 #40000000">
+		<Grid>
+			<Grid.RowDefinitions>
+				<RowDefinition Height="32"/>
+				<RowDefinition Height="*"/>
+			</Grid.RowDefinitions>
+
+			<Border x:Name="TitleBar"
+                    Grid.Row="0"
+                    Background="#F3F3F3"
+                    CornerRadius="5,5,0,0"
+                    Padding="10,0,0,0">
+				<Grid>
+					<Grid.ColumnDefinitions>
+						<ColumnDefinition Width="Auto"/>
+						<ColumnDefinition Width="*"/>
+						<ColumnDefinition Width="32"/>
+						<ColumnDefinition Width="32"/>
+					</Grid.ColumnDefinitions>
+
+					<TextBlock x:Name="TitleText"
+                               Grid.Column="0"
+                               VerticalAlignment="Center"
+                               FontWeight="SemiBold"
+                               FontSize="12"
+                               Foreground="#333333"
+                               TextTrimming="CharacterEllipsis"
+                               IsHitTestVisible="False"/>
+
+					<ContentPresenter Grid.Column="1"
+                                      Margin="16,0,0,0"
+                                      Content="{Binding $parent[local:WidgetContainer].Widget.TitleBarContent}"
+                                      VerticalAlignment="Center"
+                                      HorizontalAlignment="Left"/>
+
+					<Button x:Name="MinimizeButton"
+                            Grid.Column="2"
+                            Width="32"
+                            Height="32"
+                            Content="—"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            HorizontalContentAlignment="Center"
+                            VerticalContentAlignment="Center"
+                            Padding="0,0,0,8"/>
+
+					<Button x:Name="CloseButton"
+                            Grid.Column="3"
+                            Width="32"
+                            Height="32"
+                            Content="✕"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            CornerRadius="0,5,0,0"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            HorizontalContentAlignment="Center"
+                            VerticalContentAlignment="Center"
+                            Padding="0"/>
+				</Grid>
+			</Border>
+
+			<Border Grid.Row="1"
+                    Background="White"
+                    CornerRadius="0,0,5,5"
+                    ClipToBounds="True">
+				<ContentPresenter x:Name="PART_ContentPresenter" Margin="0"/>
+			</Border>
+		</Grid>
+	</Border>
+</UserControl>

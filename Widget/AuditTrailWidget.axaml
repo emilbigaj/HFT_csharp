@@ -1,0 +1,63 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.AuditTrailWidget"
+             x:DataType="local:WidgetOrderAudit">
+
+	<UserControl.Resources>
+		<local:SideToBrushConverter x:Key="SideToBrushConverter"/>
+	</UserControl.Resources>
+
+	<UserControl.Styles>
+		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+		<Style Selector="DataGridRow">
+			<Setter Property="Background" Value="{Binding Side, Converter={StaticResource SideToBrushConverter}}"/>
+		</Style>
+	</UserControl.Styles>
+
+	<Grid>
+		<!-- 
+             Background="Transparent" is critical for hit-testing empty areas 
+             to trigger the Context Menu.
+        -->
+		<DataGrid x:Name="AuditGrid"
+                  Background="Transparent"
+                  ScrollViewer.VerticalScrollBarVisibility="Visible"
+                  ScrollViewer.HorizontalScrollBarVisibility="Visible"
+                  ScrollViewer.AllowAutoHide="False"
+				  VerticalScroll="OnScrollChanged"
+                  AutoGenerateColumns="False"
+                  CanUserSortColumns="False"
+                  CanUserResizeColumns="True"
+                  CanUserReorderColumns="True"
+                  IsReadOnly="True"
+                  GridLinesVisibility="All"
+                  HeadersVisibility="Column"
+                  RowHeight="24">
+
+			<DataGrid.ContextMenu>
+				<ContextMenu x:Name="GridMenu" Opened="OnContextMenuOpened"/>
+			</DataGrid.ContextMenu>
+
+			<DataGrid.Columns>
+				<DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" Width="Auto"/>
+				<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" Width="Auto" IsVisible="False"/>
+				<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentId}" IsVisible="False" Width="Auto"/>
+				<DataGridTextColumn Header="ClientOrderId" Binding="{Binding ClientOrderId}" Width="Auto"/>
+				<DataGridTextColumn Header="Seq" Binding="{Binding Seq}" Width="Auto"/>
+				<DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="Auto"/>
+				<DataGridTextColumn Header="Type" Binding="{Binding OrderTypeName}" Width="Auto"/>
+				<DataGridTextColumn Header="Action" Binding="{Binding ActionName}" Width="Auto"/>
+				<DataGridTextColumn Header="Side" Binding="{Binding Side}" Width="Auto"  IsVisible="False"/>
+				<DataGridTextColumn Header="Price" Binding="{Binding PriceStr}" Width="Auto"/>
+				<DataGridTextColumn Header="Ticks" Binding="{Binding Ticks}" Width="Auto"  IsVisible="False"/>
+				<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity}" Width="Auto"/>
+				<DataGridTextColumn Header="Working" Binding="{Binding WorkingQuantity}" Width="Auto"/>
+				<DataGridTextColumn Header="Filled" Binding="{Binding QuantityFilled}" Width="Auto"/>
+				<DataGridTextColumn Header="Timestamp" Binding="{Binding Timestamp}" Width="Auto"/>
+				<DataGridTextColumn Header="ExchangeTimestamp" Binding="{Binding ExchangeTimestamp}" Width="Auto"/>
+				<DataGridTextColumn Header="NicTimestamp" Binding="{Binding NicTimestamp}" Width="Auto"/>
+			</DataGrid.Columns>
+		</DataGrid>
+	</Grid>
+</UserControl>

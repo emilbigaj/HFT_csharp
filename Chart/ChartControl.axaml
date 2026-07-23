@@ -1,0 +1,62 @@
+﻿<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Chart"
+             x:Class="Chart.ChartControl"
+             Background="White"
+             Margin="0">
+  <Grid Margin="0" ClipToBounds="True">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="20"/>
+    </Grid.RowDefinitions>
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="*"/>
+      <ColumnDefinition Width="20"/>
+    </Grid.ColumnDefinitions>
+
+    <Border Grid.Row="0" Grid.ColumnSpan="2" Height="28"
+            Background="{DynamicResource ThemeBackgroundBrush}"
+            x:Name="TopChrome"
+            IsVisible="False">
+      <TextBlock Text="tabs will go here later" Margin="8,6,8,6"/>
+    </Border>
+
+    <Grid Grid.Row="1" Grid.Column="0" Margin="0" ClipToBounds="True">
+      <local:ChartRender x:Name="Plot"/>
+      <local:ChartCrosshairOverlay x:Name="Overlay" IsHitTestVisible="False"/>
+    </Grid>
+
+    <ScrollBar x:Name="VBar"
+               Grid.Row="1"
+               Grid.Column="1"
+               Orientation="Vertical"
+               Minimum="0"
+               Maximum="1"
+               ViewportSize="1"
+               Margin="0"
+               Width="20"
+               Background="#e0e0e0"
+               Foreground="#606060"
+               Visibility="Visible"
+               Opacity="1"
+               AllowAutoHide="False"
+               Focusable="False"/>
+
+    <ScrollBar x:Name="HBar"
+               Grid.Row="2"
+               Grid.ColumnSpan="2"
+               Orientation="Horizontal"
+               Minimum="0"
+               Maximum="1"
+               ViewportSize="1"
+               Margin="0"
+               Height="20"
+               Background="#e0e0e0"
+               Foreground="#606060"
+               Visibility="Visible"
+               Opacity="1"
+               AllowAutoHide="False"
+               Focusable="False"/>
+  </Grid>
+</UserControl>

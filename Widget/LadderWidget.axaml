@@ -1,0 +1,65 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.LadderWidget">
+
+	<UserControl.Styles>
+		<Style Selector="ToggleButton.LockBtn">
+			<Setter Property="Background" Value="#E0E0E0"/>
+			<Setter Property="Foreground" Value="#505050"/>
+			<Setter Property="BorderThickness" Value="0"/>
+			<Setter Property="CornerRadius" Value="3"/>
+		</Style>
+		<Style Selector="ToggleButton.LockBtn:checked /template/ ContentPresenter#PART_ContentPresenter">
+			<Setter Property="Background" Value="#505050"/>
+			<Setter Property="Foreground" Value="#E0E0E0"/>
+		</Style>
+		<Style Selector="ToggleButton.LockBtn:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+			<Setter Property="Background" Value="#D0D0D0"/>
+			<Setter Property="Foreground" Value="#505050"/>
+		</Style>
+		<Style Selector="ToggleButton.LockBtn:checked:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+			<Setter Property="Background" Value="#606060"/>
+			<Setter Property="Foreground" Value="#E0E0E0"/>
+		</Style>
+	</UserControl.Styles>
+
+	<Grid RowDefinitions="Auto,*">
+		<!-- Added PointerPressed handler to the Header Border -->
+		<Border Grid.Row="0"
+                Padding="5"
+                Background="#FAFAFA"
+                BorderBrush="#E0E0E0"
+                BorderThickness="0,0,0,1"
+                PointerPressed="OnHeaderPointerPressed">
+
+			<Grid>
+				<StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+					<TextBlock x:Name="PositionText" Foreground="Black" Text="Pos: "/>
+					<TextBlock x:Name="PositionValue" Foreground="Black" Text="0" FontWeight="Bold" />
+					<TextBlock x:Name="PnLText" Foreground="Black" Text="   PnL:" />
+					<TextBlock x:Name="PnLValue" Foreground="Black" Text="0.00" FontWeight="Bold" />
+				</StackPanel>
+
+				<ToggleButton x:Name="LockButton" Classes="LockBtn"
+                              HorizontalAlignment="Right" VerticalAlignment="Top"
+                              Margin="0,0,5,0" Padding="0" Width="30" Height="26"
+                              Content="➖" FontWeight="Bold"
+                              ToolTip.Tip="Lock Ladder Center"
+                              IsCheckedChanged="OnLockCenterChanged"
+                              HorizontalContentAlignment="Center"
+                              VerticalContentAlignment="Center"/>
+			</Grid>
+		</Border>
+
+		<ScrollViewer Grid.Row="1"
+                      x:Name="LadderScroller"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+			<local:FastLadderControl x:Name="LadderControl"
+                                     HorizontalAlignment="Stretch"
+                                     VerticalAlignment="Top"/>
+		</ScrollViewer>
+
+	</Grid>
+</UserControl>

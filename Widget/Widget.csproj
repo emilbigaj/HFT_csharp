@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<Import Project="..\HFT.targets" />
+
+	<Import Project="..\GUI.targets" />
+	
+    <ItemGroup>
+        <ProjectReference Include="..\Data\Data.csproj" />
+        <ProjectReference Include="..\Tools\Tools.csproj" />
+        <ProjectReference Include="..\Chart\Chart.csproj" />
+        <ProjectReference Include="..\Provider\Provider.csproj" />
+
+    </ItemGroup>
+
+
+</Project>

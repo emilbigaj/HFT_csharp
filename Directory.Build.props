@@ -1,0 +1,8 @@
+<Project>
+	<PropertyGroup>
+		<BaseIntermediateOutputPath Condition="'$(WSL_BUILD)' == 'true'">$(MSBuildThisFileDirectory)deploy_stage/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+		<BaseOutputPath Condition="'$(WSL_BUILD)' == 'true'">$(MSBuildThisFileDirectory)deploy_stage/bin/$(MSBuildProjectName)/</BaseOutputPath>
+		
+		<DefaultItemExcludes Condition="'$(WSL_BUILD)' == 'true'">$(DefaultItemExcludes);**/obj/**;**/bin/**</DefaultItemExcludes>
+	</PropertyGroup>
+</Project>

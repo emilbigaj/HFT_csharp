@@ -1,0 +1,25 @@
+﻿<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:chart="clr-namespace:Chart;assembly=Chart"
+        x:Class="Widget.RemoveSeriesDialog"
+        Title="Remove Series"
+        Width="300" Height="400"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+	
+	
+    <Grid Margin="10" RowDefinitions="*,Auto">
+        <ListBox x:Name="SeriesList" Grid.Row="0" SelectionMode="Multiple,Toggle">
+            <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="chart:ISeries">
+                    <TextBlock Text="{Binding Name}"/>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+        
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10" Margin="0,10,0,0">
+            <Button Content="Cancel" Click="OnCancelClick"/>
+            <Button Content="Remove" Click="OnRemoveClick" Classes="accent"/>
+        </StackPanel>
+    </Grid>
+</Window>

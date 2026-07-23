@@ -1,0 +1,99 @@
+﻿<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.PositionsWidget"
+             x:DataType="local:WidgetPosition">
+	<UserControl.Resources>
+		<local:PnLToBrushConverter x:Key="PnLConverter"/>
+		<local:SideToBrushConverter x:Key="SideToBrushConverter"/>
+
+		<StackPanel x:Key="TitleBarButtons" Orientation="Horizontal" Spacing="4" Margin="16,0,0,0">
+			<Button Content="▶" FontFamily="Segoe UI Emoji" FontSize="19" Width="28" Height="28" Padding="0"
+					HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+					ToolTip.Tip="Resume All Algos" ToolTip.ShowDelay="1000" Click="OnResumeAllClick" />
+			<Button Content="⏸" FontFamily="Segoe UI Emoji" FontSize="19" Width="28" Height="28" Padding="0"
+					HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+					ToolTip.Tip="Pause All Algos" ToolTip.ShowDelay="1000" Click="OnPauseAllClick" />
+		</StackPanel>
+		
+	</UserControl.Resources>
+	<UserControl.Styles>
+		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+		<Style Selector="DataGridRow">
+			<Setter Property="Background" Value="{Binding Side, Converter={StaticResource SideToBrushConverter}}"/>
+		</Style>
+	</UserControl.Styles>
+	<Grid>
+		<DataGrid x:Name="PositionsGrid"
+				  x:DataType="local:PositionsWidget"
+                  ScrollViewer.VerticalScrollBarVisibility="Visible"
+                  ScrollViewer.HorizontalScrollBarVisibility="Visible"
+                  ScrollViewer.AllowAutoHide="False"
+                  MinColumnWidth="80"
+                  ItemsSource="{Binding Rows}"
+                  AutoGenerateColumns="False"
+                  CanUserSortColumns="True"
+                  CanUserResizeColumns="True"
+                  CanUserReorderColumns="True"
+                  IsReadOnly="True"
+                  GridLinesVisibility="All"
+                  HeadersVisibility="Column"
+                  RowHeight="24">
+			<DataGrid.ContextMenu>
+				<ContextMenu x:Name="GridMenu" Opened="OnContextMenuOpened"/>
+			</DataGrid.ContextMenu>
+			<DataGrid.Columns>
+				<DataGridTextColumn Header="StrategyId" Binding="{Binding StrategyId}" Width="Auto" IsVisible="False"/>
+				<DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" Width="Auto"/>
+				<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" Width="Auto" IsVisible="False"/>
+				<DataGridTextColumn Header ="AlgoStatus" Binding="{Binding AlgoStatus}" Width ="Auto"/>
+				<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentId}" IsVisible="False" Width="Auto"/>
+				<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity}" Width="Auto"/>
+				<DataGridTextColumn Header="AvgPrice" Binding="{Binding AvgPriceStr}" Width="Auto"/>
+				<DataGridTemplateColumn Header="Profit" SortMemberPath="Profit" Width="Auto">
+					<DataGridTemplateColumn.CellTemplate>
+						<DataTemplate>
+							<Grid>
+								<Border Background="White"/>
+								<Border Background="{Binding Profit, Converter={StaticResource PnLConverter}}"
+                                        HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+									<TextBlock Text="{Binding Profit, StringFormat={}{0:N2}}"
+                                               VerticalAlignment="Center" HorizontalAlignment="Left" Margin="4,0"/>
+								</Border>
+							</Grid>
+						</DataTemplate>
+					</DataGridTemplateColumn.CellTemplate>
+				</DataGridTemplateColumn>
+				<DataGridTemplateColumn Header="Realized" SortMemberPath="Realized" Width="Auto">
+					<DataGridTemplateColumn.CellTemplate>
+						<DataTemplate>
+							<Grid>
+								<Border Background="White"/>
+								<Border Background="{Binding Realized, Converter={StaticResource PnLConverter}}"
+                                        HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+									<TextBlock Text="{Binding Realized, StringFormat={}{0:N2}}"
+                                               VerticalAlignment="Center" HorizontalAlignment="Left" Margin="4,0"/>
+								</Border>
+							</Grid>
+						</DataTemplate>
+					</DataGridTemplateColumn.CellTemplate>
+				</DataGridTemplateColumn>
+				<DataGridTemplateColumn Header="Floating" SortMemberPath="Floating" Width="Auto">
+					<DataGridTemplateColumn.CellTemplate>
+						<DataTemplate>
+							<Grid>
+								<Border Background="White"/>
+								<Border Background="{Binding Floating, Converter={StaticResource PnLConverter}}"
+                                        HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+									<TextBlock Text="{Binding Floating, StringFormat={}{0:N2}}"
+                                               VerticalAlignment="Center" HorizontalAlignment="Left" Margin="4,0"/>
+								</Border>
+							</Grid>
+						</DataTemplate>
+					</DataGridTemplateColumn.CellTemplate>
+				</DataGridTemplateColumn>
+				<DataGridTextColumn Header="QuantityTraded" Binding="{Binding QuantityTraded}" Width="Auto"/>
+			</DataGrid.Columns>
+		</DataGrid>
+	</Grid>
+</UserControl>

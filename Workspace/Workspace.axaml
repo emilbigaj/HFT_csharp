@@ -1,0 +1,64 @@
+﻿<Window
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="clr-namespace:Workspace"
+    x:Class="Workspace.Workspace"
+    Width="1400"
+    Height="900"
+    MinWidth="800"
+    MinHeight="600"
+    Title="Workspace">
+	<Grid>
+		<Grid.RowDefinitions>
+			<RowDefinition Height="Auto"/>
+			<RowDefinition Height="*"/>
+		</Grid.RowDefinitions>
+		<Border x:Name="TopBar" Grid.Row="0">
+			<DockPanel LastChildFill="False">
+				<Menu DockPanel.Dock="Left">
+					<MenuItem Header="_File">
+						<MenuItem Header="New Global Workspace" Click="OnNewGlobalWorkspaceClick"/>
+						<MenuItem Header="New Strategy Workspace..." Click="OnNewStrategyWorkspaceClick"/>
+						<Separator/>
+						<MenuItem Header="Extend Workspace" Click="OnExtendWorkspaceClick"/>
+						<Separator/>
+						<MenuItem Header="Open Workspace..." Click="OnOpenWorkspaceClick"/>
+						<MenuItem Header="Save Workspace" Click="OnSaveWorkspaceClick"/>
+						<MenuItem Header="Save Workspace As..." Click="OnSaveWorkspaceAsClick"/>
+						<Separator/>
+						<MenuItem x:Name="OpenDirectoryMenuItem" Header="Open Server Directory" Click="OnOpenContextDirectoryClick"/>
+						<Separator/>
+						<MenuItem Header="E_xit" Click="OnExitClick"/>
+					</MenuItem>
+					<MenuItem Header="_Mode">
+						<MenuItem x:Name="SimulationMenuItem" Header="Simulation" Click="OnSimulationModeClick"/>
+						<MenuItem x:Name="RealtimeMenuItem" Header="Realtime" Click="OnRealtimeModeClick"/>
+					</MenuItem>
+					<MenuItem Header="_Widgets">
+						<MenuItem Header="Instruments" Click="OnAddInstrumentHeadersWidgetClick"/>
+						<MenuItem Header="Chart" Click="OnAddChartWidgetClick"/>
+						<MenuItem Header="Ladder" Click="OnAddLadderWidgetClick"/>
+						<MenuItem Header="Fills" Click="OnAddFillsWidgetClick"/>
+						<MenuItem Header="Positions" Click="OnAddPositionsWidgetClick"/>
+						<MenuItem Header="Orders" Click="OnAddOrdersWidgetClick"/>
+						<MenuItem Header="Send Order" Click="OnAddSendOrderWidgetClick"/>
+						<MenuItem Header="Audit Trail" Click="OnAddAuditTrailWidgetClick"/>
+						<MenuItem Header="Risk Limits" Click="OnAddRiskLimitsWidgetClick"/>
+						<MenuItem Header="Message Efficiency" Click="OnAddMessageEfficiencyWidgetClick"/>
+					</MenuItem>
+				</Menu>
+				<TextBlock x:Name="TimestampText"
+							DockPanel.Dock="Right"
+							VerticalAlignment="Center"
+							Margin="0,0,10,0"
+							FontFamily="Consolas,Monospace"
+							FontWeight="Bold"
+							Foreground="Black"
+							Text="00:00:00.000"/>
+			</DockPanel>
+		</Border>
+		<Canvas x:Name="DockHost"
+				Grid.Row="1"
+				Background="#F0F0F0"/>
+	</Grid>
+</Window>

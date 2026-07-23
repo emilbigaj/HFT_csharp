@@ -1,0 +1,53 @@
+﻿<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.FillsWidget"
+             x:DataType="local:WidgetFill">
+
+	<UserControl.Resources>
+		<local:SideToBrushConverter x:Key="SideToBrushConverter"/>
+	</UserControl.Resources>
+
+	<UserControl.Styles>
+		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+		<Style Selector="DataGridRow">
+			<Setter Property="Background" Value="{Binding Side, Converter={StaticResource SideToBrushConverter}}"/>
+		</Style>
+	</UserControl.Styles>
+
+	<Grid>
+		<!-- Locked Sorting -->
+		<DataGrid x:Name="FillsGrid"
+                  ScrollViewer.VerticalScrollBarVisibility="Visible"
+                  ScrollViewer.HorizontalScrollBarVisibility="Visible"
+                  ScrollViewer.AllowAutoHide="False"
+				  VerticalScroll="OnScrollChanged"
+                  AutoGenerateColumns="False"
+                  CanUserSortColumns="False"
+                  CanUserResizeColumns="True"
+                  CanUserReorderColumns="True"
+                  IsReadOnly="True"
+                  GridLinesVisibility="All"
+                  HeadersVisibility="Column"
+                  RowHeight="24">
+
+			<DataGrid.ContextMenu>
+				<ContextMenu x:Name="GridMenu" Opened="OnContextMenuOpened"/>
+			</DataGrid.ContextMenu>
+
+			<DataGrid.Columns>
+				<DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" Width="Auto"/>
+				<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" Width="Auto" IsVisible="False"/>
+				<DataGridTextColumn Header="Side" Binding="{Binding Side}" Width="Auto"/>
+				<DataGridTextColumn Header="FillType" Binding="{Binding FillType}" Width="Auto"/>
+				<DataGridTextColumn Header="Ticks" Binding="{Binding Ticks}" Width="Auto"/>
+				<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity}" Width="Auto"/>
+				<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentId}" IsVisible="False" Width="Auto"/>
+				<DataGridTextColumn Header="OrderId" Binding="{Binding OrderId}" Width="Auto"/>
+				<DataGridTextColumn Header="FillId" Binding="{Binding FillId}" Width="Auto"/>
+				<DataGridTextColumn Header="ExchangeTime" Binding="{Binding ExchangeTimestamp}" Width="Auto"/>
+				<DataGridTextColumn Header="NicTime" Binding="{Binding NicTimestamp}" Width="Auto"/>
+			</DataGrid.Columns>
+		</DataGrid>
+	</Grid>
+</UserControl>

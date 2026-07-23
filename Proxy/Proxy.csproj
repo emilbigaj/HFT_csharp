@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<Import Project="..\HFT.targets" />
+
+
+	<ItemGroup>
+    <ProjectReference Include="..\Data\Data.csproj" />
+    <ProjectReference Include="..\Execution\Execution.csproj" />
+    <ProjectReference Include="..\Logging\Logging.csproj" />
+    <ProjectReference Include="..\Provider\Provider.csproj" />
+    <ProjectReference Include="..\Simulator\Simulator.csproj" />
+    <ProjectReference Include="..\Socket\Socket.csproj" />
+    <ProjectReference Include="..\Strategy\Strategy.csproj" />
+    <ProjectReference Include="..\Tools\Tools.csproj" />
+    <ProjectReference Include="..\Workspace\Workspace.csproj" />
+  </ItemGroup>
+
+</Project>

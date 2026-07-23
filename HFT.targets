@@ -1,0 +1,46 @@
+<Project>
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<IsAotCompatible>true</IsAotCompatible>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<NoWarn>$(NoWarn);CS0660;CS0661;CA1416</NoWarn>
+	</PropertyGroup>
+
+	<ItemGroup Condition="'$(ProjectName)' != 'Generator'">
+		<ProjectReference Include="$(MSBuildThisFileDirectory)Generator\Generator.csproj">
+			<ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+			<SkipGetTargetFrameworkProperties>true</SkipGetTargetFrameworkProperties>
+			<GlobalPropertiesToRemove>RuntimeIdentifier;PublishAot</GlobalPropertiesToRemove>
+		</ProjectReference>
+	</ItemGroup>
+
+	<Target Name="GenerateAotContext" BeforeTargets="CoreCompile" Condition="'$(ProjectName)' != 'Generator'">
+		<PropertyGroup>
+			<GeneratorExe>$(MSBuildThisFileDirectory)Generator\bin\$(Configuration)\$(TargetFramework)\Generator.dll</GeneratorExe>
+		</PropertyGroup>
+
+		<Exec Command="dotnet &quot;$(GeneratorExe)&quot; &quot;$(ProjectDir.TrimEnd('\/'))&quot; &quot;$(IntermediateOutputPath.TrimEnd('\/'))&quot; &quot;$(ProjectName)&quot;" />
+
+		<ItemGroup>
+			<Compile Include="$(IntermediateOutputPath)$(ProjectName)JsonContext.g.cs" Condition="Exists('$(IntermediateOutputPath)$(ProjectName)JsonContext.g.cs')" />
+		</ItemGroup>
+	</Target>
+
+	<PropertyGroup Condition="'$(Configuration)' == 'Release'">
+		<PublishAot>true</PublishAot>
+		<OptimizationPreference>Speed</OptimizationPreference>
+		<IlcInstructionSet>x86-64-v4</IlcInstructionSet>
+		<ValidateExecutableReferencesMatchSelfContained>false</ValidateExecutableReferencesMatchSelfContained>
+	</PropertyGroup>
+
+	<PropertyGroup>
+		<ServerGarbageCollection>false</ServerGarbageCollection>
+		<ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<RuntimeHostConfigurationOption Include="System.GC.RetainVM" Value="true" />
+	</ItemGroup>
+</Project>

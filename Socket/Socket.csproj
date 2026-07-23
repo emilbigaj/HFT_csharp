@@ -1,0 +1,10 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<Import Project="..\HFT.targets" />
+
+
+	<ItemGroup>
+		<ProjectReference Include="..\Tools\Tools.csproj" />
+	</ItemGroup>
+
+</Project>

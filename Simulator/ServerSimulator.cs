@@ -1,0 +1,1541 @@
+using Data;
+using Provider;
+using Socket;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using Tools;
+using Execution;
+using System.Buffers;
+using ZstdSharp.Unsafe;
+using System.IO;
+using System.Threading;
+using System.IO.Enumeration;
+using System;
+
+namespace Simulator;
+
+public class InstrumentSimulator
+{
+    public ExchangeSimulator ExchangeSimulator { get; }
+    protected OrderManager Buys { get; }
+    protected OrderManager Sells { get; }
+
+    public InstrumentDetails InstrumentDetails { get; }
+    public SessionManager? SessionManager { get; }
+
+    public bool IsInSession => SessionManager?.IsInSession ?? true;
+
+
+    public int _bidMask = 0;
+    public int _askMask = 0;
+    private MarketByPrice64 _marketByPrice64 = new MarketByPrice64();
+
+    public ref MarketByPrice64 MarketByPrice64 => ref _marketByPrice64;
+
+    public int InstrumentId { get; }
+
+    public InstrumentSimulator(ExchangeSimulator exchangeSimulator, InstrumentDetails instrumentDetails, int instrumentId)
+    {
+        ExchangeSimulator = exchangeSimulator;
+        InstrumentDetails = instrumentDetails;
+        InstrumentId = instrumentId;
+        _orderStates = new OrderState[ExchangeSimulator.ServerSimulator.ServerHeader.OrdersCapacity];
+        _minClientOrderId = new ulong[ExchangeSimulator.ServerSimulator.ServerHeader.ClientIds.Length];
+        Buys = new OrderManager(this, Side.Buy);
+        Sells = new OrderManager(this, Side.Sell);
+
+        if (instrumentDetails.Sessions.Length > 0)
+        {
+            SessionManager = new SessionManager(instrumentDetails.Sessions[0]);
+            SessionManager.Changed += instrument =>
+            {
+                if (!SessionManager.IsInSession)
+                {
+                    CancelAllOrders();
+                    Buys.Clear();
+                    Sells.Clear();
+                    _bidMask = 0;
+                    _askMask = 0;
+                    _minMaskBid = int.MaxValue;
+                    _maxMaskAsk = int.MinValue;
+                }
+            };
+        }
+
+
+    }
+
+    protected ulong _fillId { get; set; } = 0;
+
+    private int _minMaskBid = int.MaxValue;
+    private int _maxMaskAsk = int.MinValue;
+
+    private bool _inOnMarketByPrice = false;
+    public void OnMarketByPrice(in MarketByPrice mbp, ReadOnlySpan<byte> src)
+    {
+        _inOnMarketByPrice = true;
+        if (mbp.TickHeader.TickType == TickType.MarketByPriceSnapshot)
+        {
+            Span<byte> past = stackalloc byte[MarketByPrice.SizeOf(_marketByPrice64.BidsCount, _marketByPrice64.AsksCount)];
+            _marketByPrice64.CopyToSnapshot(InstrumentId, past);
+            ReadOnlySpan<byte> future = src;
+            int maxBidChanges = mbp.BidsCount + _marketByPrice64.BidsCount;
+            int maxAskChanges = mbp.AsksCount + _marketByPrice64.AsksCount;
+            int maxSize = MarketByPrice.SizeOf(maxBidChanges, maxAskChanges);
+            Span<byte> dst = stackalloc byte[maxSize];
+            ref readonly MarketByPrice update = ref MarketByPrice.SnapshotAsUpdate(past, future, dst);
+            dst = dst.Slice(0, update.SizeOf());
+            OnMarketByPriceUpdate(in update, dst);
+        }
+        else
+        {
+            OnMarketByPriceUpdate(in mbp, src);
+        }
+        _inOnMarketByPrice = false;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void OverwriteBid(ref StackList<Level> bids, Level bid)
+    {
+        for(int i = 0; i < bids.Count; i++)
+        {
+            if (bids[i].Ticks == bid.Ticks)
+            {
+                bids[i] = bid;
+                return;
+            }
+            else if (bids[i].Ticks < bid.Ticks) // larger bids go infront
+            {
+                bids.InsertAt(i, bid);
+                return;
+            }
+        }
+        bids.Add(bid);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void OverwriteAsk(ref StackList<Level> asks, Level ask)
+    {
+        for (int i = 0; i < asks.Count; i++)
+        {
+            if (asks[i].Ticks == ask.Ticks)
+            {
+                asks[i] = ask;
+                return;
+            }
+            else if (asks[i].Ticks > ask.Ticks) // smallers asks go infront
+            {
+                asks.InsertAt(i, ask);
+                return;
+            }
+        }
+        asks.Add(ask);
+    }
+
+    private void OnMarketByPriceUpdate(in MarketByPrice update, ReadOnlySpan<byte> src)
+    {
+        _marketByPrice64.ExchangeTimestamp = update.TickHeader.ExchangeTimestamp;
+
+        StackList<Level> _bids = new StackList<Level>(stackalloc Level[128]);
+        StackList<Level> _asks = new StackList<Level>(stackalloc Level[128]);
+
+        ReadOnlySpan<Level> marketAsks = update.AsksAsSpan(src);
+        foreach (Level ask in marketAsks)
+        {
+            _asks.Add(ask);
+            if (_marketByPrice64.TrySetAskQuantity(ask.Ticks, ask.Quantity, out int delta))
+            {
+                Sells.OnMarketByPriceDelta(ask.Ticks, delta);
+            }
+        }
+        ReadOnlySpan<Level> marketBids = update.BidsAsSpan(src);
+        foreach (Level bid in marketBids)
+        {
+            _bids.Add(bid);
+            if (_marketByPrice64.TrySetBidQuantity(bid.Ticks, bid.Quantity, out int delta))
+            {
+                Buys.OnMarketByPriceDelta(bid.Ticks, delta);
+            }
+        }
+
+       
+
+        if (_marketByPrice64.BidsCount > 10 || _marketByPrice64.AsksCount > 10)
+        {
+            //Console.WriteLine("Refiviniv data can not have more than 10 bids or asks!!");
+            //throw new InvalidOperationException("Refiviniv data can not have more than 10 bids or asks!!");
+
+        }
+
+        /// EXECUTE QUEUED ORDERS IF ASK CROSSES BID
+        /// loop through the book, and first mask off levels that have already been traded against. ie local mask = _mask
+        /// after masking off levels, if there is quantity left, execute against the level, and update _mask with any additional masking from this trade
+        /// Skip when the book is auction-locked/crossed (best bid >= best ask): the matching engine isn't running continuously,
+        /// so user orders must not be passively filled and mask must not accumulate every tick.
+
+        if (!_marketByPrice64.IsCrossed)
+        {
+            {
+                ref QueueManager firstBuys = ref Buys.QueueManagers.FirstRef;
+                int askMask = _askMask + Buys.CrossMask;
+                SideByPrice64.Enumerator asks = _marketByPrice64.Asks.GetEnumerator();
+                Level ask;
+                while (!Unsafe.IsNullRef(in firstBuys) && asks.MoveNext() && (ask = asks.Current).Ticks <= firstBuys.Ticks)
+                {
+                    int crossedQuantity = ask.Quantity;
+                    int askMasked = Math.Min(ask.Quantity, askMask);
+                    crossedQuantity -= askMasked;
+                    askMask = Math.Max(askMask - askMasked, 0);
+                    if (crossedQuantity <= 0)
+                        continue;
+                    int crossed = Buys.OnTrade(false, new Trade(InstrumentId, update.TickHeader.ExchangeTimestamp, update.TickHeader.SendingTimestamp, update.TickHeader.NicTimestamp, ask.Ticks, crossedQuantity, -1));
+                    if (ExchangeSimulator.MaskCrossed)
+                    {
+                        _askMask += crossed;
+                    }
+
+                    firstBuys = ref Buys.QueueManagers.FirstRef;
+                }
+            }
+            {
+                ref QueueManager firstSells = ref Sells.QueueManagers.FirstRef;
+                int bidMask = _bidMask + Sells.CrossMask;
+                var bids = _marketByPrice64.Bids.GetEnumerator();
+                Level bid;
+
+                while (!Unsafe.IsNullRef(in firstSells) && bids.MoveNext() && (bid = bids.Current).Ticks >= firstSells.Ticks)
+                {
+                    int crossedQuantity = bid.Quantity;
+                    int bidMasked = Math.Min(crossedQuantity, bidMask);
+                    crossedQuantity -= bidMasked;
+                    bidMask = Math.Max(bidMask - bidMasked, 0);
+                    if (crossedQuantity <= 0)
+                        continue;
+                    int crossed = Sells.OnTrade(false, new Trade(InstrumentId, update.TickHeader.ExchangeTimestamp, update.TickHeader.SendingTimestamp, update.TickHeader.NicTimestamp, bid.Ticks, crossedQuantity, +1));
+                    if (ExchangeSimulator.MaskCrossed)
+                    {
+                        _bidMask += crossed;
+                    }
+
+                    firstSells = ref Sells.QueueManagers.FirstRef;
+                }
+            }
+        }
+
+        /// RESTORE DEPTH AT PRICES WHERE USER ORDERS HAVE BEEN REMOVED
+        
+        foreach (int ticks in Buys.TicksRemoved)
+            OverwriteBid(ref _bids, new Level(ticks, _marketByPrice64.GetBidQuantity(ticks)));
+        Buys.TicksRemoved.Clear();
+
+        foreach (int ticks in Sells.TicksRemoved)
+            OverwriteAsk(ref _asks, new Level(ticks, _marketByPrice64.GetAskQuantity(ticks)));
+        Sells.TicksRemoved.Clear();
+
+        /// FIRST REMOVE MARKET DEPTH WITH MASKS TO CORRECT FOR WHEN WE HIT MARKET OR BIDS CROSSED ASKS
+        if (_bidMask > 0 || _minMaskBid < int.MaxValue)
+        {
+            int bidMask = _bidMask;
+            int minMaskBid = _minMaskBid;
+            var bids = _marketByPrice64.Bids.GetEnumerator();
+            Level bid;
+            while (bids.MoveNext() && ((bid = bids.Current).Ticks >= minMaskBid || bidMask > 0))
+            {
+                _minMaskBid = bidMask > 0 ? bid.Ticks : _minMaskBid;
+                int bidQuantity = bid.Quantity;
+                int bidMasked = Math.Min(bidQuantity, bidMask);
+                bidQuantity -= bidMasked;
+                bidMask -= bidMasked;
+                OverwriteBid(ref _bids, new Level(bid.Ticks, bidQuantity));
+            }
+            _minMaskBid = _bidMask == 0 ? int.MaxValue : _minMaskBid; // reset min mask bid
+        }
+
+        if (_askMask > 0 || _maxMaskAsk > int.MinValue)
+        {
+            int askMask = _askMask;
+            int maxMaskAsk = _maxMaskAsk;
+            var asks = _marketByPrice64.Asks.GetEnumerator();
+            Level ask;
+            while (asks.MoveNext() && ((ask = asks.Current).Ticks <= maxMaskAsk || askMask > 0))
+            {
+                _maxMaskAsk = askMask > 0 ? ask.Ticks : _maxMaskAsk;
+                int askQuantity = ask.Quantity;
+                int askMasked = Math.Min(askQuantity, askMask);
+                askQuantity -= askMasked;
+                askMask -= askMasked;
+                OverwriteAsk(ref _asks, new Level(ask.Ticks, askQuantity));
+            }
+            _maxMaskAsk = _askMask == 0 ? int.MinValue : _maxMaskAsk;
+        }
+
+        // --- BIDS ---
+        foreach (QueueManager queueManager in Buys.QueueManagers)
+        {
+            if (queueManager.UserQuantity == 0)
+                continue;
+
+            int adjustedQty = _marketByPrice64.GetBidQuantity(queueManager.Ticks);
+
+            // Find the mask-adjusted quantity from the list we just built
+            for (int i = 0; i < _bids.Count; i++)
+            {
+                if (_bids[i].Ticks == queueManager.Ticks)
+                {
+                    adjustedQty = _bids[i].Quantity;
+                    break;
+                }
+            }
+
+            // Add our UserQuantity to the ADJUSTED quantity
+            adjustedQty += queueManager.UserQuantity;
+             OverwriteBid(ref _bids, new Level(queueManager.Ticks, adjustedQty));
+        }
+
+        // --- ASKS ---
+        foreach (QueueManager queueManager in Sells.QueueManagers)
+        {
+            if (queueManager.UserQuantity == 0)
+                continue;
+            int adjustedQty = _marketByPrice64.GetAskQuantity(queueManager.Ticks);
+
+            // Find the mask-adjusted quantity from the list we just built
+            for (int i = 0; i < _asks.Count; i++)
+            {
+                if (_asks[i].Ticks == queueManager.Ticks)
+                {
+                    adjustedQty = _asks[i].Quantity;
+                    break;
+                }
+            }
+            // Add our UserQuantity to the Mask adjusted quantity
+            adjustedQty += queueManager.UserQuantity;
+            OverwriteAsk(ref _asks, new Level(queueManager.Ticks, adjustedQty));
+        }
+
+        FromExchangeToNic_MarketByPriceAggregatedUpdate(in update.TickHeader, _bids, _asks);
+
+    }
+
+
+    protected void FromExchangeToNic_MarketByPriceAggregatedUpdate(in TickHeader header, StackList<Level> bids, StackList<Level> asks)
+    {
+        Span<byte> span = stackalloc byte[MarketByPrice.SizeOf(bids.Count, asks.Count)];
+        ref MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(span);
+        mbp = new MarketByPrice(TickType.MarketByPriceUpdate, InstrumentId, header.ExchangeTimestamp, header.SendingTimestamp, header.NicTimestamp, bids.Count, asks.Count);
+        bids.AsSpan().CopyTo(mbp.BidsAsSpan(span));
+        asks.AsSpan().CopyTo(mbp.AsksAsSpan(span));
+        ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_MarketByPrice(ref mbp,span);
+    }
+
+    private bool IsOrderEmpty(in OrderState orderState) => orderState.OrderStateStatus == OrderStateStatus.Done || orderState.OrderHeader.OrderId == 0;
+
+    protected void CancelAllOrders()
+    {
+        foreach (ref OrderState orderState in _orderStates.AsSpan())
+        {
+            if (IsOrderEmpty(in orderState))
+                continue;
+
+            if (orderState.OrderHeader.OrderId == Debug.OrderId)
+            {
+                Console.WriteLine($"InstrumentExecutionSimulator.CancelAllOrders({orderState.OrderHeader.OrderId})");
+            }
+            OrderManager orderManager = orderState.OrderProfile.Side == Side.Buy ? Buys : Sells;
+            Delete(ref orderState, orderManager);
+        }
+    }
+
+    public void CancelAllOrders(int clientId)
+    {
+        foreach (ref OrderState orderState in _orderStates.AsSpan())
+        {
+            if (IsOrderEmpty(in orderState) || orderState.OrderHeader.OrderId.ClientId != clientId)
+                continue;
+
+            if (orderState.OrderHeader.OrderId == Debug.OrderId)
+            {
+                Console.WriteLine($"InstrumentExecutionSimulator.CancelAllOrders({orderState.OrderHeader.OrderId}, ClientId: {clientId})");
+            }
+            OrderManager orderManager = orderState.OrderProfile.Side == Side.Buy ? Buys : Sells;
+            Delete(ref orderState, orderManager);
+        }
+    }
+
+    public void OnTrade(ref Trade trade)
+    {
+        if (!IsInSession)
+            return;
+
+        ref int mask = ref (trade.Direction > 0 ? ref _askMask : ref _bidMask);
+        int oldMask = mask;
+        mask = Math.Max(0, mask - trade.Level.Quantity);
+
+        if (oldMask > 0)
+        {
+            UpdateMarketByPrice();
+        }
+
+        OrderManager orderManager = trade.Direction > 0 ? Sells : Buys;
+        orderManager.OnTrade(true, trade);
+    }
+
+
+
+    protected void UpdateMarketByPrice()
+    {
+        if (_inOnMarketByPrice)
+            return;
+
+        Span<byte> src = stackalloc byte[MarketByPrice.SizeOf(0, 0)];
+        ref MarketByPrice update = ref MemoryMarshal.AsRef<MarketByPrice>(src);
+        update = new MarketByPrice(TickType.MarketByPriceUpdate, InstrumentId, Clock.Now, Clock.Now, Clock.Now, 0, 0);
+        OnMarketByPrice(in update, src);
+    }
+
+
+
+
+
+    private void Take(ref OrderState orderState, OrderProfile orderProfile, ref int workingQuantity)
+    {
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"        ExecutionSimulator.Take(ClientOrderId: {orderState.OrderHeader.OrderId}, TargetTicks: {orderProfile.Ticks}, TargetQuantity: {orderProfile.Quantity}, WorkingQuantity: {workingQuantity})");
+        }
+        if (!_marketByPrice64.IsCrossed)
+            return;
+
+        int quantityTaken = 0;
+        int sign = Math.Sign(workingQuantity);
+        int signedTicks = orderProfile.Ticks * sign;
+        ref SideByPrice64 sideByPrice = ref _marketByPrice64.Asks;
+        ref int _mask = ref _askMask;
+        if (sign < 0)
+        {
+            _mask = ref _bidMask;
+            sideByPrice = ref _marketByPrice64.Bids;
+        }
+        int masked = 0;
+        SideByPrice64.Enumerator levels = sideByPrice.GetEnumerator();
+        Level level;
+        int maskCopy = _mask;
+        while (workingQuantity != 0 && levels.MoveNext() && signedTicks >= (level = levels.Current).Ticks * sign)
+        {
+            int levelQuantity = level.Quantity;
+            int maskedQuantity = Math.Min(level.Quantity, maskCopy - masked);
+            levelQuantity -= maskedQuantity;
+            masked += maskedQuantity;
+
+            if (levelQuantity > 0)
+            {
+                int fillQuantity = Math.Min(levelQuantity, Math.Abs(workingQuantity));
+                int signedFillQuantity = fillQuantity * sign;
+                quantityTaken += signedFillQuantity;
+
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"        ExecutionSimulator.Take.Fill({orderState.OrderHeader.OrderId}, {signedFillQuantity}, {level.Ticks})");
+                }
+
+                Update(ref orderState, orderProfile, signedFillQuantity);
+                ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, level.Ticks, signedFillQuantity, FillType.Taker);
+                workingQuantity -= signedFillQuantity;
+                if (ExchangeSimulator.MaskTaken)
+                    _mask += fillQuantity;
+            }
+        }
+    }
+
+
+    public void Make(ulong clientOrderId, int ticks, int quantityFilled)
+    {
+        if (clientOrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"            ExecutionSimulator.Make({clientOrderId}, {ticks}, {quantityFilled})");
+        }
+
+        ref OrderState orderState = ref TryGetOrderState(clientOrderId, out bool found);
+        if (!found)
+            throw new InvalidOperationException($"ExecutionSimulator({InstrumentDetails.Symbol}) can not Make Fill for ClientOrderId {clientOrderId}. GlobalOrderIndex is occupied by ClientOrderId {orderState.OrderHeader.OrderId}.");
+
+        Update(ref orderState, orderState.OrderProfile, quantityFilled);
+        ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, ticks, quantityFilled, FillType.Maker);
+    }
+
+    private readonly OrderState[] _orderStates;
+
+
+
+    // these need to update marketbyprice
+    private void Delete(ref OrderState orderState, OrderManager orderManager)
+    {
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"    ExecutionSimulator.Delete({orderState.OrderHeader.OrderId}, {orderState.OrderProfile.Ticks})");
+        }
+
+        orderManager.Delete(orderState.OrderHeader.OrderId, orderState.OrderProfile.Ticks);
+        Update(ref orderState, new OrderProfile(orderState.OrderProfile.Ticks, orderState.QuantityFilled), 0);
+    }
+
+    //try fill as taker
+    private void Enqueue(ref OrderState orderState, OrderManager orderManager, OrderProfile orderProfile)
+    {
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"    ExecutionSimulator.Enqueue(ClientOrderId: {orderState.OrderHeader.OrderId}, TargetTicks: {orderProfile.Ticks}, TargetQuantity: {orderProfile.Quantity})");
+        }
+        int workingQuantity = orderProfile.Quantity - orderState.QuantityFilled;
+        Take(ref orderState, orderProfile, ref workingQuantity);
+        if (workingQuantity != 0)
+        {
+            if (orderState.OrderHeader.OrderId == Debug.OrderId)
+            {
+                Console.WriteLine($"        ExecutionSimulator.Enqueue.Enqueue(WorkingQuantity: {workingQuantity})");
+            }
+            int quantityAhead = orderManager.Enqeue(orderState.OrderHeader.OrderId, orderProfile.Ticks, workingQuantity);
+            orderState.QuantityAhead = quantityAhead;
+            Update(ref orderState, orderProfile, 0);
+        }
+    }
+    private void Reduce(ref OrderState orderState, OrderManager orderManager, OrderProfile orderProfile)
+    {
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"    ExecutionSimulator.Reduce(ClientOrderId: {orderState.OrderHeader.OrderId}, StateQuantity: {orderState.OrderProfile.Quantity}, TargetQuantity: {orderProfile.Quantity})");
+        }
+
+        orderManager.Reduce(orderState.OrderHeader.OrderId, orderProfile.Ticks, orderProfile.Quantity - orderState.QuantityFilled);
+        Update(ref orderState, orderProfile, 0);
+    }
+
+    private void Reprice(ref OrderState orderState, OrderManager orderManager, OrderProfile orderProfile)
+    {
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"    ExecutionSimulator.Reprice(ClientOrderId: {orderState.OrderHeader.OrderId}, StateTicks: {orderState.OrderProfile.Ticks},  TargetTicks: {orderProfile.Ticks})");
+        }
+
+        orderManager.Delete(orderState.OrderHeader.OrderId, orderState.OrderProfile.Ticks);
+        Enqueue(ref orderState, orderManager, orderProfile);
+    }
+
+    private void Update(ref OrderState orderState, OrderProfile orderProfile, int quantityFilled)
+    {
+        if (orderState.OrderStateStatus == OrderStateStatus.Done)
+            throw new InvalidOperationException($"ExecutionSimulator({InstrumentDetails.Symbol}) can not update {orderState.OrderHeader.OrderId}. The order is alread done.");
+
+
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"        ExecutionSimulator.Update(ClientOrderId: {orderState.OrderHeader.OrderId}, Ticks: {orderProfile.Ticks}, Quantity: {orderProfile.Quantity}, QuantityFilled: {quantityFilled})");
+        }
+
+        orderState.OrderProfile = orderProfile;
+        orderState.QuantityFilled += quantityFilled;
+        orderState.OrderHeader.ExchangeTimestamp = Clock.Now;
+        if (orderState.OrderProfile.Quantity == orderState.QuantityFilled)
+        {
+            orderState.OrderStateStatus = OrderStateStatus.Done;
+            if (orderState.OrderHeader.OrderId == Debug.OrderId)
+            {
+                Console.WriteLine($"        ExecutionSimulator.Update.Done");
+            }
+        }
+        else
+        {
+            if (orderState.OrderHeader.OrderId == Debug.OrderId)
+            {
+                Console.WriteLine($"        ExecutionSimulator.Update.Active");
+            }
+            orderState.OrderStateStatus = OrderStateStatus.Active;
+        }
+        ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_OrderState(in orderState);
+        UpdateMarketByPrice();
+    }
+
+    private ref OrderState TryGetOrderState(ulong clientOrderId, out bool found)
+    {
+        int globalOrderIndex = OrderIdAllocator.GetGlobalIndex(clientOrderId);
+        ref OrderState orderState = ref _orderStates[globalOrderIndex];
+        found = clientOrderId == orderState.OrderHeader.OrderId && orderState.OrderStateStatus == OrderStateStatus.Active;
+        return ref orderState;
+    }
+
+    private ulong[] _minClientOrderId;
+    public OrderState Target(in OrderTarget orderTarget, out Bitset64 orderRejectedReasons)
+    {
+        if (orderTarget.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"ExecutionSimulator.Target(ClientOrderId: {orderTarget.OrderHeader.OrderId}, Client: {orderTarget.OrderHeader.OrderId.ClientId}, Action:{orderTarget.OrderTargetAction}, Seq: {orderTarget.OrderHeader.Seq}, Ticks: {orderTarget.OrderProfile.Ticks}, Quantity: {orderTarget.OrderProfile.Quantity})");
+        }
+        ref OrderState orderState = ref TryGetOrderState(orderTarget.OrderHeader.OrderId, out bool found);
+
+        OrderProfile targetProfile = orderTarget.OrderProfile;
+        orderRejectedReasons = new Bitset64();
+
+        if (found)
+        {
+            if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
+            {
+                throw new Exception("Can not create a found order!");
+            }
+
+
+
+            if (orderState.OrderHeader.OrderId == Debug.OrderId)
+            {
+                Console.WriteLine($"ExecutionSimulator.Target.Found");
+            }
+
+            if (orderState.OrderHeader.Seq >= orderTarget.OrderHeader.Seq)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(InvalidSeq)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.SeqOutOfOrder);
+            }
+
+
+            orderState.OrderHeader.Seq = orderTarget.OrderHeader.Seq;
+
+            if (!IsInSession)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(Closed)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.NotInSession);
+            }
+
+            if (orderState.OrderHeader.OrderId.StrategyId != orderTarget.OrderHeader.OrderId.StrategyId)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(InvalidStrategy)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.StrategyIdNotValid);
+            }
+
+            if (orderState.OrderHeader.OrderId.InstrumentId != InstrumentId)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(InstrumentMismatch)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.InstrumentIdNotValid);
+            }
+
+            OrderManager orderManager = orderState.OrderProfile.Side == Side.Sell ? Sells : Buys;
+            OrderProfile stateProfile = orderState.OrderProfile;
+
+            // Just cancel and skip other checks
+            if (orderTarget.OrderTargetAction == OrderTargetAction.Cancel || targetProfile.Quantity == orderState.QuantityFilled)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(Delete)");
+                }
+                Delete(ref orderState, orderManager);
+                return orderState;
+            }
+
+            //orderTargetAction == Amend
+
+
+            if (stateProfile == targetProfile)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(TargetIsActive)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.TargetIsActive);
+            }
+
+            if (stateProfile.Side != targetProfile.Side)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(InvalidOrderProfile)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.SideNotValid);
+            }
+
+            if (targetProfile.Sign * (targetProfile.Quantity - orderState.QuantityFilled) < 0)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(InvalidOrderProfile)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.QuantityNotValid);
+            }
+
+
+
+            if (!orderRejectedReasons.IsEmpty)
+                return orderState;
+
+
+
+            int quantityDelta = targetProfile.Sign * (targetProfile.Quantity - stateProfile.Quantity);
+
+            if (quantityDelta > 0 || targetProfile.Ticks != stateProfile.Ticks)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(Reprice)");
+                }
+                Reprice(ref orderState, orderManager, targetProfile);
+                return orderState;
+            }
+
+            if (quantityDelta < 0)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Found(Reduce)");
+                }
+                Reduce(ref orderState, orderManager, targetProfile);
+                return orderState;
+            }
+
+            throw new InvalidOperationException("Unreachable code");
+        }
+        else
+        {
+            if (!IsOrderEmpty(in orderState) && orderTarget.OrderTargetAction == OrderTargetAction.Create)
+                throw new InvalidOperationException($"ExecutionSimulator({InstrumentDetails.Symbol}) can not Create New OrderState for ClientOrderId {orderTarget.OrderHeader.OrderId}. GlobalOrderIndex is occupied by ClientOrderId {orderState.OrderHeader.OrderId}.");
+
+            if (orderTarget.OrderHeader.OrderId == Debug.OrderId)
+            {
+                Console.WriteLine($"ExecutionSimulator.Target.Missed");
+            }
+
+            if (!IsInSession)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Missed(ExchangeIsClosed)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.NotInSession);
+            }
+
+            if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
+            {
+                ref ulong minClientOrderId = ref _minClientOrderId[orderTarget.OrderHeader.OrderId.ClientId];
+                if (orderTarget.OrderHeader.OrderId <= minClientOrderId)
+                {
+                    if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                    {
+                        Console.WriteLine($"ExecutionSimulator.Target.Missed(DuplicateOrderId)");
+                    }
+                    orderRejectedReasons.Set((int)OrderRejectedReason.ClientOrderIdOutOfOrder);
+                }
+                minClientOrderId = Math.Max(minClientOrderId, orderTarget.OrderHeader.OrderId);
+
+            }
+            else
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Missed(OrderNotFound)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.OrderNotFound);
+            }
+
+
+            if (targetProfile.Quantity == 0)
+            {
+                if (orderState.OrderHeader.OrderId == Debug.OrderId)
+                {
+                    Console.WriteLine($"ExecutionSimulator.Target.Missed(InvalidOrderProfile)");
+                }
+                orderRejectedReasons.Set((int)OrderRejectedReason.QuantityNotValid);
+                orderRejectedReasons.Set((int)OrderRejectedReason.SideNotValid);
+            }
+
+            if (!orderRejectedReasons.IsEmpty)
+                return orderState;
+
+            OrderManager orderManager = targetProfile.Side == Side.Sell ? Sells : Buys;
+            // Init OrderState 
+            orderState = new OrderState()
+            {
+                OrderHeader = orderTarget.OrderHeader,
+                QuantityFilled = 0,
+                OrderStateStatus = OrderStateStatus.Active,
+                OrderProfile = targetProfile,
+            };
+            orderState.OrderHeader.ExchangeTimestamp = Clock.Now;
+            orderState.OrderHeader.NicTimestamp = new Timestamp(0); // will be set when order is enqueued
+
+            Enqueue(ref orderState, orderManager, targetProfile);
+            return orderState;
+        }
+    }
+
+
+}
+
+public static class Debug
+{
+    public static ulong OrderId = 0;
+}
+
+public class ExchangeSimulator
+{
+    public bool MaskCrossed { get; set; } = true;
+    public bool MaskTaken { get; set; } = true;
+    internal FastArrayPool<byte> ByteArrayPool = new FastArrayPool<byte>();
+
+    private readonly InstrumentSimulator[] _instrumentSimulators;
+    private readonly ByteQueue _byExchangeTimestamp = new ByteQueue(64 * 4096);
+
+    public DataSimulator DataSimulator { get; }
+    public ServerSimulator ServerSimulator { get; }
+    public ExchangeSimulator(ServerSimulator serverSimulator)
+    {
+        ServerSimulator = serverSimulator;
+        DataSimulator = new DataSimulator("ExchangeSimulator" + "Data", this);
+        _instrumentSimulators = new InstrumentSimulator[ServerSimulator.ServerHeader.InstrumentIds.Length];
+        Clock.Interject += OnInterject;
+        Clock.TickTock += OnTickTock;
+    }
+
+    public void OnMarketByPrice(in MarketByPrice mbp, ReadOnlySpan<byte> src)
+    {
+        _instrumentSimulators[mbp.TickHeader.InstrumentId].OnMarketByPrice(in mbp, src);
+    }
+
+    public void OnTick(ref Tick tick)
+    {
+        if (tick.TickHeader.TickType == TickType.Trade)
+        {
+            _instrumentSimulators[tick.TickHeader.InstrumentId].OnTrade(ref Unsafe.As<Tick, Trade>(ref tick));
+        }
+        else if (tick.TickHeader.TickType == TickType.Settlement)
+        {
+            ServerSimulator.FromExchangeToNicToClient_Tick(ref tick);
+        }
+        else
+        {
+            throw new NotSupportedException($"ExchangeSimulator.OnTick does not support TickType {tick.TickHeader.TickType}");
+        }
+    }
+
+    public void FromClientToExchange_OrderTarget(in OrderTarget orderTarget)
+    {
+        Span<byte> dst = _byExchangeTimestamp.Enqueue(Unsafe.SizeOf<OrderTarget>() + Unsafe.SizeOf<Timestamp>());
+        ref Timestamp exchangeTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
+        dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
+        MemoryMarshal.Write(dst, in orderTarget);
+
+        ref OrderTarget orderTargetCopy = ref MemoryMarshal.AsRef<OrderTarget>(dst);
+        exchangeTimestamp = orderTargetCopy.OrderHeader.NicTimestamp.AddMicroseconds(ServerSimulator.FromExchangeToNicToClientLatency);
+        orderTargetCopy.OrderHeader.ExchangeTimestamp = exchangeTimestamp;
+    }
+
+
+    public void Allocate(InstrumentDetails details, int instrumentId)
+    {
+        if (_instrumentSimulators[instrumentId] != null)
+            return;
+
+        DataSimulator.Subscribe(details.Symbology, instrumentId);
+        _instrumentSimulators[instrumentId] = new InstrumentSimulator(this, details, instrumentId);
+    }
+
+    private void OnInterject(Timestamp timestamp)
+    {
+        if (_byExchangeTimestamp.TryPeek(out Span<byte> src))
+        {
+            Clock.OnInterject(MemoryMarshal.Read<Timestamp>(src));
+        }
+        DataSimulator.OnInterject(timestamp);
+    }
+    private void OnTickTock(Timestamp timestamp)
+    {
+        DataSimulator.OnTickTock(timestamp);
+
+        while (_byExchangeTimestamp.TryPeek(out Span<byte> src) && MemoryMarshal.AsRef<Timestamp>(src) <= timestamp)
+        {
+            /*
+            if (DataSimulator.TryPeek(out Timestamp nextData))
+            {
+                ref Timestamp nextTarget = ref MemoryMarshal.AsRef<Timestamp>(src);
+                Duration queue = nextData - nextTarget;
+                if (queue < Duration.FromMicroseconds(ServerSimulator.ExchangeOrderQueueLatency))
+                {
+                    nextTarget = nextTarget.AddDuration(queue).AddMicroseconds(5);
+                    break;
+                }
+            }
+            */
+            src = src.Slice(Unsafe.SizeOf<Timestamp>());
+            ref readonly OrderTarget orderTarget = ref MemoryMarshal.AsRef<OrderTarget>(src);
+            OnOrderTarget(in orderTarget);
+            _byExchangeTimestamp.Dequeue();
+        }
+    }
+
+    public void CancelAllOrders(int clientId)
+    {
+        foreach (InstrumentSimulator instrumentSimulator in _instrumentSimulators)
+        {
+            instrumentSimulator?.CancelAllOrders(clientId);
+        }
+    }
+
+    private void OnOrderTarget(in OrderTarget orderTarget)
+    {
+        if (orderTarget.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine();
+        }
+
+        InstrumentSimulator instrumentExecutionSimulator = _instrumentSimulators[orderTarget.OrderHeader.OrderId.InstrumentId];
+        OrderState orderState = instrumentExecutionSimulator.Target(in orderTarget, out Bitset64 orderRejectedReasons);
+
+        if (orderTarget.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"ExecutionSimulator.Target.OrderState(ClientOrderId: {orderState.OrderHeader.OrderId}, Client: {orderState.OrderHeader.OrderId.ClientId}, Status:{orderState.OrderStateStatus}, Seq: {orderState.OrderHeader.Seq}, Ticks: {orderState.OrderProfile.Ticks}, WorkingQuantity: {orderState.OrderProfile.Quantity - orderState.QuantityFilled}, Quantity: {orderState.OrderProfile.Quantity}, QuantityFilled: {orderState.QuantityFilled})");
+        }
+
+        if (!orderRejectedReasons.IsEmpty)
+        {
+            OrderRejected orderRejected = new OrderRejected()
+            {
+                OrderHeader = orderTarget.OrderHeader,
+                OrderProfile = orderTarget.OrderProfile,
+                OrderTargetAction = orderTarget.OrderTargetAction,
+                OrderRejectedReasons = orderRejectedReasons,
+                OrderRejectedSource = OrderRejectedSource.Exchange,
+            };
+
+            ServerSimulator.FromExchangeToNicToClient_OrderRejected(in orderRejected);
+        }
+    }
+
+}
+
+
+
+public class ServerSimulator
+{
+
+    // Primary constructor parameters are *in scope* throughout the class.
+    public FileSystemPath ServerName { get; }
+    public ref readonly ServerHeader ServerHeader => ref _context.ServerHeader.GetRef();
+
+    private readonly ByteQueue _byClientTimestamp;
+
+    private readonly ServerSocket _serverSocket;
+    private readonly ClientSocket _audit;
+    private readonly ClientSocket _loggingServer;
+
+    // Per-instrument broadcast rings (one writer = this server, many readers = subscribed clients).
+    private readonly WriteOnlySocket?[] _instrumentData;
+
+    public bool OverrideNicTimestamp { get; set; } = false;
+
+    public int ExchangeOrderQueueLatency { get; set; } = 50;
+
+
+    // from exchange event to nic, include SendingDelay + Wire
+    public int FromExchangeToNicLatency { get; set; } = 100; 
+
+    // Worst case How long it takes to parse a message
+    public int FromNicToClientLatency { get; set; } = 100; 
+    public int FromExchangeToNicToClientLatency => FromExchangeToNicLatency + FromNicToClientLatency;
+
+    private readonly ServerContext _context;
+
+    public ServerContext ServerContext => _context;
+
+    private const int s_instrumentsCapacity = 4096;
+    private const int s_ordersPerClient = 64;
+    private const int ExecutionCoreGroupId = 1; // the single trading CoreGroup all sim instruments use
+
+    public ExchangeSimulator ExchangeSimulator { get; }
+
+    public ServerSimulator(FileSystemPath serverName, bool startLogginServer = false)
+    {
+        ServerName = serverName;
+        Console.WriteLine($"Server Simulator Running PID: {Environment.ProcessId}");
+        ServerHeader serverHeader = new ServerHeader()
+        {
+            ServerName = new String128(ServerName),
+            InstrumentsCapacity = s_instrumentsCapacity,
+            OrdersPerClient = s_ordersPerClient,
+        };
+        serverHeader.CoreGroupIds.Set(0); // admin / housekeeping channel
+        serverHeader.CoreGroupIds.Set(ExecutionCoreGroupId); // single trading CoreGroup (all sim instruments)
+        LetterBox<ServerHeader> serverHeaderBox = ServerContext.Connect(in serverHeader);
+        _context = new ServerContext(ServerName, Access.Write);
+
+        _instrumentData = new WriteOnlySocket?[ServerHeader.InstrumentIds.Length];
+
+        if (startLogginServer)
+        {
+            StartLoggingServer(_context.LoggingServerName);
+        }
+        _loggingServer = new ClientSocket(ServerName + ".server", _context.LoggingServerName, [SocketChannel.AdminChannelLength], [SocketChannel.AdminChannelLength]);
+        _loggingServer.Connect();
+
+        // Audit C->S is per-CoreGroup (channel index == CoreGroupId): channel 0 = admin audit,
+        // 1..7 = per-segment audit. S->C stays a single admin channel (server never reads replies).
+        _audit = new ClientSocket(ServerName + ".audit", _context.LoggingServerName, SocketChannel.BuildChannelLengths(serverHeader.CoreGroupIds), [SocketChannel.AdminChannelLength]);
+        _audit.Connect();
+
+        _serverSocket = new(ServerName, ServerHeader.ClientIds.Length);
+        _serverSocket.AllocateClientId = _context.AllocateClientId;
+        _serverSocket.DeallocateClient = _context.DeallocateClient;
+
+
+        ExchangeSimulator = new ExchangeSimulator(this);
+
+        _byClientTimestamp = new ByteQueue(64 * 4096);
+
+        _serverSocket.ClientAllocated += OnClientAllocated;
+        _serverSocket.ClientDeallocated += OnClientDeallocated;
+
+
+        Clock.Interject += OnInterject;
+        Clock.TickTock += OnTickTock;
+
+        void ensureInterjectionForClockUpdate()
+        {
+            Clock.AddReminder(new Reminder(Clock.Now.AddMinutes(1), ts =>
+            {
+                _context.ServerHeader.GetRef().Timestamp = Clock.Now;
+                ensureInterjectionForClockUpdate();
+            }));
+        }
+
+        ensureInterjectionForClockUpdate();
+
+        Init();
+    }
+    public bool OpenConsoleForLogger { get; set; } = true;
+    private void StartLoggingServer(string loggingName)
+    {
+        try
+        {
+            string[] args = new string[] { loggingName, Environment.ProcessId.ToString() };
+            Console.WriteLine($"ServerSimulator launching LoggingServer...");
+            Tools.Process.Start("Logging", args, OpenConsoleForLogger);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to start LoggingServer: {ex.Message}");
+        }
+    }
+
+    private void OnClientAllocated(in SocketHeader socketHeader)
+    {
+        _loggingServer.Write(socketHeader);
+
+        AllocateClient allocateClient = new AllocateClient()
+        {
+            ClientId = socketHeader.ClientId,
+            ClientName = socketHeader.ClientName
+        };
+
+        _serverSocket.Write(socketHeader.ClientId, SocketChannel.Admin, allocateClient);
+    }
+
+    private void OnClientDeallocated(in SocketHeader socketHeader)
+    {
+        ExchangeSimulator.CancelAllOrders(socketHeader.ClientId);
+        SocketHeader socketHeaderCopy = socketHeader;
+        socketHeaderCopy.ClientToServerChannelCount = 0;
+        socketHeaderCopy.ServerToClientChannelCount = 0;
+        _loggingServer.Write(socketHeaderCopy);  // this is the close signal for logger
+    }
+
+    
+
+
+    public void FromExchangeToNicToClient_Fill(in OrderState orderState, ulong fillId, int ticks, int quantity, FillType fillType)
+    {
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"                ExecutionSimulator.FromExchangeToNic_Fill(ClientOrderId: {orderState.OrderHeader.OrderId}, FillId: {fillId}, Ticks: {ticks}, Quantity: {quantity}, FillType: {fillType})");
+        }
+
+        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<Fill>() + Unsafe.SizeOf<Timestamp>());
+        ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
+        nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
+        dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
+        ref Fill fill = ref MemoryMarshal.AsRef<Fill>(dst);
+
+        Timestamp exchangeTimestamp = Clock.Now;
+        fill = new Fill()
+        {
+            OrderHeader = new()
+            {
+                OrderId = orderState.OrderHeader.OrderId,
+                ExchangeTimestamp = exchangeTimestamp,
+                NicTimestamp = exchangeTimestamp.AddMicroseconds(FromExchangeToNicToClientLatency),
+                Seq = orderState.OrderHeader.Seq,
+            },
+            FillId = fillId,
+            FillType = fillType,
+            OrderProfile = new(ticks, quantity),
+        };
+    }
+    public void FromExchangeToNicToClient_OrderState(in OrderState orderState)
+    {
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"                ExecutionSimulator.FromExchangeToNic_OrderState(ClientOrderId: {orderState.OrderHeader.OrderId}, Client: {orderState.OrderHeader.OrderId.ClientId}, Status:{orderState.OrderStateStatus}, Seq: {orderState.OrderHeader.Seq}, Ticks: {orderState.OrderProfile.Ticks}, WorkingQuantity: {orderState.OrderProfile.Quantity - orderState.QuantityFilled}, Quantity: {orderState.OrderProfile.Quantity}, QuantityFilled: {orderState.QuantityFilled})");
+        }
+
+        ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in orderState, 1));
+        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<OrderState>() + Unsafe.SizeOf<Timestamp>());
+        ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
+        nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
+        dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
+        src.CopyTo(dst);
+        MemoryMarshal.AsRef<OrderState>(dst).OrderHeader.NicTimestamp = nicTimestamp;
+    }
+
+    public void FromExchangeToNicToClient_OrderRejected(in OrderRejected orderRejected)
+    {
+        if (orderRejected.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"                ExecutionSimulator.FromExchangeToNic_OrderRejected(ClientOrderId: {orderRejected.OrderHeader.OrderId}, Client: {orderRejected.OrderHeader.OrderId.ClientId}, Reasons:{orderRejected.OrderRejectedReasonsString}, Seq: {orderRejected.OrderHeader.Seq}, Ticks: {orderRejected.OrderProfile.Ticks}, Quantity: {orderRejected.OrderProfile.Quantity}");
+        }
+
+        ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in orderRejected, 1));
+        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<OrderRejected>() + Unsafe.SizeOf<Timestamp>());
+        ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
+        nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
+        dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
+        src.CopyTo(dst);
+        MemoryMarshal.AsRef<OrderRejected>(dst).OrderHeader.NicTimestamp = nicTimestamp;
+    }
+
+
+
+    public void FromExchangeToNic_AheadOfOrder(AheadOfOrder aheadOfOrder)
+    {
+        ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in aheadOfOrder, 1));
+        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<AheadOfOrder>() + Unsafe.SizeOf<Timestamp>());
+        ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
+        nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
+        dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
+        src.CopyTo(dst);
+    }
+
+    public void FromExchangeToNicToClient_MarketByPrice(ref MarketByPrice mbp, ReadOnlySpan<byte> src)
+    {
+        Timestamp nicTimestamp = OverrideNicTimestamp ? mbp.TickHeader.ExchangeTimestamp.AddMicroseconds(FromExchangeToNicToClientLatency) : mbp.TickHeader.NicTimestamp.AddMicroseconds(FromNicToClientLatency);
+        mbp.TickHeader.NicTimestamp = nicTimestamp;
+
+        Span<byte> dst = _byClientTimestamp.Enqueue(src.Length + Unsafe.SizeOf<Timestamp>());
+        ref Timestamp queueTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
+        queueTimestamp = mbp.TickHeader.NicTimestamp;
+
+        dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
+        src.CopyTo(dst);
+    }
+    public void FromExchangeToNicToClient_Tick(ref Tick tick)
+    {
+        Timestamp nicTimestamp = OverrideNicTimestamp ? tick.TickHeader.ExchangeTimestamp.AddMicroseconds(FromExchangeToNicToClientLatency) : tick.TickHeader.NicTimestamp.AddMicroseconds(FromNicToClientLatency);
+        tick.TickHeader.NicTimestamp = nicTimestamp;
+
+        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<Tick>() + Unsafe.SizeOf<Timestamp>());
+        ref Timestamp queueTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
+        queueTimestamp = tick.TickHeader.NicTimestamp;
+
+        dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
+        ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in tick, 1));
+        src.CopyTo(dst);
+
+    }
+
+    public void FromExchangeToNic_Trade(in Trade trade)
+        => FromExchangeToNicToClient_Tick(ref Unsafe.As<Trade, Tick>(ref Unsafe.AsRef(in trade)));
+
+
+    private readonly HashMap<string, InstrumentDetails> _instrumentDetailsBySymbol = new HashMap<string, InstrumentDetails>();
+    private readonly HashMap<int, InstrumentDetails> _instrumentDetailsByInstrumentHeaderId = new HashMap<int, InstrumentDetails>();
+
+
+    public void OnInstrumentDetails(InstrumentDetails details)
+    {
+        if (_instrumentDetailsBySymbol.TryAdd(details.Symbology.Symbol, details))
+        {
+            int instrumentHeaderId = _instrumentDetailsByInstrumentHeaderId.Count;
+            _instrumentDetailsByInstrumentHeaderId.TryAdd(instrumentHeaderId, details);
+
+            InstrumentHeader128 header128 = default;
+            ref InstrumentHeader header = ref Unsafe.As<InstrumentHeader128, InstrumentHeader>(ref header128);
+
+            header = new InstrumentHeader()
+            {
+                InstrumentType = details.InstrumentType,
+                CoreGroupId = ExecutionCoreGroupId,
+                InstrumentId = -1,
+                InstrumentHeaderId = instrumentHeaderId,
+                Exchange = new String8(details.Exchange),
+                Root = new String8(details.Root),
+                InverseTickSize = details.InverseTickSize,
+                TickSize = details.TickSize,
+            };
+            if (details.InstrumentType == InstrumentType.Future)
+            {
+                ref FutureHeader future = ref Unsafe.As<InstrumentHeader128, FutureHeader>(ref header128);
+                future.Multiplier = details.Multiplier;
+                future.ExpiryDate = details.ExpiryDate!.Value;
+                future.ExpiryType = details.ExpiryType!.Value;
+            }
+            else if (details.InstrumentType == InstrumentType.Spread)
+            {
+                ref SpreadHeader spread = ref Unsafe.As<InstrumentHeader128, SpreadHeader>(ref header128);
+                spread.Multiplier = details.Multiplier;
+                spread.ShortExpiryDate = details.ShortExpiryDate!.Value;
+                spread.ShortExpiryType = details.ShortExpiryType!.Value;
+                spread.LongExpiryDate = details.LongExpiryDate!.Value;
+                spread.LongExpiryType = details.LongExpiryType!.Value;
+                spread.ShortInstrumentId = -1;
+                spread.LongInstrumentId = -1;
+            }
+            _context.OnInstrumentHeader(in header128);
+        }
+    }
+
+    public void Init()
+    {
+        if (Clock.IsRunning)
+            return;
+
+        bool simReady = false;
+        Clock.Started += begin =>
+        {
+            while (!simReady)
+                X86BaseWrapper.Pause();
+        };
+        Thread thread = new Thread(() =>
+        {
+            Thread.CurrentThread.Name = $"{ServerName}.Init()";
+            while (!Clock.IsRunning)
+            {
+                foreach(int clientId in _serverSocket.ClientIds())
+                {
+                    while (_serverSocket.TryRead(clientId, SocketChannel.Admin, out ReadOnlySpan<byte> src) == ReadStatus.New)
+                    {
+                        byte type = src[0];
+                        if (type == (byte)AllocateType.Instrument)
+                        {
+                            AllocateInstrument allocateInstrument = MemoryMarshal.Read<AllocateInstrument>(src);
+                            AllocateInstrument(ref allocateInstrument);
+                        }
+                        else
+                            throw new NotImplementedException();
+                    }
+                }
+                X86BaseWrapper.Pause();
+            }
+            OnInterject(Timestamp.MinValue);
+            simReady = true;
+        });
+        thread.Start();
+    }
+
+    public void Connect()
+    {
+        _serverSocket.Listen();
+    }
+    public void AllocateInstrument(ref AllocateInstrument allocateInstrument)
+    {
+        ref ServerHeader serverHeader = ref _context.ServerHeader.GetRef();
+
+        int instrumentId = _context.AllocateInstrument(allocateInstrument.InstrumentHeaderId);
+        allocateInstrument.InstrumentId = instrumentId;
+
+
+        ref InstrumentHeader128 header128 = ref _context.GetInstrumentHeader(allocateInstrument.InstrumentHeaderId).GetRef();
+        allocateInstrument.Symbol = header128.Symbology.Symbol;
+
+        OpenInstrumentData(instrumentId, allocateInstrument.Symbol.ToString());
+
+        if (_instrumentDetailsByInstrumentHeaderId.TryGetValue(allocateInstrument.InstrumentHeaderId, out InstrumentDetails details))
+        {
+            ExchangeSimulator.Allocate(details, instrumentId);
+        }
+
+        int clientId = allocateInstrument.ClientId;
+        if (clientId < 0)
+            return;
+
+        _context.AllocateInstrument(clientId, instrumentId);
+        _context.GetPositionHeader(clientId, instrumentId).GetRef().AlgoStatus = AlgoStatus.Live;
+        _serverSocket.Write(clientId, in allocateInstrument);
+        _audit.Write(SocketChannel.Admin, in allocateInstrument);
+
+        return;
+    }
+
+
+    // interrupt the clock
+    private Timestamp _lastAdminRead = Timestamp.MinValue;
+    protected void OnInterject(Timestamp timestamp)
+    {
+        foreach (int clientId in _serverSocket.ClientIds())
+        {
+            // read client messages
+            while (_serverSocket.TryRead(clientId, ExecutionCoreGroupId, out ReadOnlySpan<byte> src) == ReadStatus.New)
+            {
+                byte type = src[0];
+                switch (type)
+                {
+                    case (byte)OrderType.OrderRejected:
+                        //ignore, this is sent by client to be included in audit trail.
+                        break;
+                    case (byte)OrderType.OrderTarget:
+                        ref readonly OrderTarget orderTarget = ref MemoryMarshal.AsRef<OrderTarget>(src);
+                        OnOrderTarget(in orderTarget);
+                        ExchangeSimulator.FromClientToExchange_OrderTarget(in orderTarget);
+                        break;
+                }
+            }
+        }
+
+        if (_lastAdminRead.AddSeconds(1) <= timestamp)
+        {
+            _lastAdminRead = timestamp;
+            foreach (int clientId in _serverSocket.ClientIds())
+            {
+                // read client messages
+                while (_serverSocket.TryRead(clientId, SocketChannel.Admin, out ReadOnlySpan<byte> src) == ReadStatus.New)
+                {
+                    byte type = src[0];
+                    switch (type)
+                    {
+                        case (byte)AllocateType.Instrument:
+                            AllocateInstrument allocateInstrument = MemoryMarshal.Read<AllocateInstrument>(src);
+                            AllocateInstrument(ref allocateInstrument);
+                            break;
+                        case (byte)ControlType.AlgoStatus:
+                            ref readonly ControlAlgoStatus controlAlgoStatus = ref MemoryMarshal.AsRef<ControlAlgoStatus>(src);
+                            ref SharedArrayEntry<PositionHeader> localPositionEntry = ref _context.GetPositionHeader(controlAlgoStatus.StrategyId, controlAlgoStatus.InstrumentId);
+                            Timestamp now = Clock.Now;
+                            PositionHeader localPosition = localPositionEntry.GetRef();
+                            localPosition.OrderHeader.NicTimestamp = now;
+                            localPosition.OrderHeader.ExchangeTimestamp = now;
+                            localPosition.AlgoStatus = controlAlgoStatus.AlgoStatus;
+                            localPositionEntry.Write(in localPosition);
+                            _serverSocket.Write(controlAlgoStatus.StrategyId, _context.GetInstrument(controlAlgoStatus.InstrumentId).Header.CoreGroupId, in localPositionEntry.GetReadonlyRef());
+                            break;
+                    }
+                    _lastAdminRead = Timestamp.MinValue;
+                }
+            }
+        }
+
+        if (_byClientTimestamp.TryPeek(out Span<byte> nicSrc))
+        {
+            Clock.OnInterject(MemoryMarshal.Read<Timestamp>(nicSrc));
+        }
+    }
+
+
+
+    protected void OnTickTock(Timestamp now)
+    {
+        SharedArrayEntry<ServerHeader> serverHeaderEntry = _context.ServerHeader;
+        serverHeaderEntry.AcquireLock();
+        _context.ServerHeader.GetRef().Timestamp = now;
+        serverHeaderEntry.ReleaseLock();
+        Timestamp timestamp = Timestamp.MinValue;
+        // read messages coming from the exhcange
+        while (_byClientTimestamp.TryPeek(out Span<byte> src) && (timestamp = MemoryMarshal.AsRef<Timestamp>(src)) <= now)
+        {
+            src = src.Slice(Unsafe.SizeOf<Timestamp>());
+            byte type = src[0];
+            ref MarketByPrice64 mbp64 = ref Unsafe.NullRef<MarketByPrice64>();
+            switch (type)
+            {
+                case (byte)TickType.MarketByPriceUpdate:
+                    ref readonly MarketByPrice update = ref MemoryMarshal.AsRef<MarketByPrice>(src);
+                    FromNicToClient_MarketByPrice(update, src);
+                    break;
+                case (byte)TickType.Trade:
+                case (byte)TickType.Settlement:
+                    ref readonly Tick tick = ref MemoryMarshal.AsRef<Tick>(src);
+                    FromNicToClient_Tick(in tick);
+                    break;
+                case (byte)OrderType.Fill:
+                    ref readonly Fill fill = ref MemoryMarshal.AsRef<Fill>(src);
+                    FromNicToClient_Fill(fill);
+                    break;
+                case (byte)OrderType.AheadOfOrder:
+                    ref readonly AheadOfOrder aheadOfOrder = ref MemoryMarshal.AsRef<AheadOfOrder>(src);
+                    FromNicToClient_AheadOfOrder(aheadOfOrder);
+                    break;
+                case (byte)OrderType.OrderState:
+                    ref readonly OrderState orderState = ref MemoryMarshal.AsRef<OrderState>(src);
+                    FromNicToClient_OrderState(orderState);
+                    break;
+                case (byte)OrderType.OrderRejected:
+                    ref readonly OrderRejected orderRejected = ref MemoryMarshal.AsRef<OrderRejected>(src);
+                    FromNicToClient_OrderRejected(orderRejected);
+                    break;
+                default: // unknown
+                         // handle/skip
+                    break;
+            }
+            _byClientTimestamp.Dequeue();
+        }
+    }
+
+    private void FromNicToClient_AheadOfOrder(in AheadOfOrder aheadOfOrder)
+    {
+        int globalOrderIndex = OrderIdAllocator.GetGlobalIndex(aheadOfOrder.ClientOrderId);
+        ref SharedArrayEntry<OrderState> sharedEntry = ref _context.GetOrderState(globalOrderIndex);
+        ref OrderState oldOrderState = ref sharedEntry.GetRef();
+        if (oldOrderState.OrderHeader.OrderId != aheadOfOrder.ClientOrderId)
+            throw new InvalidOperationException("AheadOfOrder for unknown OrderState");
+        oldOrderState.QuantityAhead = aheadOfOrder.Quantity;
+    }
+
+    private void OnOrderTarget(in OrderTarget orderTarget)
+    {
+        if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
+        {
+            int globalOrderIndex = orderTarget.OrderHeader.OrderId.GlobalIndex;
+
+            ref SharedArrayEntry<OrderState> orderStateEntry = ref _context.GetOrderState(globalOrderIndex);
+
+            ref readonly OrderState oldOrderState = ref orderStateEntry.GetReadonlyRef();
+            if (oldOrderState.OrderStateStatus == OrderStateStatus.Active)
+            {
+                throw new InvalidOperationException($"OrderTarget {Json.SerializeToLine(orderTarget)} will overwrite Active OrderState");
+            }
+
+            OrderState orderState = new OrderState()
+            {
+                OrderHeader = orderTarget.OrderHeader,
+                OrderProfile = orderTarget.OrderProfile,
+                QuantityFilled = 0,
+                QuantityAhead = 0,
+                OrderStateStatus = OrderStateStatus.Active,
+            };
+            orderState.OrderHeader.Seq = 0;
+            orderState.OrderHeader.NicTimestamp = Clock.Now;
+
+            orderStateEntry.Write(in orderState);
+        }
+    }
+
+    
+    private void FromNicToClient_OrderRejected(in OrderRejected orderRejected)
+    {
+        if (orderRejected.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"                    ExecutionSimulator.FromNicToClient_OrderRejected(ClientOrderId: {orderRejected.OrderHeader.OrderId}, Client: {orderRejected.OrderHeader.OrderId.ClientId}, Reasons:{orderRejected.OrderRejectedReasonsString}, Seq: {orderRejected.OrderHeader.Seq}, Ticks: {orderRejected.OrderProfile.Ticks}, Quantity: {orderRejected.OrderProfile.Quantity}");
+        }
+
+        if (orderRejected.OrderTargetAction == OrderTargetAction.Create)
+        {
+            OrderState orderState = new OrderState()
+            {
+                OrderHeader = orderRejected.OrderHeader,
+                OrderProfile = orderRejected.OrderProfile,
+                QuantityFilled = 0,
+                QuantityAhead = 0,
+                OrderStateStatus = OrderStateStatus.Done,
+            };
+            FromNicToClient_OrderState(in orderState);
+        }
+        _serverSocket.Write(orderRejected.OrderHeader.OrderId.ClientId, _context.GetInstrument(orderRejected.OrderHeader.OrderId.InstrumentId).Header.CoreGroupId, in orderRejected);
+    }
+
+    private void FromNicToClient_Fill(in Fill fill)
+    {
+        int strategyId = fill.OrderHeader.OrderId.StrategyId;
+        int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
+
+        Instrument instrument = _context.GetInstrument(instrumentId);
+
+        double multiplier = instrument.Multiplier;
+        double tickSize = instrument.TickSize;
+
+        // Global Update
+        ref SharedArrayEntry<PositionHeader> serverPositionHeaderEntry = ref _context.GetPositionHeader(instrumentId);
+        serverPositionHeaderEntry.AcquireLock();
+        ref PositionHeader serverPosition = ref serverPositionHeaderEntry.GetRef();
+        serverPosition.OnFill(in fill, tickSize, multiplier);
+        serverPositionHeaderEntry.ReleaseLock();
+
+        // Local Update
+        ref SharedArrayEntry<PositionHeader> localPositionHeaderEntry = ref _context.GetPositionHeader(strategyId, instrumentId);
+        localPositionHeaderEntry.AcquireLock();
+        ref PositionHeader localPosition = ref localPositionHeaderEntry.GetRef();
+        localPosition.OnFill(in fill, tickSize, multiplier);
+        localPositionHeaderEntry.ReleaseLock();
+
+        _serverSocket.Write(strategyId, instrument.Header.CoreGroupId, in fill);
+        _serverSocket.Write(strategyId, instrument.Header.CoreGroupId, in localPosition);
+        _audit.Write(instrument.Header.CoreGroupId, in fill);
+        _audit.Write(instrument.Header.CoreGroupId, in serverPosition);
+
+    }
+
+    private void FromNicToClient_Tick(in Tick tick)
+    {
+        _instrumentData[tick.TickHeader.InstrumentId]?.Write(in tick);
+    }
+
+    private void OpenInstrumentData(int instrumentId, string symbol)
+    {
+        if (_instrumentData[instrumentId] != null)
+            return;
+
+        string name = SocketChannel.GetInstrumentDataName(ServerName, symbol);
+        _instrumentData[instrumentId] = new WriteOnlySocket(name, SharedMemory.CreateOrOpen(name, SocketChannel.InstrumentDataChannelLength));
+    }
+
+    private void FromNicToClient_MarketByPrice(in MarketByPrice mbp, Span<byte> src)
+    {
+        int instrumentId = mbp.TickHeader.InstrumentId;
+        ref SharedArrayEntry<MarketByPrice64> marketByPrice64Entry = ref _context.GetMarketByPrice64(instrumentId);
+        ref MarketByPrice64 mbp64 = ref marketByPrice64Entry.GetRef();
+
+        marketByPrice64Entry.AcquireLock();
+        bool isDeltas = mbp64.TrySetAsDeltas(src);
+        marketByPrice64Entry.ReleaseLock();
+
+        if (isDeltas)
+        {
+            _instrumentData[instrumentId]?.Write(src);
+        }
+    }
+
+    private void FromNicToClient_OrderState(in OrderState orderState)
+    {
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
+        {
+            Console.WriteLine($"                    ExecutionSimulator.FromNicToClient_OrderState(ClientOrderId: {orderState.OrderHeader.OrderId}, Client: {orderState.OrderHeader.OrderId.ClientId}, Status:{orderState.OrderStateStatus}, Seq: {orderState.OrderHeader.Seq}, Ticks: {orderState.OrderProfile.Ticks}, WorkingQuantity: {orderState.OrderProfile.Quantity - orderState.QuantityFilled}, Quantity: {orderState.OrderProfile.Quantity}, QuantityFilled: {orderState.QuantityFilled})");
+        }
+
+        int globalOrderIndex = orderState.OrderHeader.OrderId.GlobalIndex;
+
+        ref SharedArrayEntry<OrderState> orderStateEntry = ref _context.GetOrderState(globalOrderIndex);
+        ref SharedArrayEntry<OrderTarget> orderTargetEntry = ref _context.GetOrderTarget(globalOrderIndex);
+
+        bool isSafeToUpdate = orderTargetEntry.GetReadonlyRef().OrderHeader.OrderId == orderState.OrderHeader.OrderId;
+
+        if (isSafeToUpdate)
+            orderStateEntry.Write(in orderState);
+
+        _serverSocket.Write(orderState.OrderHeader.OrderId.ClientId, _context.GetInstrument(orderState.OrderHeader.OrderId.InstrumentId).Header.CoreGroupId, in orderState);
+    }
+
+
+}
