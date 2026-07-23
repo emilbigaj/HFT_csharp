@@ -10,26 +10,8 @@ public static class Program
 {
     public static void Main(string[] args)
     {
-        // Self-check a single file: Data.exe --verify <sourceFile> [tempDir] [maxUpdates]
-        if (args.Length > 0 && args[0] == "--verify")
-        {
-            string file = args[1];
-            string tempDir = args.Length > 2 ? args[2] : Path.Combine(Path.GetTempPath(), "RefinitivVerify");
-            long maxUpdates = (args.Length > 3 && long.TryParse(args[3], out long m)) ? m : long.MaxValue;
-            bool ok = Conversion.RefinitivVerifier.Verify(file, tempDir, maxUpdates);
-            Environment.Exit(ok ? 0 : 1);
-            return;
-        }
-
-        // Convert OLD-format Refinitiv tick history (no SendingTimestamp) to the current format.
-        // Usage: Data.exe [sourceDir] [destDir] [parallelism]
-        string sourceDir = args.Length > 0 ? args[0] : @"Z:\TickHistory\Refinitiv";
-        string destDir = args.Length > 1 ? args[1] : @"Z:\TickHistory\RefinitivNew";
-        int? parallelism = (args.Length > 2 && int.TryParse(args[2], out int p)) ? p : (int?)null;
-
-        Conversion.RefinitivConverter.Run(sourceDir, destDir, parallelism);
-
-        //Pipe(args[0], args[1], (TickType)byte.Parse(args[2]), Timestamp.FromString(args[3]), Timestamp.FromString(args[4]));
+        // Refinitiv conversion tooling has been removed. The dev utilities below
+        // (Read/Verify/Merge/Pipe/...) remain and can be invoked manually as needed.
     }
 
     public static void Pipe(string outputPath, string ticker, TickType tickType, Timestamp begin, Timestamp end)
