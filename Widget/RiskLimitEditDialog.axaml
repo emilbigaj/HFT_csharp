@@ -1,0 +1,42 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Widget.RiskLimitEditDialog"
+        Title="Edit Risk Limit"
+        Width="340"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+
+	<Grid Margin="12" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+
+		<TextBlock x:Name="SymbolText"
+				   Grid.Row="0"
+				   FontWeight="Bold"
+				   Margin="0,0,0,10"/>
+
+		<Grid Grid.Row="1" ColumnDefinitions="130,*" Margin="0,0,0,6">
+			<TextBlock Grid.Column="0" Text="Max Order Qty" VerticalAlignment="Center"/>
+			<TextBox Grid.Column="1" x:Name="MaxOrderQuantityInput"/>
+		</Grid>
+
+		<Grid Grid.Row="2" ColumnDefinitions="130,*" Margin="0,0,0,6">
+			<TextBlock Grid.Column="0" Text="Max Position Qty" VerticalAlignment="Center"/>
+			<TextBox Grid.Column="1" x:Name="MaxPositionQuantityInput"/>
+		</Grid>
+
+		<TextBlock x:Name="ErrorText"
+				   Grid.Row="3"
+				   Foreground="Firebrick"
+				   IsVisible="False"
+				   TextWrapping="Wrap"
+				   Margin="0,0,0,8"/>
+
+		<StackPanel Grid.Row="4"
+					Orientation="Horizontal"
+					HorizontalAlignment="Right"
+					Spacing="10">
+			<Button Content="Cancel" Click="OnCancelClick"/>
+			<Button Content="Confirm" Click="OnConfirmClick" Classes="accent"/>
+		</StackPanel>
+	</Grid>
+</Window>

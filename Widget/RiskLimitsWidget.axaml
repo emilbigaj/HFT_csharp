@@ -37,12 +37,13 @@
 			<DataGridTextColumn Header="ShortSymbol"     Binding="{Binding ShortSymbol}"           Width="Auto"/>
 			<DataGridTextColumn Header="Symbol"          Binding="{Binding Symbol}"                Width="Auto" IsVisible="False"/>
 			<DataGridTextColumn Header="InstrumentId"    Binding="{Binding InstrumentId}"          Width="Auto" IsVisible="False"/>
-			<DataGridTextColumn Header="Position"        Binding="{Binding PositionStr}"           Width="Auto"/>
-			<DataGridTextColumn Header="MaxOrderQty"     Binding="{Binding MaxOrderQuantityStr}"   Width="Auto"/>
-			<DataGridTextColumn Header="MaxPositionQty"  Binding="{Binding MaxPositionQuantityStr}" Width="Auto"/>
-			<DataGridTextColumn Header="Headroom"        Binding="{Binding HeadroomStr}"           Width="Auto"/>
-			<DataGridTextColumn Header="MaxOrders/Day"   Binding="{Binding MaxOrdersPerDayStr}"    Width="Auto"/>
-			<DataGridTextColumn Header="MaxOrders/Sec"   Binding="{Binding MaxOrdersPerSecondStr}" Width="Auto"/>
+			<DataGridTextColumn Header="StrategyId"      Binding="{Binding StrategyId}"            Width="Auto"/>
+			<DataGridTextColumn Header="Position"        Binding="{Binding PositionQuantity}"      Width="Auto"/>
+			<DataGridTextColumn Header="MaxOrderQuantity"     Binding="{Binding MaxOrderQuantity}"   Width="Auto"/>
+			<DataGridTextColumn Header="MaxPositionQuantity"  Binding="{Binding MaxPositionQuantity}" Width="Auto"/>
+			<DataGridTextColumn Header="WorstLongWorkingQuantity"   Binding="{Binding WorstLongWorkingQuantity}"    Width="Auto"/>
+			<DataGridTextColumn Header="WorstShortWorkingQuantity"   Binding="{Binding WorstShortWorkingQuantity}" Width="Auto"/>
+			<DataGridTextColumn Header="Timestamp"       Binding="{Binding Timestamp}"             Width="Auto"/>
 			<DataGridTextColumn Header="File"            Binding="{Binding RiskLimitFileName}"     Width="*" IsVisible="False"/>
 		</DataGrid.Columns>
 	</DataGrid>

@@ -422,8 +422,16 @@ public class LoggingServer : IDisposable
 
             string uniqueName = socketHeader.Name;
 
-            if (_clients.ContainsKey(uniqueName))
-                throw new ArgumentException($"Client {uniqueName} already subscribed.", nameof(socketHeader.ClientId));
+            if (_clients.TryGetValue(uniqueName, out IReader? existing))
+            {
+                // Same deferred-removal race as OnChildSubscribed, but here a resubscribe over a
+                // reader still queued for disposal would throw instead of returning — losing the
+                // .server/.audit tap via the exception handler. Retire it and rebuild.
+                if (!existing.IsPendingDispose)
+                    throw new ArgumentException($"Client {uniqueName} already subscribed.", nameof(socketHeader.ClientId));
+
+                RemoveClient(uniqueName, true);
+            }
 
             string clientName = socketHeader.ClientName.ToString();
             string ext = Path.GetExtension(clientName).TrimStart('.');
@@ -488,7 +496,13 @@ public class LoggingServer : IDisposable
             });
 
             string uniqueName = socketHeader.Name;
-            if (_clients.ContainsKey(uniqueName)) return;
+            if (_clients.TryGetValue(uniqueName, out IReader? existing))
+            {
+                if (!existing.IsPendingDispose)
+                    return;
+
+                RemoveClient(uniqueName, true);
+            }
 
             string directoryPath = socketHeader.ClientName.ToString();
 
@@ -683,7 +697,7 @@ public class LoggingServer : IDisposable
 
             if (disposeNow)
             {
-                if (_clients.TryRemove(name, out _))
+                if (_clients.TryRemove(new KeyValuePair<string, IReader>(name, reader)))
                 {
                     reader.Dispose();
                 }
@@ -1027,6 +1041,16 @@ public class AuditWriter : ObjectWriter
                     ref readonly ControlAlgoStatus controlAlgoStatus = ref MemoryMarshal.AsRef<ControlAlgoStatus>(rsrc);
                     string symbol = GetSymbol(controlAlgoStatus.InstrumentId);
                     string json = Json.SerializeToLine(controlAlgoStatus);
+                    return json.Insert(1, $"\"Symbol\":\"{symbol}\",");
+                }
+            case (byte)OrderType.RiskLimit:
+                {
+                    ref readonly RiskLimit riskLimit = ref MemoryMarshal.AsRef<RiskLimit>(rsrc);
+                    // Resolve by InstrumentId, not the span overload: that one reads an OrderHead
+                    // (Header + OrderHeader) off the front, and RiskLimit has no OrderHeader — it
+                    // would decode InstrumentId out of MaxOrderQuantity and friends.
+                    string symbol = GetSymbol(riskLimit.InstrumentId);
+                    string json = Json.SerializeToLine(riskLimit);
                     return json.Insert(1, $"\"Symbol\":\"{symbol}\",");
                 }
             case (byte)OrderType.OrderState:

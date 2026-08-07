@@ -1,0 +1,76 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Testing (Debug)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build Debug",
+      "program": "${workspaceFolder}/Testing/bin/Debug/net10.0/Testing.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/Testing",
+      "console": "integratedTerminal",
+      "stopAtEntry": false
+    },
+    {
+      "name": "Testing (Release)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build Release",
+      "program": "${workspaceFolder}/Testing/bin/Release/net10.0/Testing.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/Testing",
+      "console": "integratedTerminal",
+      "stopAtEntry": false
+    },
+    {
+      "name": "Workspace GUI (Debug)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build Debug",
+      "program": "${workspaceFolder}/Workspace/bin/Debug/net10.0/Workspace.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/Workspace",
+      "console": "integratedTerminal",
+      "stopAtEntry": false
+    },
+    {
+      "name": "Workspace GUI (Release)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build Release",
+      "program": "${workspaceFolder}/Workspace/bin/Release/net10.0/Workspace.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/Workspace",
+      "console": "integratedTerminal",
+      "stopAtEntry": false
+    },
+    {
+      "name": "LoggingServer (Debug)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build Debug",
+      "program": "${workspaceFolder}/Logging/bin/Debug/net10.0/Logging.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/Logging",
+      "console": "integratedTerminal",
+      "stopAtEntry": false
+    },
+    {
+      "name": "LoggingServer (Release)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build Release",
+      "program": "${workspaceFolder}/Logging/bin/Release/net10.0/Logging.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/Logging",
+      "console": "integratedTerminal",
+      "stopAtEntry": false
+    },
+    {
+      "name": "Attach to process...",
+      "type": "coreclr",
+      "request": "attach"
+    }
+  ]
+}

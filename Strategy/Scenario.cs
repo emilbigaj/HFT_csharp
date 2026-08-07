@@ -27,7 +27,7 @@ public class Scenario
     public AlertManager AlertManager { get; private set; } = null!;
     public string Name { get; }
     public virtual FileSystemPath ServerName { get; }
-    public CoreGroupId CoreGroupId { get; set; } = CoreGroupId.OS;
+    public CoreGroupId CoreGroupName { get; set; } = CoreGroupId.OS;
     public virtual FileSystemPath ClientName { get; }
 
     public Client Client { get; protected set; } = null!;
@@ -47,13 +47,17 @@ public class Scenario
     private static int GetExchangeSendCore(int coreGroupId) => coreGroupId * 4 + 2;
     private static int GetStrategyCore(int coreGroupId) => coreGroupId * 4 + 3;
 
-    public void SetRiskLimit(Instrument instrument, RateLimit orderPerSecond, RateLimit ordersPerSession)
+    // Simulation-only: provision an instrument's quantity limits so a backtest can actually exercise
+    // them. The default is GetMaxLimits (int.MaxValue), under which no order is ever refused.
+    // No RiskLayer refresh needed — ValidateOrder reads both limits live from shared memory on every
+    // order, so there is no cached copy to invalidate.
+    public void SetRiskLimit(Instrument instrument, int maxOrderQuantity, int maxPositionQuantity)
     {
         RiskLimit riskLimit = ServerSimulator!.ServerContext.GetRiskLimit(instrument.InstrumentId).GetReadonlyRef();
-        riskLimit.MaxOrdersPerSecond = orderPerSecond;
-        riskLimit.MaxOrdersPerSession = ordersPerSession;
-        ServerSimulator!.ServerContext.GetRiskLimit(instrument.InstrumentId).Write(riskLimit);
-        Client.RiskLayer.UpdateRiskLimit(instrument.InstrumentId);
+        riskLimit.MaxOrderQuantity = maxOrderQuantity;
+        riskLimit.MaxPositionQuantity = maxPositionQuantity;
+        riskLimit.Timestamp = Clock.Now;
+        ServerSimulator!.ServerContext.GetRiskLimit(instrument.InstrumentId).Write(in riskLimit);
     }
     public ArrayList<FutureHeader> GetFutureHeaders(string exchange, string root)
     {
@@ -122,9 +126,9 @@ public class Scenario
         if (Clock.Mode == ClockMode.Realtime)
         {
             Thread.CurrentThread.Name = Name;
-            if (CoreGroupId > 0)
+            if (CoreGroupName > 0)
             {
-                int strategyCore = GetStrategyCore((int)CoreGroupId);
+                int strategyCore = GetStrategyCore((int)CoreGroupName);
                 LowLatency.PinCurrentThreadToCore(strategyCore);
             }
             BuildRealtime();

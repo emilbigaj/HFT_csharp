@@ -20,6 +20,17 @@ public enum OrderType : byte
 }
 
 [RegisterJson]
+public enum TimeInForce : byte
+{
+    Day = 0,
+    GoodTillCancel = 1,
+    ImmediateOrCancel = 2,
+    FillOrKill = 3,
+    OpeningAuction = 4,
+    ClosingAuction = 5,
+}
+
+[RegisterJson]
 public enum OrderStateDoneReason : byte
 {
     None = 0,
@@ -33,6 +44,18 @@ public enum OrderStateStatus : byte
 {
     Done = 0,
     Active = 1,
+}
+
+[RegisterJson]
+public enum OrderStateReason : byte
+{
+    Unknown = 0,
+    PendingNew = 1,
+    Acked = 2,
+    Filled = 3,
+    Canceled = 4,
+    Rejected = 5, // create rejected, not amend/cancel rejected
+    Eliminated = 6,
 }
 
 [RegisterJson]
@@ -59,6 +82,7 @@ public enum OrderRejectedReason : byte
     QuantityNotValid       = 20,
     PriceNotValid          = 21,
     SideNotValid           = 22,
+    OrderTypeNotSupported  = 23, // order type/TIF itself rejected — change the order, don't resend
 
     // ---- 30..39: Sequencing / lifecycle: client misuse of the order slot ----
     ConnectionBroken          = 30,
@@ -67,6 +91,7 @@ public enum OrderRejectedReason : byte
     CantAllocateClientOrderId = 33,
     OrderIndexIsBusy          = 34,
     OrderNotFound             = 35,
+    DuplicateOrderId          = 36, // ClOrdID reuse / would overwrite a resting order
 
     // ---- 40..49: Discarded: intentional no-ops; system decided not to act, no alert ----
     StateIsDone            = 40,
@@ -79,15 +104,18 @@ public enum OrderRejectedReason : byte
     // ---- 50..59: Risk and business limits ----
     NotInSession           = 50,
     PositionIsSuspended    = 51,
-    QuantityTooLarge       = 52,
-    PositionTooLarge       = 53,
-    NotEnoughMargin        = 54,
-    TooManyOrdersPerSecond = 55,
-    TooManyOrdersPerSession    = 56,
-    MessageEfficiencyViolated  = 57,
+    QuantityExceedsRiskLimit       = 52,
+    QuantityTooLarge           = 53,
+    PositionExceedsRiskLimit       = 54,
+    NotEnoughMargin        = 55,
+    TooManyOrdersPerSecond = 56,
+    TooManyOrdersPerSession    = 57,
+    MessageEfficiencyViolated  = 58,
+    TooManyActiveOrders = 59,
+    NotAuthorizedToTrade = 60,
 
     // ---- 60..69: System ----
-    ExceptionThrownByRiskLayer = 60,
+    ExceptionThrownByRiskLayer = 63,
 }
 
 [RegisterJson]
@@ -144,38 +172,109 @@ public struct OrderRejected()
 }
 
 
-
-
-
-
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
 public struct RiskLimit(int instrumentId)
 {
     public Header<OrderType> Header = new(OrderType.RiskLimit);
     public int InstrumentId = instrumentId;
-    public int MaxOrderQuantity;
-    public int MaxPositionQuantity;
-    public RateLimit MaxOrdersPerSession;
-    public RateLimit MaxOrdersPerSecond;
+    public Timestamp Timestamp = Timestamp.MinValue;
+    public int StrategyId = -1;
+    public int MaxOrderQuantity = 0;
+    public int MaxPositionQuantity = 0;
+    public int WorstLongWorkingQuantity = 0;
+    public int WorstShortWorkingQuantity = 0;
+
+    public int GetLongQuantityAllowance(int position)
+    {
+        return Math.Max(0, MaxPositionQuantity - position - WorstLongWorkingQuantity);
+    }
+     public int GetShortQuantityAllowance(int position)
+    {
+        return Math.Min(0, -MaxPositionQuantity - position - WorstShortWorkingQuantity);
+    }
+
     public static RiskLimit GetMaxLimits(int instrumentId) => new RiskLimit(instrumentId)
     {
         MaxOrderQuantity = int.MaxValue,
         MaxPositionQuantity = int.MaxValue,
-        MaxOrdersPerSession = new RateLimit(Duration.FromDays(1), 1_000_000),
-        MaxOrdersPerSecond = new RateLimit(Duration.FromSeconds(1), 300),
+        Timestamp = Clock.Now,
     };
     public static RiskLimit GetMinLimits(int instrumentId) => new RiskLimit(instrumentId)
     {
         MaxOrderQuantity = 0,
         MaxPositionQuantity = 0,
-        MaxOrdersPerSession = new RateLimit(Duration.FromDays(1), 0),
-        MaxOrdersPerSecond = new RateLimit(Duration.FromSeconds(1), 0),
+        Timestamp = Clock.Now,
     };
 
     public override string ToString()
     {
         return Json.Serialize(this);
+    }
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public struct OrderRisk
+{
+    private const int MaxOrderQuantity = 56;
+
+    private Bitset64 _quantities;                       // struct — must NOT be readonly
+    private Array56<byte> _counts;
+
+    /// <summary>Branchless abs. Returns int.MinValue for int.MinValue (no throw);
+    /// callers must range-check with an unsigned compare.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Abs(int v)
+    {
+        uint m = (uint)(v >> 31);
+        return (int)(((uint)v ^ m) - m);
+    }
+
+    public readonly int GetWorstOrderQuantity(int ackedOrderQuantity)
+    {
+        int absAckedOrderQuantity = Abs(ackedOrderQuantity);
+        return Math.Max(absAckedOrderQuantity, _quantities.HighestSet);
+    }
+
+    public bool TryAdd(int orderQuantity, out OrderRejectedReason reason)
+    {
+        int absQuantity = Abs(orderQuantity);
+        if ((uint)absQuantity >= MaxOrderQuantity || absQuantity == 0)
+        {
+            reason = OrderRejectedReason.QuantityNotValid;
+            return false;
+        }
+
+        ref byte count = ref _counts[absQuantity];
+        if (count == byte.MaxValue)
+        {
+            reason = OrderRejectedReason.TooManyOrdersPerSecond;
+            return false;
+        }
+
+        if (++count == 1)
+            _quantities.Set(absQuantity);
+
+        reason = default;
+        return true;
+    }
+
+    public void Ack(int orderQuantity) => Remove(orderQuantity);
+
+    public void Reject(int orderQuantity) => Remove(orderQuantity);
+
+    private void Remove(int orderQuantity)
+    {
+        int absQuantity = Abs(orderQuantity);
+        if ((uint)absQuantity >= MaxOrderQuantity)
+            return;
+
+        ref byte count = ref _counts[absQuantity];
+        if (count == 0)
+            return;
+
+        if (--count == 0)
+            _quantities.Clear(absQuantity);
     }
 }
 
@@ -185,16 +284,6 @@ public enum OrderTargetAction : byte
     Create = 0,
     Amend = 1,
     Cancel = 2,
-}
-
-[RegisterJson]
-public enum TimeInForce : byte
-{
-    GoodTillCancel = 0,
-    ImmediateOrCancel = 1,
-    FillOrKill = 2,
-    OpeningAuction = 3,
-    ClosingAuction = 4,
 }
 
 [Flags]
@@ -273,17 +362,12 @@ public struct Fill()
 {
     public Header<OrderType> Header = new(OrderType.Fill);
     public OrderHeader OrderHeader;
-    public FillType FillType;
-    private unsafe fixed byte _reserved[3];
     public ulong FillId;
     public OrderProfile OrderProfile;
+    public FillType FillType;
+    private unsafe fixed byte _reserved[3];
     public override string ToString() => Json.Serialize(this);
-
 }
-
-
-
-
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
@@ -292,9 +376,11 @@ public struct OrderState()
     public Header<OrderType> Header = new(OrderType.OrderState);
     public OrderHeader OrderHeader;
     public ulong ExchangeOrderId;
-    public OrderStateStatus OrderStateStatus;
-    private unsafe fixed byte _reserved[3];
     public OrderProfile OrderProfile;
+    public TimeInForce TimeInForce;
+    public OrderStateStatus OrderStateStatus;
+    public OrderStateReason OrderStateReason;
+    private unsafe fixed byte _reserved[1];
     public int QuantityFilled;
     public int QuantityAhead;
 
@@ -319,10 +405,11 @@ public struct OrderTarget()
 {
     public Header<OrderType> Header = new(OrderType.OrderTarget);
     public OrderHeader OrderHeader;
+    public OrderProfile OrderProfile; // 8
+    public TimeInForce TimeInForce;  // 1
     public OrderTargetAction OrderTargetAction;  // 1
     public OrderStateStatus OrderTargetStatus = OrderStateStatus.Active;
-    private unsafe fixed byte _reserved[2];
-    public OrderProfile OrderProfile; // 8
+    private unsafe fixed byte _reserved[1];
     public override string ToString() => Json.Serialize(this);
 }
 

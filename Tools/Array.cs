@@ -50,13 +50,16 @@ internal static class ArraySerializer
 [InlineArray(4)]
 public struct Array4<T> where T : struct
 {
+    public const int Length = 4;
     private T _element0;
 }
+
 
 [JsonConverter(typeof(InlineArrayConverterFactory))]
 [InlineArray(8)]
 public struct Array8<T> where T : struct
 {
+    public const int Length = 8;
     private T _element0;
 }
 
@@ -64,6 +67,7 @@ public struct Array8<T> where T : struct
 [InlineArray(16)]
 public struct Array16<T> where T : struct
 {
+    public const int Length = 16;
     private T _element0;
 }
 
@@ -71,6 +75,15 @@ public struct Array16<T> where T : struct
 [InlineArray(32)]
 public struct Array32<T> where T : struct
 {
+    public const int Length = 32;
+    private T _element0;
+}
+
+[JsonConverter(typeof(InlineArrayConverterFactory))]
+[InlineArray(56)]
+public struct Array56<T> where T : struct
+{
+    public const int Length = 56;
     private T _element0;
 }
 
@@ -78,6 +91,7 @@ public struct Array32<T> where T : struct
 [InlineArray(64)]
 public struct Array64<T> where T : struct
 {
+    public const int Length = 64;
     private T _element0;
 }
 
@@ -108,6 +122,7 @@ public sealed class InlineArrayConverterFactory : JsonConverterFactory
         s_registry[(typeof(Array8<>), typeof(T))] = () => new Array8Converter<T>();
         s_registry[(typeof(Array16<>), typeof(T))] = () => new Array16Converter<T>();
         s_registry[(typeof(Array32<>), typeof(T))] = () => new Array32Converter<T>();
+        s_registry[(typeof(Array56<>), typeof(T))] = () => new Array56Converter<T>();
         s_registry[(typeof(Array64<>), typeof(T))] = () => new Array64Converter<T>();
     }
 
@@ -193,6 +208,21 @@ public sealed class Array32Converter<T> : JsonConverter<Array32<T>> where T : st
     public override void Write(Utf8JsonWriter writer, Array32<T> value, JsonSerializerOptions options)
     {
         ArraySerializer.Write(writer, MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<Array32<T>, T>(ref Unsafe.AsRef(in value)), 32), options);
+    }
+}
+
+public sealed class Array56Converter<T> : JsonConverter<Array56<T>> where T : struct
+{
+    public override Array56<T> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        Array56<T> result = default;
+        ArraySerializer.Read(ref reader, MemoryMarshal.CreateSpan(ref Unsafe.As<Array56<T>, T>(ref result), 56), options);
+        return result;
+    }
+
+    public override void Write(Utf8JsonWriter writer, Array56<T> value, JsonSerializerOptions options)
+    {
+        ArraySerializer.Write(writer, MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<Array56<T>, T>(ref Unsafe.AsRef(in value)), 56), options);
     }
 }
 

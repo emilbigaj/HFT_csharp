@@ -27,6 +27,8 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
     public InstrumentType InstrumentType => Header.InstrumentType;
     public string InstrumentIdStr => Header.InstrumentId == -1 ? "" : Header.InstrumentId.ToString();
 
+    public int ExchangeInstrumentId => Header.ExchangeInstrumentId;
+
     public int CoreGroupId => Header.CoreGroupId;
     public string Exchange => Header.Exchange.ToString();
     public string Root => Header.Root.ToString();

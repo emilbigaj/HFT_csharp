@@ -1,0 +1,50 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build Debug",
+      "detail": "dotnet build HFT.slnx -c Debug",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "${workspaceFolder}/HFT.slnx", "-c", "Debug"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "silent", "clear": true }
+    },
+    {
+      "label": "build Release",
+      "detail": "dotnet build HFT.slnx -c Release",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "${workspaceFolder}/HFT.slnx", "-c", "Release"],
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "presentation": { "reveal": "silent", "clear": true }
+    },
+    {
+      "label": "rebuild Debug",
+      "detail": "dotnet build HFT.slnx -c Debug --no-incremental",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "${workspaceFolder}/HFT.slnx", "-c", "Debug", "--no-incremental"],
+      "group": "build",
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "rebuild Release",
+      "detail": "dotnet build HFT.slnx -c Release --no-incremental",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "${workspaceFolder}/HFT.slnx", "-c", "Release", "--no-incremental"],
+      "group": "build",
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "clean",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["clean", "${workspaceFolder}/HFT.slnx"],
+      "problemMatcher": []
+    }
+  ]
+}

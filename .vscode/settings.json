@@ -1,0 +1,38 @@
+{
+  // Bind C# Dev Kit to the solution so Solution Explorer and the configuration
+  // switcher target it instead of guessing from the folder.
+  "dotnet.defaultSolution": "HFT.slnx",
+
+  // ---- Visual Studio look ----
+  // Built-in VS Code theme: the classic VS colour scheme, not the newer "Modern"
+  // variant. This setting takes the theme *id* ("Visual Studio Light"); the theme
+  // picker shows the label ("Light (Visual Studio)"), which is not accepted here.
+  // Swap to "Visual Studio Dark" for the dark equivalent.
+  //"workbench.colorTheme": "Visual Studio Light", // leaves to default
+
+  // VS has no activity bar. Sidebar stays on the left.
+  "workbench.activityBar.location": "default",
+
+  // Classic File/Edit/View/Run/Terminal menu bar — VS Code has no user-editable
+  // toolbar, so this is the nearest equivalent to VS's Build and Debug menus.
+  "window.menuBarVisibility": "classic",
+
+  // VS opens files as real tabs; VS Code's italic "preview" tab that gets replaced
+  // by the next click has no VS equivalent.
+  "workbench.editor.enablePreview": false,
+
+  // VS has no minimap; it does have the navigation bar (breadcrumbs).
+  "editor.minimap.enabled": false,
+  "breadcrumbs.enabled": true,
+  "editor.stickyScroll.enabled": true,
+
+  "editor.renderLineHighlight": "line",
+  "editor.guides.indentation": true,
+  "explorer.compactFolders": false,
+  "workbench.tree.indent": 16,
+
+  // VS docks the debug toolbar rather than floating it over the editor.
+  "debug.toolBarLocation": "docked",
+  "debug.internalConsoleOptions": "neverOpen",
+  "debug.showInlineBreakpointCandidates": false
+}

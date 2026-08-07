@@ -34,23 +34,17 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
     public string RiskLimitFileName => _instrument.Symbol + ".risklimit";
 
     public int PositionQuantity => _positionQuantity;
-    public string PositionStr => _positionQuantity.ToString("N0");
+    public int MaxOrderQuantity => _riskLimit.MaxOrderQuantity;
+    public int MaxPositionQuantity => _riskLimit.MaxPositionQuantity;
 
-    public string MaxOrderQuantityStr => FormatLimitInt(_riskLimit.MaxOrderQuantity);
-    public string MaxPositionQuantityStr => FormatLimitInt(_riskLimit.MaxPositionQuantity);
+    public int LongQuantityAllowance => _riskLimit.GetLongQuantityAllowance(_positionQuantity);
+    public int ShortQuantityAllowance => _riskLimit.GetShortQuantityAllowance(_positionQuantity);
 
-    public string HeadroomStr
-    {
-        get
-        {
-            int max = _riskLimit.MaxPositionQuantity;
-            int headroom = max - Math.Abs(_positionQuantity);
-            return headroom.ToString("N0");
-        }
-    }
+    public int WorstLongWorkingQuantity => _riskLimit.WorstLongWorkingQuantity;
+    public int WorstShortWorkingQuantity => _riskLimit.WorstShortWorkingQuantity;
 
-    public string MaxOrdersPerDayStr => FormatRateLimit(_riskLimit.MaxOrdersPerSession);
-    public string MaxOrdersPerSecondStr => FormatRateLimit(_riskLimit.MaxOrdersPerSecond);
+    public string StrategyId => _riskLimit.StrategyId < 0 ? "Server" : _riskLimit.StrategyId.ToString();
+    public string Timestamp => _riskLimit.Timestamp == Tools.Timestamp.MinValue ? "—" : _riskLimit.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
 
     public WidgetRiskLimit(Instrument instrument, int positionQuantity, RiskLimit riskLimit)
     {
@@ -85,22 +79,10 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
     {
         return a.MaxOrderQuantity == b.MaxOrderQuantity
             && a.MaxPositionQuantity == b.MaxPositionQuantity
-            && a.MaxOrdersPerSession.Limit == b.MaxOrdersPerSession.Limit
-            && a.MaxOrdersPerSession.Duration.TotalNanoseconds == b.MaxOrdersPerSession.Duration.TotalNanoseconds
-            && a.MaxOrdersPerSecond.Limit == b.MaxOrdersPerSecond.Limit
-            && a.MaxOrdersPerSecond.Duration.TotalNanoseconds == b.MaxOrdersPerSecond.Duration.TotalNanoseconds;
-    }
-
-    private static string FormatLimitInt(int value)
-    {
-        return value.ToString("N0");
-    }
-
-    private static string FormatRateLimit(RateLimit rl)
-    {
-        string limitStr = rl.Limit.ToString("N0");
-        string durationStr = FormatDuration(rl.Duration);
-        return $"{limitStr} / {durationStr}";
+            && a.StrategyId == b.StrategyId
+            && a.Timestamp == b.Timestamp
+            && a.WorstLongWorkingQuantity == b.WorstLongWorkingQuantity
+            && a.WorstShortWorkingQuantity == b.WorstShortWorkingQuantity;
     }
 
     private static string FormatDuration(Duration d)
@@ -302,6 +284,11 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
             menu.Items.Add(headerItem);
             menu.Items.Add(new Separator());
 
+            var editItem = new MenuItem { Header = "Edit RiskLimit", Icon = new TextBlock { Text = "✏" } };
+            editItem.Click += async (_, _) => await EditRiskLimit(riskLimit);
+            menu.Items.Add(editItem);
+            menu.Items.Add(new Separator());
+
             FileSystemPath filePath = Context.GetRiskLimitsFilePath(serverContext.RiskLimitsDirectoryPath, riskLimit.Symbol);
             var copyPathItem = new MenuItem { Header = "Copy Server .risklimit File Path", Icon = new TextBlock { Text = "📋" } };
             copyPathItem.Click += async (_, _) =>
@@ -324,6 +311,33 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
             var openFolderItem = new MenuItem { Header = "Open Server RiskLimits Folder", Icon = new TextBlock { Text = "📁" } };
             openFolderItem.Click += (_, _) => OpenInExplorer(serverContext.RiskLimitsDirectoryPath.ToString());
             menu.Items.Add(openFolderItem);
+        }
+    }
+
+    private async System.Threading.Tasks.Task EditRiskLimit(WidgetRiskLimit row)
+    {
+        try
+        {
+            Window? window = TopLevel.GetTopLevel(this) as Window;
+            if (window == null) return;
+
+            // Read a fresh copy rather than using the row's cached value, which can be up to one
+            // refresh tick stale. The whole struct goes back to the server, so every field we are
+            // not editing has to be current or we would silently revert it.
+            RiskLimit current = _context.Primary.GetRiskLimit(row.InstrumentId).Read();
+
+            RiskLimitEditDialog dialog = new RiskLimitEditDialog(row.ShortSymbol, current);
+            RiskLimit? edited = await dialog.ShowDialog<RiskLimit?>(window);
+            if (edited == null) return;
+
+            // The server owns _riskLimits and the .risklimit file; it stamps the timestamp, writes
+            // shared memory and appends the line. The grid picks the change up on its next refresh.
+            RiskLimit riskLimit = edited.Value;
+            _context.Manual.OnRiskLimit(in riskLimit);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"RiskLimitsWidget.EditRiskLimit Error: {ex.Message}");
         }
     }
 

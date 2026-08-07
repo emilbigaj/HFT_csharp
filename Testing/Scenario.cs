@@ -30,29 +30,29 @@ public class TestingScenario : Scenario
                 env = Console.ReadLine();
             }
 
-            Console.WriteLine("Enter CoreGroupId: SandP500|Equity|Forex|Crypto");
-            string? cgid = Console.ReadLine();
-            while (cgid != "SandP500" && cgid != "Equity" && cgid != "Forex" && cgid != "Crypto")
+            Console.WriteLine("Enter CoreGroupName: SandP500|Equity|Forex|Crypto");
+            string? coreGroupName = Console.ReadLine();
+            while (coreGroupName != "SandP500" && coreGroupName != "Equity" && coreGroupName != "Forex" && coreGroupName != "Crypto")
             {
                 Console.WriteLine("Must be SandP500|Equity|Forex|Crypto. Try again...");
-                cgid = Console.ReadLine();
+                coreGroupName = Console.ReadLine();
             }
 
 
 
-            CoreGroupId = (CoreGroupId)Enum.Parse(typeof(CoreGroupId), cgid);
-            ServerName = ServerContext.GetDirectoryPath($"Rival{env}");
-            ClientName = ClientContext.GetDirectoryPath($"{CoreGroupId}Testing");
+            CoreGroupName = (CoreGroupId)Enum.Parse(typeof(CoreGroupId), coreGroupName);
+            ServerName = ServerContext.GetDirectoryPath($"CME_{env}");
+            ClientName = ClientContext.GetDirectoryPath($"{CoreGroupName}_Testing");
 
         }
         else
         {
-            CoreGroupId = CoreGroupId.SandP500;
+            CoreGroupName = CoreGroupId.Equity;
             ServerName = ServerContext.GetDirectoryPath("ServerSimulation");
-            ClientName = ClientContext.GetDirectoryPath($"{CoreGroupId}");
+            ClientName = ClientContext.GetDirectoryPath($"{CoreGroupName}");
         }
-        SimulationBegin = new Timestamp(2026, 6, 19);
-        SimulationEnd = new Timestamp(2026, 7, 11, 0, 0, 0);
+        SimulationBegin = new Timestamp(2026, 7, 1);
+        SimulationEnd = new Timestamp(2026, 7, 21, 0, 0, 0);
     }
 
     public override void BuildStrategies()
@@ -75,15 +75,17 @@ public class TestingScenario : Scenario
             Client.Context.AllocateProductGroupId(instrument, productGroup);
         };
 
-        if (CoreGroupId == CoreGroupId.SandP500)
+        int[] months = new int[] { 3, 6, 9, 12 };
+        if (CoreGroupName == CoreGroupId.SandP500)
         {
-            Future quote = GetFuture("XCBT", "MYM", Clock.Now);
-            Future hedge = GetFuture("XCBT", "YM", Clock.Now);
-            Future friend = GetFuture("XCME", "ES", Clock.Now);
+
+            Future quote = GetFuture("XCME", "MES", Clock.Now, months);
+            Future hedge = GetFuture("XCME", "ES", Clock.Now, months);
+            Future friend = GetFuture("XCBT", "YM", Clock.Now, months);
 
             strategy.OnFuture(quote, hedge);
         }
-        else if (CoreGroupId == CoreGroupId.Equity)
+        else if (CoreGroupName == CoreGroupId.Equity)
         {
 
             {
@@ -117,9 +119,8 @@ public class TestingScenario : Scenario
             }
             
         }
-        else if (CoreGroupId == CoreGroupId.Forex)
+        else if (CoreGroupName == CoreGroupId.Forex)
         {
-            int[] months = new int[] { 3, 6, 9, 12 };
             {
                 Future quote = GetFuture("XCME", "M6E", Clock.Now, months);
                 Future hedge = GetFuture("XCME", "6E", Clock.Now, months);
@@ -154,7 +155,7 @@ public class TestingScenario : Scenario
             }
 
         }
-        else if (CoreGroupId == CoreGroupId.Crypto)
+        else if (CoreGroupName == CoreGroupId.Crypto)
         {
             Timestamp thisMonth = new Timestamp(Clock.Now.Year, Clock.Now.Month, 1);
             Future quote = GetFuture("XCME", "MET", thisMonth);
@@ -168,7 +169,7 @@ public class TestingScenario : Scenario
         ContextManager.Initialize(ServerName);
 
         server.OverrideNicTimestamp = false;
-        server.FromExchangeToNicLatency = 20;
+        server.FromExchangeToNicLatency = 250;
         server.FromNicToClientLatency = 0;
         server.ExchangeSimulator.DataSimulator.Searches.Add(new TickHistorySearch()
         {

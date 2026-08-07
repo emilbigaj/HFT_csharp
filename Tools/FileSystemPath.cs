@@ -51,6 +51,24 @@ namespace Tools
 
         public int Length => Path.Length;
 
+        /// <summary>
+        /// Path join, mirroring std::filesystem::path::operator/ on the C++ side. Use this — never
+        /// string concatenation — to build shared-memory region names: Tools.Memory sanitizes every
+        /// character outside [A-Za-z0-9_\-.] to '_', so the separator this inserts becomes the same
+        /// '_' the C++ join produces. Concatenating instead names a different, empty region, and
+        /// CreateOrOpen happily creates it — the symptom is a hang or a permanently empty read, not
+        /// an error.
+        /// </summary>
+        public static FileSystemPath operator /(FileSystemPath left, string right)
+        {
+            return new FileSystemPath(System.IO.Path.Combine(left.Path, right));
+        }
+
+        public static FileSystemPath operator /(FileSystemPath left, FileSystemPath right)
+        {
+            return new FileSystemPath(System.IO.Path.Combine(left.Path, right.Path));
+        }
+
         public static implicit operator FileSystemPath(string path)
         {
             return new FileSystemPath(path);

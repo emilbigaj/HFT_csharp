@@ -1,14 +1,21 @@
 //BEGIN_FILE HFT/Execution/RiskManager.cs
 using System;
-using System.Collections.Generic;
-using System.IO;
 using System.Runtime.CompilerServices;
 using Tools;
 using Data;
-using Socket;
 using Execution;
 
 namespace Provider;
+
+public struct Exposure
+{
+    public int Position;
+    public int WorkingBuyQuantity;
+    public int WorkingSellQuantity;
+    public int WorstLongPosition => Position + WorkingBuyQuantity;
+    public int WorstShortPosition => Position - WorkingSellQuantity;
+   
+}
 
 
 // This class is not thread safe. Only one thread should ever use it.
@@ -22,29 +29,6 @@ public class RiskLayer
         _serverContext = serverContext;
         _orderRejectedSource = orderRejectedSource;
         _maxClientOrderIds = new ulong[_serverContext.ServerHeader.GetReadonlyRef().ClientIds.Length];
-        _secondRateLimits = new RollingRateLimit[_serverContext.ServerHeader.GetReadonlyRef().InstrumentIds.Length];
-        _sessionRateLimits = new SessionRateLimit[_serverContext.ServerHeader.GetReadonlyRef().InstrumentIds.Length];
-    }
-
-    private SessionRateLimit?[] _sessionRateLimits;
-    private RollingRateLimit?[] _secondRateLimits;
-
-    public void UpdateRiskLimit(int instrumentId)
-    {
-        Instrument instrument = _serverContext.GetInstrument(instrumentId);
-        RiskLimit riskLimit = _serverContext.GetRiskLimit(instrumentId).GetReadonlyRef();
-        _sessionRateLimits[instrumentId] = riskLimit.MaxOrdersPerSession.Limit == 0 ? null : new SessionRateLimit(riskLimit.MaxOrdersPerSession.Limit);
-        _secondRateLimits[instrumentId] = riskLimit.MaxOrdersPerSecond.Limit == 0 ? null : new RollingRateLimit(riskLimit.MaxOrdersPerSecond);
-    }
-
-    public void OnInstrument(int instrumentId)
-    {
-        Instrument instrument = _serverContext.GetInstrument(instrumentId);
-        UpdateRiskLimit(instrumentId);
-        instrument.SessionManager.Changed += Timestamp =>
-        {
-            _sessionRateLimits[instrumentId]?.Reset();
-        };
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -154,6 +138,57 @@ public class RiskLayer
         return orderRejectedReasons;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void OnOrderState(in OrderState orderState)
+    {
+        if (_orderRejectedSource != OrderRejectedSource.Server)
+            return;
+
+        if (orderState.OrderStateReason == OrderStateReason.Acked)
+        {
+            ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
+            Side side = orderState.OrderProfile.Side;
+
+            int worstOrderQuantityBefore = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
+            orderRisk.Ack(orderState.OrderProfile.Quantity);
+            int worstOrderQuantityAfter = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
+            int worstOrderQuantityDelta = worstOrderQuantityAfter - worstOrderQuantityBefore;
+            
+            if (worstOrderQuantityDelta == 0)
+                return;   
+
+            ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(orderState.OrderHeader.OrderId.InstrumentId).GetRef();
+            riskLimit.WorstLongWorkingQuantity += worstOrderQuantityDelta * (side == Side.Buy ? 1 : 0);
+            riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? 1 : 0);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void OnOrderRejected(in OrderRejected orderRejected)
+    {
+        if (_orderRejectedSource != OrderRejectedSource.Server)
+            return;
+
+        if (orderRejected.OrderRejectedSource == OrderRejectedSource.Server)
+            return;
+
+        ref OrderState orderState = ref _serverContext.GetOrderState(orderRejected.OrderHeader.OrderId).GetRef();
+        ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderRejected.OrderHeader.OrderId).GetRef();
+        Side side = orderRejected.OrderProfile.Side;
+
+        int worstOrderQuantityBefore = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
+        orderRisk.Reject(orderRejected.OrderProfile.Quantity);
+        int worstOrderQuantityAfter = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
+        int worstOrderQuantityDelta = worstOrderQuantityAfter - worstOrderQuantityBefore;
+
+        if (worstOrderQuantityDelta == 0)
+            return;   
+
+        ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(orderRejected.OrderHeader.OrderId.InstrumentId).GetRef();
+        riskLimit.WorstLongWorkingQuantity += worstOrderQuantityDelta * (side == Side.Buy ? 1 : 0);
+        riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? 1 : 0);
+    }
+
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool ValidateOrder(in OrderTarget orderTarget, out Bitset64 orderRejectedReasons)
@@ -167,9 +202,8 @@ public class RiskLayer
             int strategyId = orderTarget.OrderHeader.OrderId.StrategyId;
             int clientId = orderTarget.OrderHeader.OrderId.ClientId;
 
-            int globalOrderIndex = orderTarget.OrderHeader.OrderId.GlobalIndex;
-            ref readonly OrderTarget existingTarget = ref _serverContext.GetOrderTarget(globalOrderIndex).GetReadonlyRef();
-            ref readonly OrderState orderState = ref _serverContext.GetOrderState(globalOrderIndex).GetReadonlyRef();
+            ref readonly OrderTarget existingTarget = ref _serverContext.GetOrderTarget(orderTarget.OrderHeader.OrderId).GetReadonlyRef();
+            ref readonly OrderState orderState = ref _serverContext.GetOrderState(orderTarget.OrderHeader.OrderId).GetReadonlyRef();
 
 
             // 3. Validate Creation Logic
@@ -249,7 +283,7 @@ public class RiskLayer
                 }   
             }
 
-            ref readonly RiskLimit riskLimit = ref _serverContext.GetRiskLimit(instrumentId).GetReadonlyRef();
+            ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(instrumentId).GetRef();
             ref readonly PositionHeader localPosition = ref _serverContext.GetPositionHeader(orderTarget.OrderHeader.OrderId.StrategyId, orderTarget.OrderHeader.OrderId.InstrumentId).GetReadonlyRef();
 
 
@@ -261,62 +295,65 @@ public class RiskLayer
                 return false;
             }
 
+            //Risk limits are owned by server.
+            if (_orderRejectedSource != OrderRejectedSource.Server)
+                return orderRejectedReasons.IsEmpty;
+
 
             // 10. RISK LIMITS
             // Only check risk on New or Amend (increasing size)
             if (!isCancel)
             {
                 int quantityFilled = orderState.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId ? orderState.QuantityFilled : 0;
+
                 int workingQuantity = orderTarget.OrderProfile.Quantity - quantityFilled;
                 int absWorkingQuantity = Math.Abs(workingQuantity);
 
                 // Max Order Quantity
                 if (absWorkingQuantity > riskLimit.MaxOrderQuantity)
                 {
-                    orderRejectedReasons.Set((int)OrderRejectedReason.QuantityTooLarge);
+                    orderRejectedReasons.Set((int)OrderRejectedReason.QuantityExceedsRiskLimit);
+                    return false;                   
                 }
+
+
+
+                int ackedOrderQuantity = orderTarget.OrderTargetAction == OrderTargetAction.Create ? 0 : orderState.OrderProfile.Quantity;
+                
+                ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderTarget.OrderHeader.OrderId).GetRef();
+                
+                int sign = orderTarget.OrderProfile.Sign;
+                int worstQuantityFilledBefore = orderRisk.GetWorstOrderQuantity(ackedOrderQuantity) * sign;
+                if (!orderRisk.TryAdd(orderTarget.OrderProfile.Quantity, out OrderRejectedReason reason))
+                {
+                    orderRejectedReasons.Set((int)reason);
+                    return false;
+                }
+                        
+                int worstQuantityFilledAfter = orderRisk.GetWorstOrderQuantity(ackedOrderQuantity) * sign;
+                int worstWorkingQuantityDelta = worstQuantityFilledAfter - worstQuantityFilledBefore;
+
+                //branchless
+                int worstLongWorkingQuantity = riskLimit.WorstLongWorkingQuantity + worstWorkingQuantityDelta * (sign == 1 ? 1 : 0);
+                int worstShortWorkingQuantity = riskLimit.WorstShortWorkingQuantity + worstWorkingQuantityDelta * (sign == -1 ? 1 : 0);
+
 
                 Position serverPosition = _serverContext.GetPosition(instrumentId);
-                int currentPosition = serverPosition.Header.Quantity;
+                int quantity = serverPosition.Header.Quantity;
+                int worstLongQuantity = quantity + worstLongWorkingQuantity;
+                int worstShortQuantity = quantity + worstShortWorkingQuantity;
 
-                int projectedPosition = currentPosition + workingQuantity;
-
-                if (Math.Abs(projectedPosition) > riskLimit.MaxPositionQuantity)
+                if (worstLongQuantity > riskLimit.MaxPositionQuantity || worstShortQuantity < -riskLimit.MaxPositionQuantity)
                 {
-                    bool isIncreasing = Math.Abs(projectedPosition) > Math.Abs(currentPosition);
-
-                    if (isIncreasing)
-                    {
-                        orderRejectedReasons.Set((int)OrderRejectedReason.PositionTooLarge);
-                    }
+                    orderRisk.Reject(orderTarget.OrderProfile.Quantity);
+                    orderRejectedReasons.Set((int)OrderRejectedReason.PositionExceedsRiskLimit);
+                }
+                else
+                {
+                    riskLimit.WorstLongWorkingQuantity = worstLongWorkingQuantity;
+                    riskLimit.WorstShortWorkingQuantity = worstShortWorkingQuantity;
                 }
             }
-            if (orderRejectedReasons.IsEmpty && orderTarget.OrderHeader.OrderId.IsAlgoOrder())
-            {
-                Timestamp timestamp = orderTarget.OrderHeader.NicTimestamp;
-
-                //SessionRateLimit? session = _sessionRateLimits[instrumentId];
-                RollingRateLimit? second = _secondRateLimits[instrumentId];
-
-                //bool canSendSession = session?.CanSendOrder(timestamp) ?? true;
-                bool canSendSecond = second?.CanSendOrder(timestamp) ?? true;
-                bool canSendOrder = isCancel || (/*canSendSession &&*/ canSendSecond);
-
-                if (canSendOrder)
-                {
-                    //session?.TrySendOrder(timestamp);
-                    second?.TrySendOrder(timestamp);
-                }
-                else if (!canSendSecond)
-                {
-                    orderRejectedReasons.Set((int)OrderRejectedReason.TooManyOrdersPerSecond);
-                }
-                //else if (!canSendSession)
-                //{
-                //    orderRejectedReasons.Set((int)OrderRejectedReason.TooManyOrdersPerSession);
-                //}
-            }
-
         }
         catch(Exception ex)
         {

@@ -130,14 +130,29 @@ public sealed class Position
         _isOrderActive.Set(localOrderIndex);
     }
 
+    // _isOrderActive holds LOCAL slots, but order rows are addressed globally. The owner comes from
+    // the context, not from this row's header: the header is persisted and restamped by the server on
+    // allocation (and AllocateInstrument can return early without writing it at all), so it is not a
+    // sound source of identity. _ownerClientId is fixed for the life of the context.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal OrderId GetOrderId(int localOrderIndex)
+    {
+        OrderId orderId = default;
+        orderId.ClientId = _clientId;
+        orderId.LocalIndex = localOrderIndex;
+        return orderId;
+    }
+
     public Bitset64 IsOrderActive => _isOrderActive;
     private Bitset64 _isOrderActive = new Bitset64();
     private readonly Context _context;
+    private readonly int _clientId;
 
-    public Position(Instrument instrument, Context context)
+    public Position(Instrument instrument, Context context, int clientId)
     {
         Instrument = instrument;
         _context = context;
+        _clientId = clientId;
         _headerEntry = context.GetPositionHeader(instrument.InstrumentId);
     }
 
@@ -156,7 +171,7 @@ public sealed class Position
             isOrderActive.Clear(localOrderIndex);
 
             // 1. Setup Pointers
-            SharedArrayEntry<OrderState> stateEntry = _context.GetOrderState(localOrderIndex);
+            SharedArrayEntry<OrderState> stateEntry = _context.GetOrderState(GetOrderId(localOrderIndex));
             
 
             // Clear bit and move to next for next iteration
@@ -269,11 +284,12 @@ public sealed class Position
                 int localOrderIndex = _isOrderActive.LowestSet;
                 _isOrderActive.Clear(localOrderIndex);
 
-                SharedArrayEntry<OrderState> stateEntry = _context.GetOrderState(localOrderIndex);
+                OrderId orderId = _position.GetOrderId(localOrderIndex);
+                SharedArrayEntry<OrderState> stateEntry = _context.GetOrderState(orderId);
 
                 // 1. Get Reference (Zero-Copy)
                 ref readonly OrderState state = ref stateEntry.GetReadonlyRef();
-                ref readonly OrderTarget target = ref _context.GetOrderTarget(localOrderIndex).GetReadonlyRef();
+                ref readonly OrderTarget target = ref _context.GetOrderTarget(orderId).GetReadonlyRef();
 
                 ulong seq0, seq1 = 0;
                 while(true)

@@ -133,7 +133,7 @@ public class QueueManager
             
             quantityUnfilled -= fill;
             if (isHistoricalTrade || order.IsUserOrder)
-                ServerSimlator.FromExchangeToNic_Trade(new Trade(trade.TickHeader.InstrumentId, trade.TickHeader.ExchangeTimestamp, trade.TickHeader.SendingTimestamp, trade.TickHeader.NicTimestamp, Ticks, fill, trade.Direction));
+                ServerSimlator.FromExchangeToNicToClient_Trade(new Trade(trade.TickHeader.InstrumentId, trade.TickHeader.ExchangeTimestamp, trade.TickHeader.SendingTimestamp, trade.TickHeader.NicTimestamp, Ticks, fill, trade.Direction));
             
             if (order.IsUserOrder)
             {
@@ -297,7 +297,7 @@ public class QueueManager
 
             ref SimOrder order = ref node.Item;
             if (order.IsUserOrder)
-                InstrumentSimulator.ExchangeSimulator.ServerSimulator.FromExchangeToNic_AheadOfOrder(new AheadOfOrder(order.OrderId, quantityAhead));
+                InstrumentSimulator.ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_AheadOfOrder(new AheadOfOrder(order.OrderId, quantityAhead));
             quantityAhead += order.Quantity;
         }
     }
@@ -565,7 +565,7 @@ public class OrderManager
         int quantityUnfilled = trade.Level.Quantity - marketQuantityFilled - userQuantityFilled;
         if (isHistoricalTrade && quantityUnfilled > 0)
         {
-            InstrumentSimulator.ExchangeSimulator.ServerSimulator.FromExchangeToNic_Trade(new Trade(trade.TickHeader.InstrumentId, trade.TickHeader.ExchangeTimestamp, trade.TickHeader.SendingTimestamp, trade.TickHeader.NicTimestamp, trade.Level.Ticks, trade.Level.Quantity - marketQuantityFilled, trade.Direction));
+            InstrumentSimulator.ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Trade(new Trade(trade.TickHeader.InstrumentId, trade.TickHeader.ExchangeTimestamp, trade.TickHeader.SendingTimestamp, trade.TickHeader.NicTimestamp, trade.Level.Ticks, trade.Level.Quantity - marketQuantityFilled, trade.Direction));
         }
         return userQuantityFilled;
     }

@@ -36,6 +36,7 @@
 			<DataGridTextColumn Header="CoreGroupId" Binding="{Binding CoreGroupId}" />
 			<DataGridTextColumn Header="InstrumentHeaderId" Binding="{Binding InstrumentHeaderId}" />
 			<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentIdStr}" />
+			<DataGridTextColumn Header="ExchangeInstrumentId" Binding="{Binding ExchangeInstrumentId}" />
 			<DataGridTextColumn Header="Exchange" Binding="{Binding Exchange}" />
 			<DataGridTextColumn Header="Root" Binding="{Binding Root}" />
 			<DataGridTextColumn Header="TradingStatus" Binding="{Binding TradingStatus}" />

@@ -14,8 +14,15 @@ namespace Provider;
 
 public sealed class ManualClient : Client
 {
-    public ClientContext _algoClientContext { get; }
-    public override int StrategyId() => _algoClientContext.ClientId;
+    // Set only when shadowing an algo; null for a server workspace, which has no algo behind it.
+    // Kept solely so Dispose releases what this client opened — ContextManager owns the ServerContext.
+    private readonly ClientContext? _algoContext;
+
+    // Manual orders book to the principal. A server workspace books to the reserved house id, which
+    // also keeps ClientId != StrategyId — that is what makes the RiskLayer treat them as human
+    // intervention rather than algo flow (no pause gate, no algo rate limit).
+    private readonly int _strategyId;
+    public override int StrategyId() => _strategyId;
 
     // Thread-safe entry queue. Callers enqueue from any thread via OnOrderTarget/OnControlAlgoStatus;
     // the owner thread drains via WriteSocket() before each ReadSocket(), so the socket and
@@ -24,13 +31,24 @@ public sealed class ManualClient : Client
 
     public ManualClient(string clientName, string serverName) : base(clientName.EndsWith("_GUI") ? clientName : clientName + "_GUI", serverName)
     {
-        string algoClientName = clientName.EndsWith("_GUI") ? clientName[..^4] : clientName;
-        _algoClientContext = new ClientContext(algoClientName, serverName, Access.Read);
-        // Subscribe the GUI client to the same instruments the algo trades. GetInstrument blocks per
-        // instrument (opens its ring, applies the snapshot) — serial, so the single join buffer is safe.
-        foreach(int instrumentId in _algoClientContext.InstrumentIds)
+        Context principal;
+        if (clientName == serverName)
         {
-            GetInstrument(_algoClientContext.GetInstrument(instrumentId).Header.InstrumentHeaderId);
+            principal = ContextManager.ServerContext;
+            _strategyId = OrderIdAllocator.ServerStrategyId;
+        }
+        else
+        {
+            _algoContext = new ClientContext(clientName.EndsWith("_GUI") ? clientName[..^4] : clientName, serverName, Access.Read);
+            principal = _algoContext;
+            _strategyId = _algoContext.ClientId;
+        }
+
+        // Subscribe the GUI client to the same instruments the principal trades. GetInstrument blocks
+        // per instrument (opens its ring, applies the snapshot) — serial, so the single join buffer is safe.
+        foreach(int instrumentId in principal.InstrumentIds)
+        {
+            GetInstrument(principal.GetInstrument(instrumentId).Header.InstrumentHeaderId);
         }
     }
 
@@ -49,6 +67,15 @@ public sealed class ManualClient : Client
         _writeQueue.Enqueue(() => _socket.Write(SocketChannel.Admin, in copy));
     }
 
+    // Send an edited RiskLimit for the server to apply. The GUI reads the current one, overwrites
+    // the fields it edits and sends the whole struct back — the server owns _riskLimits (created
+    // with ServerAccess), so a read-access ContextManager.ServerContext cannot write it directly.
+    public void OnRiskLimit(in RiskLimit riskLimit)
+    {
+        RiskLimit copy = riskLimit;
+        _writeQueue.Enqueue(() => _socket.Write(SocketChannel.Admin, in copy));
+    }
+
     // Owner thread drains pending mutations. Call before ReadSocket() each tick.
     public void WriteSocket()
     {
@@ -62,16 +89,14 @@ public sealed class ManualClient : Client
     {
     }
 
+    // The id addresses the row globally, so amending someone else's working order needs no second
+    // context — which is what lets a server workspace intervene on any client's order.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     protected override bool Amend(ref OrderTarget orderTarget)
     {
-        ulong clientOrderId = orderTarget.OrderHeader.OrderId;
-        int localOrderIndex = orderTarget.OrderHeader.OrderId.LocalIndex;
-        int originalClientId = OrderIdAllocator.GetClientId(clientOrderId);
-        bool isManualOrder = originalClientId == _clientId;
-        ref SharedArrayEntry<OrderTarget> orderTargetEntry = ref (isManualOrder ? ref Context.GetOrderTarget(localOrderIndex) : ref _algoClientContext.GetOrderTarget(localOrderIndex));
-        ref readonly OrderTarget existingOrderTarget = ref orderTargetEntry.GetReadonlyRef();
-        if (existingOrderTarget.OrderHeader.OrderId != clientOrderId)
+        OrderId orderId = orderTarget.OrderHeader.OrderId;
+        ref readonly OrderTarget existingOrderTarget = ref Context.GetOrderTarget(orderId).GetReadonlyRef();
+        if (existingOrderTarget.OrderHeader.OrderId != orderId)
         {
             return false;
         }
@@ -83,18 +108,17 @@ public sealed class ManualClient : Client
     {
         if (Validate(ref orderTarget, out Bitset64 orderRejectedReasons))
         {
-            int originalClientId = OrderIdAllocator.GetClientId(orderTarget.OrderHeader.OrderId);
-            bool isManualOrder = originalClientId == _clientId;
-            if (isManualOrder)
+            OrderId orderId = orderTarget.OrderHeader.OrderId;
+            // Only my own slots are mine to write; a foreign order's target row belongs to its owner.
+            if (orderId.ClientId == _clientId)
             {
-                int localOrderIndex = orderTarget.OrderHeader.OrderId.LocalIndex;
-                Context.GetOrderTarget(localOrderIndex).Write(in orderTarget);
+                Context.GetOrderTarget(orderId).Write(in orderTarget);
             }
-            _socket.Write(Context.GetInstrument(orderTarget.OrderHeader.OrderId.InstrumentId).Header.CoreGroupId, in orderTarget);
+            _socket.Write(Context.GetInstrument(orderId.InstrumentId).Header.CoreGroupId, in orderTarget);
             return true;
         }
         else
-        {           
+        {
             Reject(in orderTarget, orderRejectedReasons, OrderRejectedSource.Client);
             return false;
         }
@@ -103,7 +127,7 @@ public sealed class ManualClient : Client
     public override void Dispose()
     {
         base.Dispose();
-        _algoClientContext.Dispose();
+        _algoContext?.Dispose();
     }
 
 }
@@ -124,8 +148,7 @@ public sealed class AlgoClient : Client
     {
         //using Latency latency = new Latency((int)CallId.ClientAmend);
 
-        int localOrderIndex = orderTarget.OrderHeader.OrderId.LocalIndex;
-        ref readonly OrderTarget existingOrderTarget = ref Context.GetOrderTarget(localOrderIndex).GetReadonlyRef();
+        ref readonly OrderTarget existingOrderTarget = ref Context.GetOrderTarget(orderTarget.OrderHeader.OrderId).GetReadonlyRef();
 
         if (existingOrderTarget.OrderHeader.OrderId != orderTarget.OrderHeader.OrderId)
         {
@@ -197,10 +220,7 @@ public abstract class Client
         // server's declared CoreGroupIds (read before connecting).
         int[] channelLengths = SocketChannel.BuildChannelLengths(ContextManager.ServerContext.ServerHeader.GetReadonlyRef().CoreGroupIds);
         _socket = new ClientSocket(ClientName, ServerName, channelLengths, channelLengths);
-        _socket.Connect();
-
-        ReadOnlySpan<byte> rsrc = ReadAdmin();
-        _clientId = OnClientAllocated(in MemoryMarshal.AsRef<AllocateClient>(rsrc));
+        _clientId = _socket.Connect();
 
         Context = new ClientContext(ClientName, ServerName, Access.Write);
 
@@ -229,22 +249,32 @@ public abstract class Client
     public Instrument GetInstrument(int instrumendHeaderId)
     {
         if (Context.TryGetInstrumentId(instrumendHeaderId, out int instrumentId))
-            return Context.GetInstrument(instrumentId);
-
-        _socket.Write(SocketChannel.Admin, new AllocateInstrument() { ClientId = _clientId, InstrumentHeaderId = instrumendHeaderId });
-
-        ReadOnlySpan<byte> rsrc = ReadAdmin();
-        return OnInstrumentAllocated(in MemoryMarshal.AsRef<AllocateInstrument>(rsrc));
-
+        {
+            if (_instrumentData[instrumentId] != null)
+                return Context.GetInstrument(instrumentId);
+        }
+        else
+        {
+            ref readonly InstrumentHeader128 instrumentHeader = ref Context.GetInstrumentHeader(instrumendHeaderId).GetReadonlyRef();
+            AllocateInstrument allocateInstrument = new AllocateInstrument()
+            {
+                InstrumentHeaderId = instrumendHeaderId,
+                ClientId = _clientId,
+                Symbol = instrumentHeader.Symbology.Symbol,
+            };
+            _socket.Write(SocketChannel.Admin, in allocateInstrument);
+            ReadOnlySpan<byte> rsrc = ReadAdmin();
+            allocateInstrument = MemoryMarshal.AsRef<AllocateInstrument>(rsrc);
+            instrumentId = allocateInstrument.InstrumentId;
+        }
+        return OnInstrumentAllocated(instrumentId);
     }
 
-    private Instrument OnInstrumentAllocated(in AllocateInstrument allocated)
+    private Instrument OnInstrumentAllocated(int instrumentId)
     {
-        int instrumentId = allocated.InstrumentId;
         Instrument instrument = Context.GetInstrument(instrumentId);
         Context.GetPosition(instrument.InstrumentId);
-        RiskLayer.OnInstrument(instrument.InstrumentId);
-        OpenInstrumentDataSocket(instrumentId, allocated.Symbol.ToString());
+        OpenInstrumentDataSocket(instrumentId, instrument.Symbol.ToString());
         _coreGroupIds.Set(instrument.Header.CoreGroupId);
         Instrument?.Invoke(instrument);
         if (instrument.ProductGroupId < 0)
@@ -486,7 +516,7 @@ public abstract class Client
         NicTimestamp = orderState.OrderHeader.NicTimestamp;
         ExchangeTimestamp = orderState.OrderHeader.ExchangeTimestamp;
         int localOrderIndex = orderState.OrderHeader.OrderId.LocalIndex;
-        ref OrderTarget orderTarget = ref Context.GetOrderTarget(localOrderIndex).GetRef();
+        ref OrderTarget orderTarget = ref Context.GetOrderTarget(orderState.OrderHeader.OrderId).GetRef();
         if (orderState.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId)
         {
             if (orderState.OrderStateStatus == OrderStateStatus.Done)
@@ -499,6 +529,7 @@ public abstract class Client
             {
                 orderTarget.OrderTargetStatus = OrderStateStatus.Done;
             }
+            RiskLayer.OnOrderState(in orderState);
         }
         OrderState?.Invoke(in orderState);
     }
@@ -586,8 +617,7 @@ public abstract class Client
         if (Validate(ref orderTarget, out Bitset64 orderRejectedReasons))
         {
             //using Latency latency1 = new Latency((int)CallId.ClientWrite);
-            int localOrderIndex = orderTarget.OrderHeader.OrderId.LocalIndex;
-            Context.GetOrderTarget(localOrderIndex).Write(in orderTarget);
+            Context.GetOrderTarget(orderTarget.OrderHeader.OrderId).Write(in orderTarget);
             _socket.Write(Context.GetInstrument(orderTarget.OrderHeader.OrderId.InstrumentId).Header.CoreGroupId, in orderTarget);
             return true;
         }
@@ -604,8 +634,8 @@ public abstract class Client
         ref readonly OrderRejected orderRejected = ref MemoryMarshal.AsRef<OrderRejected>(bytes);
         NicTimestamp = orderRejected.OrderHeader.NicTimestamp;
         ExchangeTimestamp = orderRejected.OrderHeader.ExchangeTimestamp;
-        int localOrderIndex = orderRejected.OrderHeader.OrderId.LocalIndex;
-        ref OrderTarget orderTarget = ref Context.GetOrderTarget(localOrderIndex).GetRef();
+        RiskLayer.OnOrderRejected(in orderRejected);
+        ref OrderTarget orderTarget = ref Context.GetOrderTarget(orderRejected.OrderHeader.OrderId).GetRef();
         bool isTargetDone = orderRejected.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId && orderTarget.OrderHeader.Seq == orderRejected.OrderHeader.Seq;
         if (isTargetDone)
             orderTarget.OrderTargetStatus = OrderStateStatus.Done;

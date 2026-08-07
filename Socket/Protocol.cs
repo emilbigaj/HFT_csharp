@@ -48,6 +48,23 @@ public static class Protocol
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool IsWriteInProgress(this ulong sequence) => (sequence & 1UL) != 0UL;
 
+    // Resolves a cursor to the header the next entry lives at: bad magic or the wrap marker means
+    // the writer moved on to start. One redirect rule, shared by the read, skip and probe paths.
+    // The ref matters — the redirect has to reach the caller, because the length read and the
+    // pointer advanced from must come from the same resolved header.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe ulong ReadRingSeq(ref Header64* srcHdr, byte* start)
+    {
+        ulong seq = Volatile.Read(ref srcHdr->Sequence);
+        ulong magic = Volatile.Read(ref srcHdr->Magic);
+        if (magic != s_magic || seq == s_ringWrapMarker)
+        {
+            srcHdr = (Header64*)start;
+            seq = Volatile.Read(ref srcHdr->Sequence);
+        }
+        return seq;
+    }
+
     // -------- Lock primitives (slot path) --------
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -359,29 +376,16 @@ public static class Protocol
 
         Header64* srcHdr = (Header64*)src;
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        ulong readSeq()
-        {
-            ulong seq = Volatile.Read(ref srcHdr->Sequence);
-            ulong magic = Volatile.Read(ref srcHdr->Magic);
-            if (magic != s_magic || seq == s_ringWrapMarker)
-            {
-                srcHdr = (Header64*)start;
-                seq = Volatile.Read(ref srcHdr->Sequence);
-            }
-            return seq;
-        }
-
         while (true)
         {
             // 1. Initial Read of Sequence
-            ulong seq0 = readSeq();
+            ulong seq0 = ReadRingSeq(ref srcHdr, start);
 
             // 2. Spin while Writer is Active
             while (IsWriteInProgress(seq0))
             {
                 X86BaseWrapper.ExponentialPause();
-                seq0 = readSeq();
+                seq0 = ReadRingSeq(ref srcHdr, start);
             }
 
             // 3. Bail early if Stale or Empty
@@ -394,7 +398,7 @@ public static class Protocol
             int len = srcHdr->Length;
 
             // 4. Pre-Copy Validation
-            ulong seq1 = readSeq();
+            ulong seq1 = ReadRingSeq(ref srcHdr, start);
             if (seq0 != seq1)
             {
                 continue;
@@ -405,7 +409,7 @@ public static class Protocol
             Thread.MemoryBarrier();
 
             // 6. Post-Copy Validation
-            ulong seq2 = readSeq();
+            ulong seq2 = ReadRingSeq(ref srcHdr, start);
             if (seq0 != seq2)
             {
                 continue;
@@ -427,14 +431,81 @@ public static class Protocol
         }
     }
 
+    // -------- Ring Skip --------
+
+    // Walks the cursor to the writer's head without copying, so it needs no buffer and never writes
+    // to the ring (a listener mapped to the same region is undisturbed). Used by Recover() when a
+    // socket attaches to a ring already in use: the writer resumes the existing sequence space
+    // instead of restarting at 0 (a restart makes everything it publishes read as stale to a reader
+    // parked higher — permanently), and the reader parks at the head instead of replaying a backlog.
+    public static unsafe void SkipRing(ref byte* src, byte* start, byte* end, ref ulong lastReadEvenSeq)
+    {
+        if (((ulong)start & 63) != 0 || ((ulong)end & 63) != 0)
+        {
+            throw new InvalidOperationException("Ring alignment error.");
+        }
+
+        int ringSize = (int)(end - start);
+
+        while (true)
+        {
+            // 1. Resolve Cursor (loop-local, so length and advance share one header)
+            Header64* srcHdr = (Header64*)src;
+            ulong seq = ReadRingSeq(ref srcHdr, start);
+
+            // 2. Stop at the Head. Deliberately no spin, unlike TryReadFromRing: a writer that died
+            //    mid-write leaves an odd sequence nobody will ever complete, and crash recovery is
+            //    precisely when that exists. Spinning there would hang forever.
+            if (IsWriteInProgress(seq) || !seq.IsThisNewerThan(lastReadEvenSeq))
+            {
+                return;
+            }
+
+            int len = srcHdr->Length;
+
+            // 3. Validation: a writer touching this settled entry means we reached the head
+            if (seq != Volatile.Read(ref srcHdr->Sequence))
+            {
+                return;
+            }
+
+            // 4. Range-check the Length. TryReadFromRing gets this bound for free from Copy(); with
+            //    no copy here a torn header would walk us out of the ring.
+            if (len < 0 || len > ringSize)
+            {
+                return;
+            }
+
+            int alignedEntryLength = GetAlignedEntryLength(len);
+            if (alignedEntryLength > (int)(end - (byte*)srcHdr))
+            {
+                return;
+            }
+
+            // 5. Commit Skip and Advance Pointers. Sequences rise strictly by 2, so a full lap
+            //    always meets an entry that is no longer newer — this terminates.
+            lastReadEvenSeq = seq;
+
+            src = (byte*)srcHdr + alignedEntryLength;
+            if (src == end)
+            {
+                src = start;
+            }
+        }
+    }
+
     // -------- Status probes --------
 
+    // Bad magic is not an entry (uninitialised, or never written), so it probes Empty like a zero
+    // sequence does. Must match TryRead's readSeq: the probe is the logging server's scheduling
+    // signal, and either direction of disagreement is permanent because neither side ever advances.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe ReadStatus GetReadStatus(Header64* srcHdr, ulong lastEvenSeq)
     {
         ulong seq = Volatile.Read(ref srcHdr->Sequence);
+        ulong magic = Volatile.Read(ref srcHdr->Magic);
 
-        if (seq == 0UL)
+        if (magic != s_magic || seq == 0UL)
         {
             return ReadStatus.Empty;
         }
@@ -442,6 +513,8 @@ public static class Protocol
         return seq.IsThisNewerThan(lastEvenSeq) ? ReadStatus.New : ReadStatus.Old;
     }
 
+    // Must resolve the cursor exactly as the read path does, or probe and read disagree about where
+    // the next entry is — and neither ever advances to correct it.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe ReadStatus GetReadStatusFromRing(Header64* srcHdr, byte* start, byte* end, ulong lastEvenSeq)
     {
@@ -450,12 +523,7 @@ public static class Protocol
             throw new InvalidOperationException("Ring alignment error.");
         }
 
-        ulong seq = Volatile.Read(ref srcHdr->Sequence);
-
-        if (seq == s_ringWrapMarker)
-        {
-            srcHdr = (Header64*)start;
-        }
+        ReadRingSeq(ref srcHdr, start);   // resolves srcHdr; GetReadStatus re-reads the sequence
 
         return GetReadStatus(srcHdr, lastEvenSeq) == ReadStatus.New ? ReadStatus.New : ReadStatus.Empty;
     }

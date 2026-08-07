@@ -44,15 +44,12 @@ public partial class Workspace : Window, IWidgetHost
     {
         Context = context ?? throw new ArgumentNullException(nameof(context));
 
-        if (context is ClientContext clientContext)
-        {
-            ManualClient = new ManualClient(clientContext.ClientName, Context.ServerName);
-        }
-        else
-        {
-            throw new NotImplementedException();
-            //Client = new ManualClient(Context.ServerName, Context.ServerName);
-        }
+        // Passing ServerName for both names selects server mode: the GUI still connects as its own
+        // "<server>_GUI" client, but shadows every client instead of one algo and books manual
+        // orders to the reserved house strategy.
+        ManualClient = new ManualClient(
+            context is ClientContext clientContext ? clientContext.ClientName : Context.ServerName,
+            Context.ServerName);
 
         AlertManager = new AlertManager(ManualClient.Context);
         Clock.Exception += AlertManager.OnException;

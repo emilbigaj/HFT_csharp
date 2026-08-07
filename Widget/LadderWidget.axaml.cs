@@ -233,8 +233,7 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
             {
                 try
                 {
-                    int globalOrderIndex = OrderIdAllocator.GetGlobalIndex(clickedOrderId);
-                    OrderState orderState = ContextManager.ServerContext.GetOrderState(globalOrderIndex).Read();
+                    OrderState orderState = ContextManager.ServerContext.GetOrderState(clickedOrderId).Read();
 
                     if (orderState.OrderHeader.OrderId == clickedOrderId && orderState.OrderStateStatus == OrderStateStatus.Active)
                     {

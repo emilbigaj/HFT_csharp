@@ -55,16 +55,16 @@ public sealed class TestingAlgo : Algo
 
         StackList<Target> targets = new StackList<Target>(stackalloc Target[64]);
 
-        if (Lead.TryGetQuote(out Quote quote) && Friend.TryGetQuote(out Quote friend) && Instrument.TryGetQuote(out Quote inst))
+        if (Lead.TryGetQuote(out Quote quote) && Instrument.TryGetQuote(out Quote inst) && Friend.TryGetQuote(out Quote friend))
         {
-            double pc = quote.MidPrice * 0.00005;
+            double pc = quote.MidPrice * 0.0001;
             int spread = Instrument.RoundToTicks(pc);
             int half = Math.Max(spread / 2, 2);
 
-            int bidTicks = Instrument.RoundToTicks( Math.Min(inst.BidPrice, Math.Min(quote.BidPrice, friend.BidPrice * Ratio)));
+            int bidTicks = Instrument.RoundToTicks(quote.BidPrice);
             if (Math.Abs(bidTicks - _bidTicks) >= half)
                 _bidTicks = bidTicks;
-            int askTicks = Instrument.RoundToTicks( Math.Max(inst.AskPrice, Math.Max(quote.AskPrice, friend.AskPrice * Ratio)));
+            int askTicks = Instrument.RoundToTicks(quote.AskPrice);
             if (Math.Abs(askTicks - _askTicks) >= half)
                 _askTicks = askTicks;
 

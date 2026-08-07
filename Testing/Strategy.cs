@@ -22,25 +22,25 @@ public class TestingStrategy : Strategy.Strategy
         TickTocker mstickTocker = new TickTocker(DirectoryPath, 1_00, OnMS100Timestamp);
 
     }
-    protected Action<Timestamp> MS100;
+    protected Action<Timestamp>? MS100;
     private void OnMS100Timestamp(Timestamp timestamp)
     {
         MS100?.Invoke(timestamp);
     }
 
 
-    protected Action<Timestamp> TickTock;
+    protected Action<Timestamp>? TickTock;
     private void OnTickTock(Timestamp timestamp)
     {
         TickTock?.Invoke(timestamp);
     }
 
-    private Series<Point> _latency;
-    private Series<Point> _profit;
+    private readonly Series<Point> _latency;
+    private readonly Series<Point> _profit;
 
     private List<Position> _positions = new List<Position>();
 
-    public void OnFuture(Future future, Future lead, Future friend = null)
+    public void OnFuture(Future future, Future lead, Future? friend = null)
     {
         if (friend == null)
             friend = lead;
@@ -99,9 +99,9 @@ public class TestingStrategy : Strategy.Strategy
             executionAlgo.Execute();
         };
 
-        Series<Point> total = NewSeries(position.Instrument.Symbology.Root + " Profit", ref TickTock, ()=> position.Profit.Total);
+        Series<Point> total = NewSeries(position.Instrument.Symbology.Root + " Profit", ref TickTock!, ()=> position.Profit.Total);
 
-        TickTock += (Timestamp timestamp) =>
+        TickTock += timestamp =>
         {
             double totalProfit = 0;
             bool _valid = false;

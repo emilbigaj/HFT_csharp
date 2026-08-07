@@ -166,6 +166,7 @@ public abstract class Context
     protected readonly SharedArray<MessageEfficiency> _messageEfficiency;
 
     protected readonly SharedArray<OrderState> _orderStates;
+    protected readonly SharedArray<OrderRisk> _orderRisks;
     protected readonly SharedArray<OrderTarget> _orderTargets;
 
     // positions
@@ -204,32 +205,38 @@ public abstract class Context
         WorkspaceDirectoryPath = Path.Combine(DirectoryPath, "Workspaces");
         Directory.CreateDirectory(WorkspaceDirectoryPath);
 
-        _serverHeaderBox = new LetterBox<ServerHeader>(ServerName + "ServerHeader", ServerAccess);
-        _ = NewSharedArray<ServerHeader>(ServerName + "ServerHeader" + "LetterBox", 1, ServerAccess); // just for mirror
+        // Region names are PATH-JOINED, not concatenated — Tools.Memory sanitizes every character
+        // outside [A-Za-z0-9_\-.] to '_', so the separator becomes the same '_' the C++ side's
+        // std::filesystem::path join produces. Concatenating here opens a different, empty region:
+        // CreateOrOpen happily creates it, so the symptom is a hang in EnsureConnected or a
+        // permanently empty read, never an error. Keep every site below joined.
+        _serverHeaderBox = new LetterBox<ServerHeader>(ServerName / "ServerHeader", ServerAccess);
+        _ = NewSharedArray<ServerHeader>((ServerName / "ServerHeader") + "LetterBox", 1, ServerAccess); // just for mirror
 
         EnsureConnected();
 
         ref readonly ServerHeader serverHeader = ref ServerHeader.GetReadonlyRef();
 
-        _clientSocketHeaders = NewSharedArray<SocketHeader>(serverName + "ClientHeaders", serverHeader.ClientIds.Length, ServerAccess);
+        _clientSocketHeaders = NewSharedArray<SocketHeader>(serverName / "ClientHeaders", serverHeader.ClientIds.Length, ServerAccess);
 
-        _instrumentHeaders = NewSharedArray<InstrumentHeader128>(serverName + "InstrumentHeaders", serverHeader.InstrumentsCapacity, ServerAccess);
-        _instrumentHeaderIdByInstrumentId = NewSharedArray<int>(serverName + "InstrumentHeaderIdByInstrumentId", serverHeader.InstrumentIds.Length, ServerAccess);
+        _instrumentHeaders = NewSharedArray<InstrumentHeader128>(serverName / "InstrumentHeaders", serverHeader.InstrumentsCapacity, ServerAccess);
+        _instrumentHeaderIdByInstrumentId = NewSharedArray<int>(serverName / "InstrumentHeaderIdByInstrumentId", serverHeader.InstrumentIds.Length, ServerAccess);
 
-        _instrumentIdsByClientId = NewSharedArray<Bitset64>(serverName + "InstrumentIdsByClientId", serverHeader.ClientIds.Length, ServerAccess);
-        _clientIdsByInstrumentId = NewSharedArray<Bitset64>(serverName + "ClientIdsByInstrumentId", serverHeader.InstrumentIds.Length, ServerAccess);
+        _instrumentIdsByClientId = NewSharedArray<Bitset64>(serverName / "InstrumentIdsByClientId", serverHeader.ClientIds.Length, ServerAccess);
+        _clientIdsByInstrumentId = NewSharedArray<Bitset64>(serverName / "ClientIdsByInstrumentId", serverHeader.InstrumentIds.Length, ServerAccess);
         // Book ownership: the server owns the authoritative book (serverName-keyed, writable); each client
         // owns its own replica (clientName-keyed, writable) that it builds from snapshot + ring deltas.
         // directoryPath == serverName for a ServerContext and == clientName for a ClientContext, so this
         // single line keeps the array-id ordering (mirror-safe) while giving each context its own book.
-        _marketsByPrice = NewSharedArray<MarketByPrice64>(directoryPath + "MarketsByPrice", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
-        _riskLimits = NewSharedArray<RiskLimit>(serverName + "RiskLimits", serverHeader.InstrumentIds.Length, ServerAccess);
-        _messageEfficiency = NewSharedArray<MessageEfficiency>(serverName + "MessageEfficiency", serverHeader.InstrumentIds.Length, ClientAccess);
+        _marketsByPrice = NewSharedArray<MarketByPrice64>(directoryPath / "MarketsByPrice", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
+        _riskLimits = NewSharedArray<RiskLimit>(serverName / "RiskLimits", serverHeader.InstrumentIds.Length, ServerAccess);
+        _messageEfficiency = NewSharedArray<MessageEfficiency>(serverName / "MessageEfficiency", serverHeader.InstrumentIds.Length, ClientAccess);
 
-        _orderStates = NewSharedArray<OrderState>(serverName + "OrderStates", serverHeader.OrdersCapacity, ServerAccess, false);
-        _orderTargets = NewSharedArray<OrderTarget>(serverName + "OrderTargets", serverHeader.OrdersCapacity, ClientAccess, false);
+        _orderStates = NewSharedArray<OrderState>(serverName / "OrderStates", serverHeader.OrdersCapacity, ServerAccess, false);
+        _orderRisks = NewSharedArray<OrderRisk>(serverName / "OrderRisks", serverHeader.OrdersCapacity, ServerAccess, false);
+        _orderTargets = NewSharedArray<OrderTarget>(serverName / "OrderTargets", serverHeader.OrdersCapacity, ClientAccess, false);
 
-        _localPositionHeaders = NewSharedArray<PositionHeader>(serverName + "LocalPositionHeaders", serverHeader.LocalPositionsCapacity, ServerAccess, false);
+        _localPositionHeaders = NewSharedArray<PositionHeader>(serverName / "LocalPositionHeaders", serverHeader.LocalPositionsCapacity, ServerAccess, false);
 
         _instruments = new Instrument[serverHeader.InstrumentIds.Length];
         _positions = new Position[serverHeader.InstrumentIds.Length];
@@ -282,14 +289,28 @@ public abstract class Context
         _serverHeaderBox.Dispose();
         _instrumentHeaderIdByInstrumentId.Dispose();
         _instrumentIdsByClientId.Dispose();
+        _orderRisks.Dispose();
         _clientSocketHeaders.Dispose();
     }
 
     private bool _disposed;
 
-    // Abstract interface enforcing Local vs Global indexing mapping rules
-    public abstract ref SharedArrayEntry<OrderState> GetOrderState(int orderIndex);
-    public abstract ref SharedArrayEntry<OrderTarget> GetOrderTarget(int orderIndex);
+    // Order rows are ONE server-wide array (see _orderStates/_orderTargets above: both keyed by
+    // serverName, not by directoryPath), so every context is a view over the same storage. These
+    // used to be abstract, with ClientContext reading the argument as a local index and
+    // ServerContext as a global one — same signature, two meanings, so a caller holding a base
+    // Context could not know which to pass. Keyed by the id there is only one meaning: OrderId
+    // already carries clientId and localIndex, so GlobalIndex is exact and no caller needs to know
+    // whose order it is.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref SharedArrayEntry<OrderState> GetOrderState(OrderId orderId) => ref _orderStates.GetEntry(orderId.GlobalIndex);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref SharedArrayEntry<OrderTarget> GetOrderTarget(OrderId orderId) => ref _orderTargets.GetEntry(orderId.GlobalIndex);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref SharedArrayEntry<OrderRisk> GetOrderRisk(OrderId orderId) => ref _orderRisks.GetEntry(orderId.GlobalIndex);
+
     public abstract ref SharedArrayEntry<PositionHeader> GetPositionHeader(int instrumentId);
     public abstract bool TryGetInstrumentId(int instrumentHeaderId, out int instrumentId);
     public abstract Bitset64 InstrumentIds { get; }
@@ -324,6 +345,20 @@ public abstract class Context
     {
         ThrowIfInstrumentHeaderIdOutOfRange(instrumentHeaderId);
         return ref _instrumentHeaders.GetEntry(instrumentHeaderId);
+    }
+
+    // Startup-only reverse lookup for Server.LoadInstruments: the persisted record carries the
+    // exchange's id, which is stable across sessions, whereas InstrumentHeaderId is just this run's
+    // load order. Returns -1 when the contract is no longer listed, so the caller can skip it.
+    public int GetInstrumentHeaderIdByExchangeInstrumentId(int exchangeInstrumentId)
+    {
+        int instrumentsCount = ServerHeader.GetReadonlyRef().InstrumentsCount;
+        for (int instrumentHeaderId = 0; instrumentHeaderId < instrumentsCount; instrumentHeaderId++)
+        {
+            if (_instrumentHeaders[instrumentHeaderId].GetReadonlyRef().AsInstrumentHeader().ExchangeInstrumentId == exchangeInstrumentId)
+                return instrumentHeaderId;
+        }
+        return -1;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -462,7 +497,9 @@ public abstract class Context
             MultiSeqLockWriter.ReleaseLock(ref _lock);
             return;
         }
-        Position position = new Position(instrument, this);
+        // A ServerContext's positions are the server-wide rows; no client owns their order slots
+        // (only Client.Create ever sets one), so the house id is the correct inert owner.
+        Position position = new Position(instrument, this, (this as ClientContext)?.ClientId ?? OrderIdAllocator.ServerStrategyId);
         _positions[instrument.InstrumentId] = position;
         MultiSeqLockWriter.ReleaseLock(ref _lock);
         return;
@@ -624,20 +661,6 @@ public sealed class ClientContext : Context
 
     // --- Local Implementations ---
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public override ref SharedArrayEntry<OrderState> GetOrderState(int localOrderIndex)
-    {
-        int globalIndex = OrderIdAllocator.ToGlobalIndex(_clientId, localOrderIndex);
-        return ref _orderStates.GetEntry(globalIndex);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public override ref SharedArrayEntry<OrderTarget> GetOrderTarget(int localOrderIndex)
-    {
-        int globalIndex = OrderIdAllocator.ToGlobalIndex(_clientId, localOrderIndex);
-        return ref _orderTargets.GetEntry(globalIndex);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public override ref SharedArrayEntry<PositionHeader> GetPositionHeader(int instrumentId)
     {
         int localPositionIndex = GetLocalPositionIndex(_clientId, instrumentId);
@@ -701,11 +724,32 @@ public sealed class ServerContext : Context
 {
     private readonly SharedArray<PositionHeader> _serverPositionHeaders;
 
+    // Server-only: the durable record of which clients and instruments were allocated, replayed at
+    // startup. Shared memory is never the durable store — it is unlinked once the last mapper drops.
+    public FileSystemPath ClientsDirectoryPath { get; }
+    public FileSystemPath InstrumentsDirectoryPath { get; }
+
+    public FileSystemPath GetClientsFilePath(Timestamp date)
+    {
+        return ClientsDirectoryPath / (date.ToDateString() + ".allocateclient");
+    }
+
+    public FileSystemPath GetInstrumentsFilePath(Timestamp date)
+    {
+        return InstrumentsDirectoryPath / (date.ToDateString() + ".allocateinstrument");
+    }
+
     public ServerContext(FileSystemPath serverName, Access access)
         : base(serverName, serverName, access, Access.Read)
     {
         ThrowIfInvalidServerName(serverName);
-        _serverPositionHeaders = NewSharedArray<PositionHeader>(serverName + "ServerPositionHeaders", ServerHeader.GetReadonlyRef().InstrumentIds.Length, ServerAccess);
+
+        ClientsDirectoryPath = ServerName / "Clients";
+        Directory.CreateDirectory(ClientsDirectoryPath);
+        InstrumentsDirectoryPath = ServerName / "Instruments";
+        Directory.CreateDirectory(InstrumentsDirectoryPath);
+
+        _serverPositionHeaders = NewSharedArray<PositionHeader>(serverName / "ServerPositionHeaders", ServerHeader.GetReadonlyRef().InstrumentIds.Length, ServerAccess);
     }
 
     public static void ThrowIfInvalidServerName(FileSystemPath serverName)
@@ -727,8 +771,19 @@ public sealed class ServerContext : Context
     public static LetterBox<ServerHeader> Connect(in ServerHeader serverHeader)
     {
         FileSystemPath serverName = serverHeader.ServerName.ToString();
-        LetterBox<ServerHeader> serverHeaderBox = new LetterBox<ServerHeader>(serverName + "ServerHeader", Access.Write);
-        if (!serverHeaderBox.TryStore(in serverHeader))
+        // Path-joined, matching Context's _serverHeaderBox. Concatenating here names a different
+        // region, and Context.EnsureConnected() then spins forever on a box nobody writes.
+        LetterBox<ServerHeader> serverHeaderBox = new LetterBox<ServerHeader>(serverName / "ServerHeader", Access.Write);
+
+        // Reserve the house book before anyone can connect. AllocateClientId hands out
+        // ClientIds.LowestClear, so without this the FIRST client to attach takes id 0 and every
+        // manual order from a server workspace would be attributed to it. Pre-setting the bit both
+        // keeps it out of the allocator and makes the slot addressable — ThrowIfClientIdOutOfRange
+        // and the RiskLayer's StrategyIdNotAllocated check each test this bit.
+        ServerHeader reserved = serverHeader;
+        reserved.ClientIds.Set(OrderIdAllocator.ServerStrategyId);
+
+        if (!serverHeaderBox.TryStore(in reserved))
         {
             throw new InvalidOperationException($"ServerContext.Connect({serverName}), Failed to write ServerHeader to shared memory.");
         }
@@ -737,18 +792,6 @@ public sealed class ServerContext : Context
     }
 
     // --- Global Implementations ---
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public override ref SharedArrayEntry<OrderState> GetOrderState(int globalOrderIndex)
-    {
-        return ref _orderStates.GetEntry(globalOrderIndex);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public override ref SharedArrayEntry<OrderTarget> GetOrderTarget(int globalOrderIndex)
-    {
-        return ref _orderTargets.GetEntry(globalOrderIndex);
-    }
-
     public override ref SharedArrayEntry<PositionHeader> GetPositionHeader(int instrumentId)
     {
         return ref _serverPositionHeaders.GetEntry(instrumentId);
@@ -1350,19 +1393,22 @@ public class WorkspaceContext
         Manual = manual ?? throw new ArgumentNullException(nameof(manual), $"WorkspaceContext.WorkspaceContext(), manual client cannot be null.");
     }
 
+    // A ServerContext already enumerates every client's orders — including this GUI's own slice —
+    // so compositing the manual context on top of it would list those twice.
     public CompositeOrderEnumerable EnumerateOrders(int instrumentId = -1)
     {
-        return new CompositeOrderEnumerable(Primary, Manual.Context, instrumentId);
+        return new CompositeOrderEnumerable(Primary, Primary is ServerContext ? null : Manual.Context, instrumentId);
     }
 }
 
 public readonly struct CompositeOrderEnumerable
 {
     private readonly Context _primary;
-    private readonly Context _secondary;
+    private readonly Context? _secondary;
     private readonly int _instrumentId;
 
-    public CompositeOrderEnumerable(Context primary, Context secondary, int instrumentId)
+    // secondary may be null when primary already covers its rows.
+    public CompositeOrderEnumerable(Context primary, Context? secondary, int instrumentId)
     {
         _primary = primary;
         _secondary = secondary;
@@ -1380,11 +1426,13 @@ public struct CompositeOrderEnumerator
     private OrderEnumerator _primary;
     private OrderEnumerator _secondary;
     private bool _inPrimary;
+    private readonly bool _hasSecondary;
 
-    public CompositeOrderEnumerator(Context primary, Context secondary, int instrumentId)
+    public CompositeOrderEnumerator(Context primary, Context? secondary, int instrumentId)
     {
         _primary = primary.EnumerateOrders(instrumentId).GetEnumerator();
-        _secondary = secondary.EnumerateOrders(instrumentId).GetEnumerator();
+        _hasSecondary = secondary != null;
+        _secondary = _hasSecondary ? secondary!.EnumerateOrders(instrumentId).GetEnumerator() : default;
         _inPrimary = true;
         Current = default;
     }
@@ -1402,6 +1450,9 @@ public struct CompositeOrderEnumerator
             }
             _inPrimary = false;
         }
+
+        if (!_hasSecondary)
+            return false;
 
         if (_secondary.MoveNext())
         {

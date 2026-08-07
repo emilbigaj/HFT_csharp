@@ -932,6 +932,7 @@ public class ServerSimulator
 
     private readonly ByteQueue _byClientTimestamp;
 
+    private RiskLayer _riskLayer;
     private readonly ServerSocket _serverSocket;
     private readonly ClientSocket _audit;
     private readonly ClientSocket _loggingServer;
@@ -940,9 +941,6 @@ public class ServerSimulator
     private readonly WriteOnlySocket?[] _instrumentData;
 
     public bool OverrideNicTimestamp { get; set; } = false;
-
-    public int ExchangeOrderQueueLatency { get; set; } = 50;
-
 
     // from exchange event to nic, include SendingDelay + Wire
     public int FromExchangeToNicLatency { get; set; } = 100; 
@@ -973,8 +971,11 @@ public class ServerSimulator
         };
         serverHeader.CoreGroupIds.Set(0); // admin / housekeeping channel
         serverHeader.CoreGroupIds.Set(ExecutionCoreGroupId); // single trading CoreGroup (all sim instruments)
+
         LetterBox<ServerHeader> serverHeaderBox = ServerContext.Connect(in serverHeader);
         _context = new ServerContext(ServerName, Access.Write);
+        _riskLayer = new RiskLayer(_context, OrderRejectedSource.Server);
+
 
         _instrumentData = new WriteOnlySocket?[ServerHeader.InstrumentIds.Length];
 
@@ -1037,14 +1038,6 @@ public class ServerSimulator
     private void OnClientAllocated(in SocketHeader socketHeader)
     {
         _loggingServer.Write(socketHeader);
-
-        AllocateClient allocateClient = new AllocateClient()
-        {
-            ClientId = socketHeader.ClientId,
-            ClientName = socketHeader.ClientName
-        };
-
-        _serverSocket.Write(socketHeader.ClientId, SocketChannel.Admin, allocateClient);
     }
 
     private void OnClientDeallocated(in SocketHeader socketHeader)
@@ -1121,7 +1114,7 @@ public class ServerSimulator
 
 
 
-    public void FromExchangeToNic_AheadOfOrder(AheadOfOrder aheadOfOrder)
+    public void FromExchangeToNicToClient_AheadOfOrder(AheadOfOrder aheadOfOrder)
     {
         ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in aheadOfOrder, 1));
         Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<AheadOfOrder>() + Unsafe.SizeOf<Timestamp>());
@@ -1158,7 +1151,7 @@ public class ServerSimulator
 
     }
 
-    public void FromExchangeToNic_Trade(in Trade trade)
+    public void FromExchangeToNicToClient_Trade(in Trade trade)
         => FromExchangeToNicToClient_Tick(ref Unsafe.As<Trade, Tick>(ref Unsafe.AsRef(in trade)));
 
 
@@ -1282,6 +1275,47 @@ public class ServerSimulator
     }
 
 
+    public void OnControlAlgoStatus(in ControlAlgoStatus controlAlgoStatus)
+    {
+        ref SharedArrayEntry<PositionHeader> localPositionEntry = ref _context.GetPositionHeader(controlAlgoStatus.StrategyId, controlAlgoStatus.InstrumentId);
+        Timestamp now = Clock.Now;
+        PositionHeader localPosition = localPositionEntry.GetRef();
+        localPosition.OrderHeader.NicTimestamp = now;
+        localPosition.OrderHeader.ExchangeTimestamp = now;
+        localPosition.AlgoStatus = controlAlgoStatus.AlgoStatus;
+        localPositionEntry.Write(in localPosition);
+        _serverSocket.Write(controlAlgoStatus.StrategyId, _context.GetInstrument(controlAlgoStatus.InstrumentId).Header.CoreGroupId, in localPositionEntry.GetReadonlyRef());
+    }
+
+    // The server owns _riskLimits: the array is created with ServerAccess, so the GUI's read-access
+    // ContextManager.ServerContext cannot write it and sends the edited struct over admin instead.
+    // The timestamp is stamped here rather than by the sender so it is server-authoritative.
+    // RiskLayer.ValidateOrder re-reads the quantity limits from shared memory on every order, so
+    // this takes effect immediately — there is no cache to invalidate.
+    public void OnRiskLimit(in RiskLimit riskLimit)
+    {
+        RiskLimit riskLimitCopy = riskLimit;
+        ref RiskLimit _riskLimit = ref _context.GetRiskLimit(riskLimit.InstrumentId).GetRef();
+        riskLimitCopy.WorstLongWorkingQuantity = _riskLimit.WorstLongWorkingQuantity;
+        riskLimitCopy.WorstShortWorkingQuantity = _riskLimit.WorstShortWorkingQuantity;
+        
+        _context.GetRiskLimit(riskLimit.InstrumentId).Write(in riskLimitCopy); //overwrites workingorders!?
+        if (riskLimitCopy.StrategyId >= 0)
+            _serverSocket.Write(riskLimitCopy.StrategyId, _context.GetInstrument(riskLimit.InstrumentId).Header.CoreGroupId, in riskLimitCopy);
+        SaveRiskLimit(riskLimit.InstrumentId, in riskLimitCopy);
+    }
+
+    // Append-only: ServerContext.AllocateInstrument restores with ReadLastLine, so the newest line
+    // wins on restart and the earlier ones remain as the record of what changed when.
+    private void SaveRiskLimit(int instrumentId, in RiskLimit riskLimit)
+    {
+        string symbol = _context.GetInstrument(instrumentId).Symbol;
+        string riskLimitFilePath = Context.GetRiskLimitsFilePath(_context.DirectoryPath, symbol).ToString();
+        string riskLimitLine = Json.SerializeToLine(riskLimit);
+        Console.WriteLine($"ServerSimulator::SaveRiskLimit({riskLimitFilePath}):{Environment.NewLine}{riskLimitLine}");
+        File.AppendAllLines(riskLimitFilePath, new string[] { riskLimitLine });
+    }
+
     // interrupt the clock
     private Timestamp _lastAdminRead = Timestamp.MinValue;
     protected void OnInterject(Timestamp timestamp)
@@ -1323,14 +1357,11 @@ public class ServerSimulator
                             break;
                         case (byte)ControlType.AlgoStatus:
                             ref readonly ControlAlgoStatus controlAlgoStatus = ref MemoryMarshal.AsRef<ControlAlgoStatus>(src);
-                            ref SharedArrayEntry<PositionHeader> localPositionEntry = ref _context.GetPositionHeader(controlAlgoStatus.StrategyId, controlAlgoStatus.InstrumentId);
-                            Timestamp now = Clock.Now;
-                            PositionHeader localPosition = localPositionEntry.GetRef();
-                            localPosition.OrderHeader.NicTimestamp = now;
-                            localPosition.OrderHeader.ExchangeTimestamp = now;
-                            localPosition.AlgoStatus = controlAlgoStatus.AlgoStatus;
-                            localPositionEntry.Write(in localPosition);
-                            _serverSocket.Write(controlAlgoStatus.StrategyId, _context.GetInstrument(controlAlgoStatus.InstrumentId).Header.CoreGroupId, in localPositionEntry.GetReadonlyRef());
+                            OnControlAlgoStatus(in controlAlgoStatus);
+                            break;
+                        case (byte)OrderType.RiskLimit:
+                            ref readonly RiskLimit riskLimit = ref MemoryMarshal.AsRef<RiskLimit>(src);
+                            OnRiskLimit(in riskLimit);
                             break;
                     }
                     _lastAdminRead = Timestamp.MinValue;
@@ -1396,8 +1427,7 @@ public class ServerSimulator
 
     private void FromNicToClient_AheadOfOrder(in AheadOfOrder aheadOfOrder)
     {
-        int globalOrderIndex = OrderIdAllocator.GetGlobalIndex(aheadOfOrder.ClientOrderId);
-        ref SharedArrayEntry<OrderState> sharedEntry = ref _context.GetOrderState(globalOrderIndex);
+        ref SharedArrayEntry<OrderState> sharedEntry = ref _context.GetOrderState(aheadOfOrder.ClientOrderId);
         ref OrderState oldOrderState = ref sharedEntry.GetRef();
         if (oldOrderState.OrderHeader.OrderId != aheadOfOrder.ClientOrderId)
             throw new InvalidOperationException("AheadOfOrder for unknown OrderState");
@@ -1408,9 +1438,7 @@ public class ServerSimulator
     {
         if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
         {
-            int globalOrderIndex = orderTarget.OrderHeader.OrderId.GlobalIndex;
-
-            ref SharedArrayEntry<OrderState> orderStateEntry = ref _context.GetOrderState(globalOrderIndex);
+            ref SharedArrayEntry<OrderState> orderStateEntry = ref _context.GetOrderState(orderTarget.OrderHeader.OrderId);
 
             ref readonly OrderState oldOrderState = ref orderStateEntry.GetReadonlyRef();
             if (oldOrderState.OrderStateStatus == OrderStateStatus.Active)
@@ -1425,6 +1453,7 @@ public class ServerSimulator
                 QuantityFilled = 0,
                 QuantityAhead = 0,
                 OrderStateStatus = OrderStateStatus.Active,
+                OrderStateReason = OrderStateReason.PendingNew
             };
             orderState.OrderHeader.Seq = 0;
             orderState.OrderHeader.NicTimestamp = Clock.Now;
@@ -1524,10 +1553,8 @@ public class ServerSimulator
             Console.WriteLine($"                    ExecutionSimulator.FromNicToClient_OrderState(ClientOrderId: {orderState.OrderHeader.OrderId}, Client: {orderState.OrderHeader.OrderId.ClientId}, Status:{orderState.OrderStateStatus}, Seq: {orderState.OrderHeader.Seq}, Ticks: {orderState.OrderProfile.Ticks}, WorkingQuantity: {orderState.OrderProfile.Quantity - orderState.QuantityFilled}, Quantity: {orderState.OrderProfile.Quantity}, QuantityFilled: {orderState.QuantityFilled})");
         }
 
-        int globalOrderIndex = orderState.OrderHeader.OrderId.GlobalIndex;
-
-        ref SharedArrayEntry<OrderState> orderStateEntry = ref _context.GetOrderState(globalOrderIndex);
-        ref SharedArrayEntry<OrderTarget> orderTargetEntry = ref _context.GetOrderTarget(globalOrderIndex);
+        ref SharedArrayEntry<OrderState> orderStateEntry = ref _context.GetOrderState(orderState.OrderHeader.OrderId);
+        ref SharedArrayEntry<OrderTarget> orderTargetEntry = ref _context.GetOrderTarget(orderState.OrderHeader.OrderId);
 
         bool isSafeToUpdate = orderTargetEntry.GetReadonlyRef().OrderHeader.OrderId == orderState.OrderHeader.OrderId;
 
