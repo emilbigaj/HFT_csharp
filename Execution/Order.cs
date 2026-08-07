@@ -47,15 +47,17 @@ public enum OrderStateStatus : byte
 }
 
 [RegisterJson]
+// why are we pushing a new orderstate?
 public enum OrderStateReason : byte
 {
     Unknown = 0,
     PendingNew = 1,
     Acked = 2,
-    Filled = 3,
-    Canceled = 4,
-    Rejected = 5, // create rejected, not amend/cancel rejected
-    Eliminated = 6,
+    PartialFill = 3,
+    Filled = 4, // here onwards -> Done
+    Canceled = 5,
+    Rejected = 6, // create rejected, not amend/cancel rejected
+    Eliminated = 7,
 }
 
 [RegisterJson]
