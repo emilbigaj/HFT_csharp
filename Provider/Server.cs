@@ -100,6 +100,7 @@ public class Server : IDisposable
     public Server(in ServerHeader serverHeader)
     {
         ServerName = serverHeader.ServerName.ToString();
+        InitDirectories();
 
         // Publish the header before the context is built: Context.EnsureConnected spins on this box.
         _serverHeaderBox = ServerContext.Connect(in serverHeader);
@@ -134,6 +135,24 @@ public class Server : IDisposable
 
         _loggingServer.Connect();
         _audit.Connect();
+    }
+
+    private string[] _subDirectories = new string[] { "Alerts", "Audit", "Fills", "Positions", "Series", "Clients", "Instruments" };
+    private void InitDirectories()
+    {
+        foreach (string subDirectory in _subDirectories)
+        {
+            string subDirectoryPath = Path.Combine(ServerName, subDirectory);
+            Directory.CreateDirectory(subDirectoryPath);
+            if (Clock.Mode == ClockMode.Realtime)
+                continue;
+
+            foreach (string filePath in Directory.EnumerateFiles(subDirectoryPath))
+            {
+                try { File.Delete(filePath); }
+                catch { }
+            }
+        }
     }
 
     // Starts the listen thread. Call after LoadClients()/LoadInstruments() so the poll thread

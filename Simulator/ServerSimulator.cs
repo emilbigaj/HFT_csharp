@@ -439,7 +439,7 @@ public class InstrumentSimulator
                     Console.WriteLine($"        ExecutionSimulator.Take.Fill({orderState.OrderHeader.OrderId}, {signedFillQuantity}, {level.Ticks})");
                 }
 
-                Update(ref orderState, orderProfile, signedFillQuantity);
+                Update(ref orderState, orderProfile, signedFillQuantity, OrderStateReason.Filled);
                 ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, level.Ticks, signedFillQuantity, FillType.Taker);
                 workingQuantity -= signedFillQuantity;
                 if (ExchangeSimulator.MaskTaken)
@@ -460,7 +460,7 @@ public class InstrumentSimulator
         if (!found)
             throw new InvalidOperationException($"ExecutionSimulator({InstrumentDetails.Symbol}) can not Make Fill for ClientOrderId {clientOrderId}. GlobalOrderIndex is occupied by ClientOrderId {orderState.OrderHeader.OrderId}.");
 
-        Update(ref orderState, orderState.OrderProfile, quantityFilled);
+        Update(ref orderState, orderState.OrderProfile, quantityFilled, OrderStateReason.Filled);
         ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, ticks, quantityFilled, FillType.Maker);
     }
 
@@ -477,7 +477,11 @@ public class InstrumentSimulator
         }
 
         orderManager.Delete(orderState.OrderHeader.OrderId, orderState.OrderProfile.Ticks);
-        Update(ref orderState, new OrderProfile(orderState.OrderProfile.Ticks, orderState.QuantityFilled), 0);
+        // FIX shape: a cancel leaves OrderQty alone and reports CumQty; LeavesQty goes to zero by
+        // virtue of OrdStatus, not by rewriting the order. Overwriting Quantity with QuantityFilled
+        // made every cancel indistinguishable from a complete fill, which is what let the risk layer
+        // lose track of the reservation — and it destroyed the order's side when nothing had filled.
+        Update(ref orderState, orderState.OrderProfile, 0, OrderStateReason.Canceled);
     }
 
     //try fill as taker
@@ -497,7 +501,7 @@ public class InstrumentSimulator
             }
             int quantityAhead = orderManager.Enqeue(orderState.OrderHeader.OrderId, orderProfile.Ticks, workingQuantity);
             orderState.QuantityAhead = quantityAhead;
-            Update(ref orderState, orderProfile, 0);
+            Update(ref orderState, orderProfile, 0, OrderStateReason.Filled);
         }
     }
     private void Reduce(ref OrderState orderState, OrderManager orderManager, OrderProfile orderProfile)
@@ -508,7 +512,7 @@ public class InstrumentSimulator
         }
 
         orderManager.Reduce(orderState.OrderHeader.OrderId, orderProfile.Ticks, orderProfile.Quantity - orderState.QuantityFilled);
-        Update(ref orderState, orderProfile, 0);
+        Update(ref orderState, orderProfile, 0, OrderStateReason.Filled);
     }
 
     private void Reprice(ref OrderState orderState, OrderManager orderManager, OrderProfile orderProfile)
@@ -522,7 +526,10 @@ public class InstrumentSimulator
         Enqueue(ref orderState, orderManager, orderProfile);
     }
 
-    private void Update(ref OrderState orderState, OrderProfile orderProfile, int quantityFilled)
+    // orderStateReason is the TERMINAL reason this event implies — Canceled for a cancel, Filled for
+    // anything that completes the order. While quantity is still outstanding the order stays Acked,
+    // so the caller does not have to work out whether its own event finished the order.
+    private void Update(ref OrderState orderState, OrderProfile orderProfile, int quantityFilled, OrderStateReason orderStateReason)
     {
         if (orderState.OrderStateStatus == OrderStateStatus.Done)
             throw new InvalidOperationException($"ExecutionSimulator({InstrumentDetails.Symbol}) can not update {orderState.OrderHeader.OrderId}. The order is alread done.");
@@ -536,13 +543,19 @@ public class InstrumentSimulator
         orderState.OrderProfile = orderProfile;
         orderState.QuantityFilled += quantityFilled;
         orderState.OrderHeader.ExchangeTimestamp = Clock.Now;
-        if (orderState.OrderProfile.Quantity == orderState.QuantityFilled)
+
+        // A cancel is terminal regardless of how much filled. Everything else is terminal only once
+        // CumQty reaches OrderQty — which, now that a cancel no longer rewrites OrderQty, can only
+        // mean a genuine complete fill.
+        bool isDone = orderStateReason >= OrderStateReason.Canceled || orderState.OrderProfile.Quantity == orderState.QuantityFilled;
+
+        if (isDone)
         {
             orderState.OrderStateStatus = OrderStateStatus.Done;
-            orderState.OrderStateReason = OrderStateReason.Filled;
+            orderState.OrderStateReason = orderStateReason;
             if (orderState.OrderHeader.OrderId == Debug.OrderId)
             {
-                Console.WriteLine($"        ExecutionSimulator.Update.Done");
+                Console.WriteLine($"        ExecutionSimulator.Update.Done({orderStateReason})");
             }
         }
         else

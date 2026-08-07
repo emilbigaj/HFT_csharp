@@ -11,7 +11,13 @@ namespace Data;
 [RegisterJson]
 public struct Header<T>(T type) where T : Enum
 {
-    public readonly T Type = type;
+    // NOT readonly, deliberately. Json.Options sets IncludeFields, and System.Text.Json will happily
+    // serialise a readonly field but cannot deserialise into one — so a writable outer Header field
+    // (RiskLimit, OrderState) got a freshly zeroed Header<T> assigned over the constructed value, and
+    // the message type came back as 0. That silently breaks every dispatcher, since they all switch
+    // on the first byte: a RiskLimit restored from <symbol>.risklimit hit `default:` in
+    // Server.ReadAdmin and the operator's edit was dropped without a word.
+    public T Type = type;
     private unsafe fixed byte _reserved[3];
 
     static Header()

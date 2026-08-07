@@ -152,7 +152,7 @@ public class RiskLayer
             int worstOrderQuantityBefore = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
             orderRisk.Ack(orderState.OrderProfile.Quantity);
             int worstOrderQuantityAfter = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
-            int worstOrderQuantityDelta = worstOrderQuantityAfter - worstOrderQuantityBefore;
+            int worstOrderQuantityDelta = (worstOrderQuantityAfter - worstOrderQuantityBefore) * orderState.OrderProfile.Sign;
             
             if (worstOrderQuantityDelta == 0)
                 return;   
@@ -161,9 +161,22 @@ public class RiskLayer
             riskLimit.WorstLongWorkingQuantity += worstOrderQuantityDelta * (side == Side.Buy ? 1 : 0);
             riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? 1 : 0);
         }
-        else if (orderState.OrderStateReason != OrderStateReason.Filled)
+        else if (orderState.OrderStateStatus == OrderStateStatus.Done)
         {
-            int a = 0;
+            ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
+            Side side = orderState.OrderProfile.Side;
+
+            int worstOrderQuantity = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
+            int released = worstOrderQuantity - orderState.QuantityFilled;
+
+            orderRisk = default;
+
+            if (released == 0)
+                return;
+
+            ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(orderState.OrderHeader.OrderId.InstrumentId).GetRef();
+            riskLimit.WorstLongWorkingQuantity -= released * (side == Side.Buy ? 1 : 0);
+            riskLimit.WorstShortWorkingQuantity -= released * (side == Side.Sell ? 1 : 0);
         }
     }
 
@@ -353,7 +366,12 @@ public class RiskLayer
                 }
                         
                 int worstQuantityFilledAfter = orderRisk.GetWorstOrderQuantity(ackedOrderQuantity) * sign;
-                int worstWorkingQuantityDelta = worstQuantityFilledAfter - worstQuantityFilledBefore;
+                // GetWorstOrderQuantity is a magnitude. Both aggregates are signed — long positive,
+                // short negative, which is what GetShortQuantityAllowance and the worstShortQuantity
+                // check below assume — so the delta has to carry the order's sign. Adding an unsigned
+                // delta to WorstShortWorkingQuantity drove it positive, which meant the short leg of
+                // the position check could never trip however much was working.
+                int worstWorkingQuantityDelta = (worstQuantityFilledAfter - worstQuantityFilledBefore) * sign;
 
                 //branchless
                 int worstLongWorkingQuantity = riskLimit.WorstLongWorkingQuantity + worstWorkingQuantityDelta * (sign == 1 ? 1 : 0);

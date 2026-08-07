@@ -930,6 +930,7 @@ public sealed class ServerContext : Context
         string riskLimitPath = GetRiskLimitsFilePath(DirectoryPath, symbology.Symbol).ToString();
         string? riskLimitLine = Tools.Tools.ReadLastLine(riskLimitPath);
         RiskLimit riskLimit = riskLimitLine != null ? Json.Deserialize<RiskLimit>(riskLimitLine) : Clock.Mode == ClockMode.Simulation ? RiskLimit.GetMaxLimits(instrumentId) : RiskLimit.GetMinLimits(instrumentId);
+        riskLimit.InstrumentId = instrumentId;
         riskLimit.WorstShortWorkingQuantity = 0;
         riskLimit.WorstLongWorkingQuantity = 0;
         _riskLimits.GetEntry(instrumentId).Write(riskLimit);
