@@ -529,7 +529,6 @@ public abstract class Client
             {
                 orderTarget.OrderTargetStatus = OrderStateStatus.Done;
             }
-            RiskLayer.OnOrderState(in orderState);
         }
         OrderState?.Invoke(in orderState);
     }
@@ -634,7 +633,6 @@ public abstract class Client
         ref readonly OrderRejected orderRejected = ref MemoryMarshal.AsRef<OrderRejected>(bytes);
         NicTimestamp = orderRejected.OrderHeader.NicTimestamp;
         ExchangeTimestamp = orderRejected.OrderHeader.ExchangeTimestamp;
-        RiskLayer.OnOrderRejected(in orderRejected);
         ref OrderTarget orderTarget = ref Context.GetOrderTarget(orderRejected.OrderHeader.OrderId).GetRef();
         bool isTargetDone = orderRejected.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId && orderTarget.OrderHeader.Seq == orderRejected.OrderHeader.Seq;
         if (isTargetDone)

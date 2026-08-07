@@ -97,7 +97,7 @@ public class ServerScenario : Scenario
                     InstrumentHeaderId = header.InstrumentHeader.InstrumentHeaderId,
                     Symbol = "",
                 };
-                server.AllocateInstrument(ref allocateInstrument);
+                server.Server.OnAllocateInstrument(ref allocateInstrument);
                 break;
             }
             

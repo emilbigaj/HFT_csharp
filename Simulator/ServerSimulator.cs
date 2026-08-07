@@ -539,6 +539,7 @@ public class InstrumentSimulator
         if (orderState.OrderProfile.Quantity == orderState.QuantityFilled)
         {
             orderState.OrderStateStatus = OrderStateStatus.Done;
+            orderState.OrderStateReason = OrderStateReason.Filled;
             if (orderState.OrderHeader.OrderId == Debug.OrderId)
             {
                 Console.WriteLine($"        ExecutionSimulator.Update.Done");
@@ -551,6 +552,7 @@ public class InstrumentSimulator
                 Console.WriteLine($"        ExecutionSimulator.Update.Active");
             }
             orderState.OrderStateStatus = OrderStateStatus.Active;
+            orderState.OrderStateReason = OrderStateReason.Acked;
         }
         ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_OrderState(in orderState);
         UpdateMarketByPrice();
@@ -582,8 +584,6 @@ public class InstrumentSimulator
             {
                 throw new Exception("Can not create a found order!");
             }
-
-
 
             if (orderState.OrderHeader.OrderId == Debug.OrderId)
             {
@@ -767,6 +767,7 @@ public class InstrumentSimulator
                 OrderHeader = orderTarget.OrderHeader,
                 QuantityFilled = 0,
                 OrderStateStatus = OrderStateStatus.Active,
+                OrderStateReason = OrderStateReason.Acked,
                 OrderProfile = targetProfile,
             };
             orderState.OrderHeader.ExchangeTimestamp = Clock.Now;
@@ -928,17 +929,19 @@ public class ServerSimulator
 
     // Primary constructor parameters are *in scope* throughout the class.
     public FileSystemPath ServerName { get; }
-    public ref readonly ServerHeader ServerHeader => ref _context.ServerHeader.GetRef();
+    public ref readonly ServerHeader ServerHeader => ref _server.Context.ServerHeader.GetRef();
 
     private readonly ByteQueue _byClientTimestamp;
 
-    private RiskLayer _riskLayer;
-    private readonly ServerSocket _serverSocket;
-    private readonly ClientSocket _audit;
-    private readonly ClientSocket _loggingServer;
-
-    // Per-instrument broadcast rings (one writer = this server, many readers = subscribed clients).
-    private readonly WriteOnlySocket?[] _instrumentData;
+    // Everything the server does — sockets, context, risk, instrument rings, audit — lives in Server
+    // and is shared with the realtime C++ build. This class only supplies the timing around it:
+    //
+    //   exchange -> _byClientTimestamp -> ServerSimulator -> Server -> socket -> client
+    //   client   -> socket -> Server -> ServerSimulator -> _byExchangeTimestamp -> exchange
+    //
+    // so the client->server leg is instant (Server.ReadExecution/ReadAdmin are called directly) and
+    // only the exchange->client leg is delayed.
+    private readonly Server _server;
 
     public bool OverrideNicTimestamp { get; set; } = false;
 
@@ -949,9 +952,8 @@ public class ServerSimulator
     public int FromNicToClientLatency { get; set; } = 100; 
     public int FromExchangeToNicToClientLatency => FromExchangeToNicLatency + FromNicToClientLatency;
 
-    private readonly ServerContext _context;
-
-    public ServerContext ServerContext => _context;
+    public Server Server => _server;
+    public ServerContext ServerContext => _server.Context;
 
     private const int s_instrumentsCapacity = 4096;
     private const int s_ordersPerClient = 64;
@@ -972,37 +974,28 @@ public class ServerSimulator
         serverHeader.CoreGroupIds.Set(0); // admin / housekeeping channel
         serverHeader.CoreGroupIds.Set(ExecutionCoreGroupId); // single trading CoreGroup (all sim instruments)
 
-        LetterBox<ServerHeader> serverHeaderBox = ServerContext.Connect(in serverHeader);
-        _context = new ServerContext(ServerName, Access.Write);
-        _riskLayer = new RiskLayer(_context, OrderRejectedSource.Server);
-
-
-        _instrumentData = new WriteOnlySocket?[ServerHeader.InstrumentIds.Length];
-
+        // Must be up before Server's constructor, which connects its .server and .audit sockets to it.
         if (startLogginServer)
         {
-            StartLoggingServer(_context.LoggingServerName);
+            StartLoggingServer(Provider.Context.GetLoggingServerDirectoryPath(ServerName));
         }
-        _loggingServer = new ClientSocket(ServerName + ".server", _context.LoggingServerName, [SocketChannel.AdminChannelLength], [SocketChannel.AdminChannelLength]);
-        _loggingServer.Connect();
 
-        // Audit C->S is per-CoreGroup (channel index == CoreGroupId): channel 0 = admin audit,
-        // 1..7 = per-segment audit. S->C stays a single admin channel (server never reads replies).
-        _audit = new ClientSocket(ServerName + ".audit", _context.LoggingServerName, SocketChannel.BuildChannelLengths(serverHeader.CoreGroupIds), [SocketChannel.AdminChannelLength]);
-        _audit.Connect();
-
-        _serverSocket = new(ServerName, ServerHeader.ClientIds.Length);
-        _serverSocket.AllocateClientId = _context.AllocateClientId;
-        _serverSocket.DeallocateClient = _context.DeallocateClient;
-
+        // Server publishes the header, opens the context, sockets, audit and risk layer.
+        _server = new Server(in serverHeader);
 
         ExchangeSimulator = new ExchangeSimulator(this);
 
         _byClientTimestamp = new ByteQueue(64 * 4096);
 
-        _serverSocket.ClientAllocated += OnClientAllocated;
-        _serverSocket.ClientDeallocated += OnClientDeallocated;
+        // Outbound leg: Server validates, and only a target that passes risk reaches the exchange —
+        // where ExchangeSimulator applies ExchangeOrderQueueLatency in its own queue.
+        _server.OrderTarget += ExchangeSimulator.FromClientToExchange_OrderTarget;
 
+        // Server cancels the dead client's book itself; the exchange has to drop its resting orders.
+        _server.ClientClosed += ExchangeSimulator.CancelAllOrders;
+
+        // Fires once per instrument, on first allocation, before any client is attached to it.
+        _server.AllocateInstrument += OnServerAllocateInstrument;
 
         Clock.Interject += OnInterject;
         Clock.TickTock += OnTickTock;
@@ -1011,7 +1004,7 @@ public class ServerSimulator
         {
             Clock.AddReminder(new Reminder(Clock.Now.AddMinutes(1), ts =>
             {
-                _context.ServerHeader.GetRef().Timestamp = Clock.Now;
+                _server.Context.ServerHeader.GetRef().Timestamp = Clock.Now;
                 ensureInterjectionForClockUpdate();
             }));
         }
@@ -1035,18 +1028,14 @@ public class ServerSimulator
         }
     }
 
-    private void OnClientAllocated(in SocketHeader socketHeader)
+    // Server has already allocated the instrument and opened its broadcast ring; all that is left is
+    // to give the exchange sim a matching book to match against.
+    private void OnServerAllocateInstrument(AllocateInstrument allocateInstrument)
     {
-        _loggingServer.Write(socketHeader);
-    }
-
-    private void OnClientDeallocated(in SocketHeader socketHeader)
-    {
-        ExchangeSimulator.CancelAllOrders(socketHeader.ClientId);
-        SocketHeader socketHeaderCopy = socketHeader;
-        socketHeaderCopy.ClientToServerChannelCount = 0;
-        socketHeaderCopy.ServerToClientChannelCount = 0;
-        _loggingServer.Write(socketHeaderCopy);  // this is the close signal for logger
+        if (_instrumentDetailsByInstrumentHeaderId.TryGetValue(allocateInstrument.InstrumentHeaderId, out InstrumentDetails details))
+        {
+            ExchangeSimulator.Allocate(details, allocateInstrument.InstrumentId);
+        }
     }
 
     
@@ -1198,7 +1187,7 @@ public class ServerSimulator
                 spread.ShortInstrumentId = -1;
                 spread.LongInstrumentId = -1;
             }
-            _context.OnInstrumentHeader(in header128);
+            _server.OnInstrumentHeader(in header128);
         }
     }
 
@@ -1218,20 +1207,9 @@ public class ServerSimulator
             Thread.CurrentThread.Name = $"{ServerName}.Init()";
             while (!Clock.IsRunning)
             {
-                foreach(int clientId in _serverSocket.ClientIds())
-                {
-                    while (_serverSocket.TryRead(clientId, SocketChannel.Admin, out ReadOnlySpan<byte> src) == ReadStatus.New)
-                    {
-                        byte type = src[0];
-                        if (type == (byte)AllocateType.Instrument)
-                        {
-                            AllocateInstrument allocateInstrument = MemoryMarshal.Read<AllocateInstrument>(src);
-                            AllocateInstrument(ref allocateInstrument);
-                        }
-                        else
-                            throw new NotImplementedException();
-                    }
-                }
+                // Clients allocate their instruments before the clock starts, so this is the same
+                // admin drain the run loop uses — unthrottled, because nothing else is happening yet.
+                _server.ReadAdmin();
                 X86BaseWrapper.Pause();
             }
             OnInterject(Timestamp.MinValue);
@@ -1242,131 +1220,24 @@ public class ServerSimulator
 
     public void Connect()
     {
-        _serverSocket.Listen();
-    }
-    public void AllocateInstrument(ref AllocateInstrument allocateInstrument)
-    {
-        ref ServerHeader serverHeader = ref _context.ServerHeader.GetRef();
-
-        int instrumentId = _context.AllocateInstrument(allocateInstrument.InstrumentHeaderId);
-        allocateInstrument.InstrumentId = instrumentId;
-
-
-        ref InstrumentHeader128 header128 = ref _context.GetInstrumentHeader(allocateInstrument.InstrumentHeaderId).GetRef();
-        allocateInstrument.Symbol = header128.Symbology.Symbol;
-
-        OpenInstrumentData(instrumentId, allocateInstrument.Symbol.ToString());
-
-        if (_instrumentDetailsByInstrumentHeaderId.TryGetValue(allocateInstrument.InstrumentHeaderId, out InstrumentDetails details))
-        {
-            ExchangeSimulator.Allocate(details, instrumentId);
-        }
-
-        int clientId = allocateInstrument.ClientId;
-        if (clientId < 0)
-            return;
-
-        _context.AllocateInstrument(clientId, instrumentId);
-        _context.GetPositionHeader(clientId, instrumentId).GetRef().AlgoStatus = AlgoStatus.Live;
-        _serverSocket.Write(clientId, in allocateInstrument);
-        _audit.Write(SocketChannel.Admin, in allocateInstrument);
-
-        return;
-    }
-
-
-    public void OnControlAlgoStatus(in ControlAlgoStatus controlAlgoStatus)
-    {
-        ref SharedArrayEntry<PositionHeader> localPositionEntry = ref _context.GetPositionHeader(controlAlgoStatus.StrategyId, controlAlgoStatus.InstrumentId);
-        Timestamp now = Clock.Now;
-        PositionHeader localPosition = localPositionEntry.GetRef();
-        localPosition.OrderHeader.NicTimestamp = now;
-        localPosition.OrderHeader.ExchangeTimestamp = now;
-        localPosition.AlgoStatus = controlAlgoStatus.AlgoStatus;
-        localPositionEntry.Write(in localPosition);
-        _serverSocket.Write(controlAlgoStatus.StrategyId, _context.GetInstrument(controlAlgoStatus.InstrumentId).Header.CoreGroupId, in localPositionEntry.GetReadonlyRef());
-    }
-
-    // The server owns _riskLimits: the array is created with ServerAccess, so the GUI's read-access
-    // ContextManager.ServerContext cannot write it and sends the edited struct over admin instead.
-    // The timestamp is stamped here rather than by the sender so it is server-authoritative.
-    // RiskLayer.ValidateOrder re-reads the quantity limits from shared memory on every order, so
-    // this takes effect immediately — there is no cache to invalidate.
-    public void OnRiskLimit(in RiskLimit riskLimit)
-    {
-        RiskLimit riskLimitCopy = riskLimit;
-        ref RiskLimit _riskLimit = ref _context.GetRiskLimit(riskLimit.InstrumentId).GetRef();
-        riskLimitCopy.WorstLongWorkingQuantity = _riskLimit.WorstLongWorkingQuantity;
-        riskLimitCopy.WorstShortWorkingQuantity = _riskLimit.WorstShortWorkingQuantity;
-        
-        _context.GetRiskLimit(riskLimit.InstrumentId).Write(in riskLimitCopy); //overwrites workingorders!?
-        if (riskLimitCopy.StrategyId >= 0)
-            _serverSocket.Write(riskLimitCopy.StrategyId, _context.GetInstrument(riskLimit.InstrumentId).Header.CoreGroupId, in riskLimitCopy);
-        SaveRiskLimit(riskLimit.InstrumentId, in riskLimitCopy);
-    }
-
-    // Append-only: ServerContext.AllocateInstrument restores with ReadLastLine, so the newest line
-    // wins on restart and the earlier ones remain as the record of what changed when.
-    private void SaveRiskLimit(int instrumentId, in RiskLimit riskLimit)
-    {
-        string symbol = _context.GetInstrument(instrumentId).Symbol;
-        string riskLimitFilePath = Context.GetRiskLimitsFilePath(_context.DirectoryPath, symbol).ToString();
-        string riskLimitLine = Json.SerializeToLine(riskLimit);
-        Console.WriteLine($"ServerSimulator::SaveRiskLimit({riskLimitFilePath}):{Environment.NewLine}{riskLimitLine}");
-        File.AppendAllLines(riskLimitFilePath, new string[] { riskLimitLine });
+        _server.Connect();
     }
 
     // interrupt the clock
     private Timestamp _lastAdminRead = Timestamp.MinValue;
     protected void OnInterject(Timestamp timestamp)
     {
-        foreach (int clientId in _serverSocket.ClientIds())
-        {
-            // read client messages
-            while (_serverSocket.TryRead(clientId, ExecutionCoreGroupId, out ReadOnlySpan<byte> src) == ReadStatus.New)
-            {
-                byte type = src[0];
-                switch (type)
-                {
-                    case (byte)OrderType.OrderRejected:
-                        //ignore, this is sent by client to be included in audit trail.
-                        break;
-                    case (byte)OrderType.OrderTarget:
-                        ref readonly OrderTarget orderTarget = ref MemoryMarshal.AsRef<OrderTarget>(src);
-                        OnOrderTarget(in orderTarget);
-                        ExchangeSimulator.FromClientToExchange_OrderTarget(in orderTarget);
-                        break;
-                }
-            }
-        }
+        // Client -> socket -> Server, with no delay on this leg. Server validates each target and
+        // fires OrderTarget, which is bound to ExchangeSimulator's own latency queue, so the only
+        // delay on the way out is the exchange's.
+        _server.ReadExecution(ExecutionCoreGroupId);
 
+        // Admin is polled at most once a second: allocations happen in Init() before the clock runs,
+        // and scanning every client's admin channel on each interject is pure cost during a backtest.
         if (_lastAdminRead.AddSeconds(1) <= timestamp)
         {
             _lastAdminRead = timestamp;
-            foreach (int clientId in _serverSocket.ClientIds())
-            {
-                // read client messages
-                while (_serverSocket.TryRead(clientId, SocketChannel.Admin, out ReadOnlySpan<byte> src) == ReadStatus.New)
-                {
-                    byte type = src[0];
-                    switch (type)
-                    {
-                        case (byte)AllocateType.Instrument:
-                            AllocateInstrument allocateInstrument = MemoryMarshal.Read<AllocateInstrument>(src);
-                            AllocateInstrument(ref allocateInstrument);
-                            break;
-                        case (byte)ControlType.AlgoStatus:
-                            ref readonly ControlAlgoStatus controlAlgoStatus = ref MemoryMarshal.AsRef<ControlAlgoStatus>(src);
-                            OnControlAlgoStatus(in controlAlgoStatus);
-                            break;
-                        case (byte)OrderType.RiskLimit:
-                            ref readonly RiskLimit riskLimit = ref MemoryMarshal.AsRef<RiskLimit>(src);
-                            OnRiskLimit(in riskLimit);
-                            break;
-                    }
-                    _lastAdminRead = Timestamp.MinValue;
-                }
-            }
+            _server.ReadAdmin();
         }
 
         if (_byClientTimestamp.TryPeek(out Span<byte> nicSrc))
@@ -1379,43 +1250,43 @@ public class ServerSimulator
 
     protected void OnTickTock(Timestamp now)
     {
-        SharedArrayEntry<ServerHeader> serverHeaderEntry = _context.ServerHeader;
+        SharedArrayEntry<ServerHeader> serverHeaderEntry = _server.Context.ServerHeader;
         serverHeaderEntry.AcquireLock();
-        _context.ServerHeader.GetRef().Timestamp = now;
+        _server.Context.ServerHeader.GetRef().Timestamp = now;
         serverHeaderEntry.ReleaseLock();
         Timestamp timestamp = Timestamp.MinValue;
-        // read messages coming from the exhcange
+        // Release everything the exchange sent whose NIC timestamp has now arrived. This is the only
+        // delayed leg: from here on it is plain Server work, identical to what the realtime build does.
         while (_byClientTimestamp.TryPeek(out Span<byte> src) && (timestamp = MemoryMarshal.AsRef<Timestamp>(src)) <= now)
         {
             src = src.Slice(Unsafe.SizeOf<Timestamp>());
             byte type = src[0];
-            ref MarketByPrice64 mbp64 = ref Unsafe.NullRef<MarketByPrice64>();
             switch (type)
             {
                 case (byte)TickType.MarketByPriceUpdate:
                     ref readonly MarketByPrice update = ref MemoryMarshal.AsRef<MarketByPrice>(src);
-                    FromNicToClient_MarketByPrice(update, src);
+                    _server.OnMarketByPrice(in update, src);
                     break;
                 case (byte)TickType.Trade:
                 case (byte)TickType.Settlement:
                     ref readonly Tick tick = ref MemoryMarshal.AsRef<Tick>(src);
-                    FromNicToClient_Tick(in tick);
+                    _server.WriteToInstrumentData(in tick);
                     break;
                 case (byte)OrderType.Fill:
-                    ref readonly Fill fill = ref MemoryMarshal.AsRef<Fill>(src);
-                    FromNicToClient_Fill(fill);
+                    Fill fill = MemoryMarshal.Read<Fill>(src);
+                    _server.OnFill(ref fill);
                     break;
                 case (byte)OrderType.AheadOfOrder:
                     ref readonly AheadOfOrder aheadOfOrder = ref MemoryMarshal.AsRef<AheadOfOrder>(src);
-                    FromNicToClient_AheadOfOrder(aheadOfOrder);
+                    _server.OnQuantityAhead(aheadOfOrder.ClientOrderId, aheadOfOrder.Quantity);
                     break;
                 case (byte)OrderType.OrderState:
-                    ref readonly OrderState orderState = ref MemoryMarshal.AsRef<OrderState>(src);
-                    FromNicToClient_OrderState(orderState);
+                    OrderState orderState = MemoryMarshal.Read<OrderState>(src);
+                    _server.OnOrderState(ref orderState);
                     break;
                 case (byte)OrderType.OrderRejected:
-                    ref readonly OrderRejected orderRejected = ref MemoryMarshal.AsRef<OrderRejected>(src);
-                    FromNicToClient_OrderRejected(orderRejected);
+                    OrderRejected orderRejected = MemoryMarshal.Read<OrderRejected>(src);
+                    OnExchangeOrderRejected(ref orderRejected);
                     break;
                 default: // unknown
                          // handle/skip
@@ -1425,51 +1296,10 @@ public class ServerSimulator
         }
     }
 
-    private void FromNicToClient_AheadOfOrder(in AheadOfOrder aheadOfOrder)
+    // The exchange refusing a Create leaves the slot with no terminal state — in production the
+    // vendor session delivers that separately, so synthesise it here before routing the reject.
+    private void OnExchangeOrderRejected(ref OrderRejected orderRejected)
     {
-        ref SharedArrayEntry<OrderState> sharedEntry = ref _context.GetOrderState(aheadOfOrder.ClientOrderId);
-        ref OrderState oldOrderState = ref sharedEntry.GetRef();
-        if (oldOrderState.OrderHeader.OrderId != aheadOfOrder.ClientOrderId)
-            throw new InvalidOperationException("AheadOfOrder for unknown OrderState");
-        oldOrderState.QuantityAhead = aheadOfOrder.Quantity;
-    }
-
-    private void OnOrderTarget(in OrderTarget orderTarget)
-    {
-        if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
-        {
-            ref SharedArrayEntry<OrderState> orderStateEntry = ref _context.GetOrderState(orderTarget.OrderHeader.OrderId);
-
-            ref readonly OrderState oldOrderState = ref orderStateEntry.GetReadonlyRef();
-            if (oldOrderState.OrderStateStatus == OrderStateStatus.Active)
-            {
-                throw new InvalidOperationException($"OrderTarget {Json.SerializeToLine(orderTarget)} will overwrite Active OrderState");
-            }
-
-            OrderState orderState = new OrderState()
-            {
-                OrderHeader = orderTarget.OrderHeader,
-                OrderProfile = orderTarget.OrderProfile,
-                QuantityFilled = 0,
-                QuantityAhead = 0,
-                OrderStateStatus = OrderStateStatus.Active,
-                OrderStateReason = OrderStateReason.PendingNew
-            };
-            orderState.OrderHeader.Seq = 0;
-            orderState.OrderHeader.NicTimestamp = Clock.Now;
-
-            orderStateEntry.Write(in orderState);
-        }
-    }
-
-    
-    private void FromNicToClient_OrderRejected(in OrderRejected orderRejected)
-    {
-        if (orderRejected.OrderHeader.OrderId == Debug.OrderId)
-        {
-            Console.WriteLine($"                    ExecutionSimulator.FromNicToClient_OrderRejected(ClientOrderId: {orderRejected.OrderHeader.OrderId}, Client: {orderRejected.OrderHeader.OrderId.ClientId}, Reasons:{orderRejected.OrderRejectedReasonsString}, Seq: {orderRejected.OrderHeader.Seq}, Ticks: {orderRejected.OrderProfile.Ticks}, Quantity: {orderRejected.OrderProfile.Quantity}");
-        }
-
         if (orderRejected.OrderTargetAction == OrderTargetAction.Create)
         {
             OrderState orderState = new OrderState()
@@ -1479,90 +1309,11 @@ public class ServerSimulator
                 QuantityFilled = 0,
                 QuantityAhead = 0,
                 OrderStateStatus = OrderStateStatus.Done,
+                OrderStateReason = OrderStateReason.Rejected,
             };
-            FromNicToClient_OrderState(in orderState);
+            _server.OnOrderState(ref orderState);
         }
-        _serverSocket.Write(orderRejected.OrderHeader.OrderId.ClientId, _context.GetInstrument(orderRejected.OrderHeader.OrderId.InstrumentId).Header.CoreGroupId, in orderRejected);
+        _server.OnOrderRejected(ref orderRejected, "Rejected by Exchange");
     }
-
-    private void FromNicToClient_Fill(in Fill fill)
-    {
-        int strategyId = fill.OrderHeader.OrderId.StrategyId;
-        int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
-
-        Instrument instrument = _context.GetInstrument(instrumentId);
-
-        double multiplier = instrument.Multiplier;
-        double tickSize = instrument.TickSize;
-
-        // Global Update
-        ref SharedArrayEntry<PositionHeader> serverPositionHeaderEntry = ref _context.GetPositionHeader(instrumentId);
-        serverPositionHeaderEntry.AcquireLock();
-        ref PositionHeader serverPosition = ref serverPositionHeaderEntry.GetRef();
-        serverPosition.OnFill(in fill, tickSize, multiplier);
-        serverPositionHeaderEntry.ReleaseLock();
-
-        // Local Update
-        ref SharedArrayEntry<PositionHeader> localPositionHeaderEntry = ref _context.GetPositionHeader(strategyId, instrumentId);
-        localPositionHeaderEntry.AcquireLock();
-        ref PositionHeader localPosition = ref localPositionHeaderEntry.GetRef();
-        localPosition.OnFill(in fill, tickSize, multiplier);
-        localPositionHeaderEntry.ReleaseLock();
-
-        _serverSocket.Write(strategyId, instrument.Header.CoreGroupId, in fill);
-        _serverSocket.Write(strategyId, instrument.Header.CoreGroupId, in localPosition);
-        _audit.Write(instrument.Header.CoreGroupId, in fill);
-        _audit.Write(instrument.Header.CoreGroupId, in serverPosition);
-
-    }
-
-    private void FromNicToClient_Tick(in Tick tick)
-    {
-        _instrumentData[tick.TickHeader.InstrumentId]?.Write(in tick);
-    }
-
-    private void OpenInstrumentData(int instrumentId, string symbol)
-    {
-        if (_instrumentData[instrumentId] != null)
-            return;
-
-        string name = SocketChannel.GetInstrumentDataName(ServerName, symbol);
-        _instrumentData[instrumentId] = new WriteOnlySocket(name, SharedMemory.CreateOrOpen(name, SocketChannel.InstrumentDataChannelLength));
-    }
-
-    private void FromNicToClient_MarketByPrice(in MarketByPrice mbp, Span<byte> src)
-    {
-        int instrumentId = mbp.TickHeader.InstrumentId;
-        ref SharedArrayEntry<MarketByPrice64> marketByPrice64Entry = ref _context.GetMarketByPrice64(instrumentId);
-        ref MarketByPrice64 mbp64 = ref marketByPrice64Entry.GetRef();
-
-        marketByPrice64Entry.AcquireLock();
-        bool isDeltas = mbp64.TrySetAsDeltas(src);
-        marketByPrice64Entry.ReleaseLock();
-
-        if (isDeltas)
-        {
-            _instrumentData[instrumentId]?.Write(src);
-        }
-    }
-
-    private void FromNicToClient_OrderState(in OrderState orderState)
-    {
-        if (orderState.OrderHeader.OrderId == Debug.OrderId)
-        {
-            Console.WriteLine($"                    ExecutionSimulator.FromNicToClient_OrderState(ClientOrderId: {orderState.OrderHeader.OrderId}, Client: {orderState.OrderHeader.OrderId.ClientId}, Status:{orderState.OrderStateStatus}, Seq: {orderState.OrderHeader.Seq}, Ticks: {orderState.OrderProfile.Ticks}, WorkingQuantity: {orderState.OrderProfile.Quantity - orderState.QuantityFilled}, Quantity: {orderState.OrderProfile.Quantity}, QuantityFilled: {orderState.QuantityFilled})");
-        }
-
-        ref SharedArrayEntry<OrderState> orderStateEntry = ref _context.GetOrderState(orderState.OrderHeader.OrderId);
-        ref SharedArrayEntry<OrderTarget> orderTargetEntry = ref _context.GetOrderTarget(orderState.OrderHeader.OrderId);
-
-        bool isSafeToUpdate = orderTargetEntry.GetReadonlyRef().OrderHeader.OrderId == orderState.OrderHeader.OrderId;
-
-        if (isSafeToUpdate)
-            orderStateEntry.Write(in orderState);
-
-        _serverSocket.Write(orderState.OrderHeader.OrderId.ClientId, _context.GetInstrument(orderState.OrderHeader.OrderId.InstrumentId).Header.CoreGroupId, in orderState);
-    }
-
 
 }

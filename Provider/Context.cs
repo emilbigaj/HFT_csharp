@@ -930,6 +930,8 @@ public sealed class ServerContext : Context
         string riskLimitPath = GetRiskLimitsFilePath(DirectoryPath, symbology.Symbol).ToString();
         string? riskLimitLine = Tools.Tools.ReadLastLine(riskLimitPath);
         RiskLimit riskLimit = riskLimitLine != null ? Json.Deserialize<RiskLimit>(riskLimitLine) : Clock.Mode == ClockMode.Simulation ? RiskLimit.GetMaxLimits(instrumentId) : RiskLimit.GetMinLimits(instrumentId);
+        riskLimit.WorstShortWorkingQuantity = 0;
+        riskLimit.WorstLongWorkingQuantity = 0;
         _riskLimits.GetEntry(instrumentId).Write(riskLimit);
 
 
@@ -965,6 +967,13 @@ public sealed class ServerContext : Context
         string? positionLine = Tools.Tools.ReadLastLine(positionPath);
         PositionHeader positionHeader = positionLine != null ? Json.Deserialize<PositionHeader>(positionLine) : new PositionHeader();
         positionHeader.OrderHeader.OrderId = new OrderId { ClientId = clientId, StrategyId = clientId, InstrumentId = instrumentId };
+
+        // A backtest has no operator to un-pause it, and the RiskLayer rejects a paused algo with
+        // AlgoIsPaused. Realtime is forced Paused rather than left to whatever the restored row said:
+        // a persisted Live would otherwise re-arm a strategy at startup with nobody asking for it.
+        // Enabling a strategy in production is a deliberate human act.
+        positionHeader.AlgoStatus = Clock.Mode == ClockMode.Simulation ? AlgoStatus.Live : AlgoStatus.Paused;
+
         GetPositionHeader(clientId, instrumentId).Write(positionHeader);
 
         ref SharedArrayEntry<Bitset64> instrumentIdsEntry = ref GetInstrumentIdsByClientId(clientId);

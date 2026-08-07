@@ -99,7 +99,8 @@ public enum OrderRejectedReason : byte
     CancelIsActive         = 42,
     TargetIsActive         = 43,
     TargetIsStale          = 44,
-    AlgoIsPaused           = 45,
+    TooManyActiveTargets   = 45,
+    AlgoIsPaused           = 46,
 
     // ---- 50..59: Risk and business limits ----
     NotInSession           = 50,
@@ -167,6 +168,7 @@ public struct OrderRejected()
         OrderDiscarded.Set((int)OrderRejectedReason.StateIsDone);
         OrderDiscarded.Set((int)OrderRejectedReason.AlgoIsPaused);
         OrderDiscarded.Set((int)OrderRejectedReason.TooManyOrdersPerSecond);
+        OrderDiscarded.Set((int)OrderRejectedReason.TooManyActiveTargets);
     }
 
 }
@@ -248,7 +250,7 @@ public struct OrderRisk
         ref byte count = ref _counts[absQuantity];
         if (count == byte.MaxValue)
         {
-            reason = OrderRejectedReason.TooManyOrdersPerSecond;
+            reason = OrderRejectedReason.TooManyActiveTargets;
             return false;
         }
 

@@ -161,6 +161,23 @@ public class RiskLayer
             riskLimit.WorstLongWorkingQuantity += worstOrderQuantityDelta * (side == Side.Buy ? 1 : 0);
             riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? 1 : 0);
         }
+        else if (orderState.OrderStateReason != OrderStateReason.Filled)
+        {
+            int a = 0;
+        }
+    }
+
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void OnFill(in Fill fill)
+    {
+        if (_orderRejectedSource != OrderRejectedSource.Server)
+            return;
+
+        Side side = fill.OrderProfile.Side;
+        ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(fill.OrderHeader.OrderId.InstrumentId).GetRef();
+        riskLimit.WorstLongWorkingQuantity -= fill.OrderProfile.Quantity * (side == Side.Buy ? 1 : 0);
+        riskLimit.WorstShortWorkingQuantity -= fill.OrderProfile.Quantity * (side == Side.Sell ? 1 : 0);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -283,7 +300,6 @@ public class RiskLayer
                 }   
             }
 
-            ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(instrumentId).GetRef();
             ref readonly PositionHeader localPosition = ref _serverContext.GetPositionHeader(orderTarget.OrderHeader.OrderId.StrategyId, orderTarget.OrderHeader.OrderId.InstrumentId).GetReadonlyRef();
 
 
@@ -304,6 +320,9 @@ public class RiskLayer
             // Only check risk on New or Amend (increasing size)
             if (!isCancel)
             {
+                ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(instrumentId).GetRef();
+
+
                 int quantityFilled = orderState.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId ? orderState.QuantityFilled : 0;
 
                 int workingQuantity = orderTarget.OrderProfile.Quantity - quantityFilled;
@@ -321,7 +340,10 @@ public class RiskLayer
                 int ackedOrderQuantity = orderTarget.OrderTargetAction == OrderTargetAction.Create ? 0 : orderState.OrderProfile.Quantity;
                 
                 ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderTarget.OrderHeader.OrderId).GetRef();
-                
+
+                if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
+                    orderRisk = new OrderRisk();
+
                 int sign = orderTarget.OrderProfile.Sign;
                 int worstQuantityFilledBefore = orderRisk.GetWorstOrderQuantity(ackedOrderQuantity) * sign;
                 if (!orderRisk.TryAdd(orderTarget.OrderProfile.Quantity, out OrderRejectedReason reason))

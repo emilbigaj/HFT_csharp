@@ -238,10 +238,18 @@ public class Server : IDisposable
 
     public void OnRiskLimit(in RiskLimit riskLimit)
     {
-        _serverContext.GetRiskLimit(riskLimit.InstrumentId).Write(in riskLimit);
-        if (riskLimit.StrategyId >= 0)
-            WriteToExecution(riskLimit.StrategyId, _serverContext.GetInstrument(riskLimit.InstrumentId).Header.CoreGroupId, in riskLimit);
-        SaveRiskLimit(riskLimit.InstrumentId, in riskLimit);
+        // The sender read-modify-writes the whole struct, so the running working quantities in its
+        // copy are as stale as the moment it opened the edit dialog. They are server-owned state, not
+        // config — carry the live ones across or an operator editing a limit silently rewinds them.
+        RiskLimit riskLimitCopy = riskLimit;
+        ref readonly RiskLimit existing = ref _serverContext.GetRiskLimit(riskLimit.InstrumentId).GetReadonlyRef();
+        riskLimitCopy.WorstLongWorkingQuantity = existing.WorstLongWorkingQuantity;
+        riskLimitCopy.WorstShortWorkingQuantity = existing.WorstShortWorkingQuantity;
+
+        _serverContext.GetRiskLimit(riskLimit.InstrumentId).Write(in riskLimitCopy);
+        if (riskLimitCopy.StrategyId >= 0)
+            WriteToExecution(riskLimitCopy.StrategyId, _serverContext.GetInstrument(riskLimit.InstrumentId).Header.CoreGroupId, in riskLimitCopy);
+        SaveRiskLimit(riskLimit.InstrumentId, in riskLimitCopy);
     }
 
     public void SaveRiskLimit(int instrumentId, in RiskLimit riskLimit)
@@ -255,7 +263,7 @@ public class Server : IDisposable
 
     public void OnControlAlgoStatus(int strategyId, int instrumentId, AlgoStatus algoStatus)
     {
-        Timestamp now = Timestamp.UtcNow;
+        Timestamp now = Clock.Now;
         ref SharedArrayEntry<PositionHeader> localPositionEntry = ref _serverContext.GetPositionHeader(strategyId, instrumentId);
         PositionHeader localPosition = localPositionEntry.GetReadonlyRef();
         localPosition.OrderHeader.ExchangeTimestamp = now;
@@ -285,7 +293,7 @@ public class Server : IDisposable
                 orderTarget.OrderTargetStatus = OrderStateStatus.Active;
                 orderTarget.OrderTargetAction = OrderTargetAction.Cancel;
                 orderTarget.OrderHeader.Seq += 1_000_000;
-                orderTarget.OrderHeader.NicTimestamp = Timestamp.UtcNow;
+                orderTarget.OrderHeader.NicTimestamp = Clock.Now;
                 // Client process is dead, so the server is the slot's sole writer: stamp the cancel in
                 // so the vendor's replay-on-ack cancels a still-PendingNew order.
                 orderTargetEntry.RecoveryWrite(in orderTarget);
@@ -372,10 +380,10 @@ public class Server : IDisposable
             existingOrderState.OrderStateReason = orderState.OrderStateReason;
             existingOrderState.QuantityFilled = orderState.QuantityFilled;
             existingOrderState.OrderHeader.ExchangeTimestamp = orderState.OrderHeader.ExchangeTimestamp;
-            existingOrderState.OrderHeader.NicTimestamp = Timestamp.UtcNow;
+            existingOrderState.OrderHeader.NicTimestamp = Clock.Now;
             orderStateEntry.ReleaseLock();
         }
-
+        _riskLayer.OnOrderState(in existingOrderState);
         WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
         OrderState?.Invoke(in existingOrderState);
         return existingOrderState;
@@ -384,9 +392,13 @@ public class Server : IDisposable
     public OrderRejected OnOrderRejected(ref OrderRejected orderRejected, string message)
     {
         ref OrderState orderState = ref _serverContext.GetOrderState(orderRejected.OrderHeader.OrderId).GetRef();
+        if (orderState.OrderStateStatus == OrderStateStatus.Done && orderRejected.OrderRejectedReasons.Raw == 1UL << (int)OrderRejectedReason.OrderNotFound)
+            orderRejected.OrderRejectedReasons = new Bitset64(1UL << (int)OrderRejectedReason.StateIsDone);
+
         if (orderState.OrderHeader.OrderId == orderRejected.OrderHeader.OrderId)
         {
-            orderRejected.OrderHeader.NicTimestamp = Timestamp.UtcNow;
+            orderRejected.OrderHeader.NicTimestamp = Clock.Now;
+            _riskLayer.OnOrderRejected(in orderRejected);
             Reject(in orderRejected, message);
             return orderRejected;
         }
@@ -425,12 +437,12 @@ public class Server : IDisposable
                 OrderStateStatus = isValid ? OrderStateStatus.Active : OrderStateStatus.Done,
                 // Seq 0 already means "not acked"; naming it makes the RiskLayer retire hooks able to
                 // tell PendingNew from an ack without inferring it from the sequence.
-                OrderStateReason = OrderStateReason.PendingNew,
+                OrderStateReason = isValid ? OrderStateReason.PendingNew : OrderStateReason.Rejected,
                 QuantityFilled = 0,
                 QuantityAhead = 0,
             };
             orderState.OrderHeader.Seq = 0; // indicates new Order but that ordertarget is not acked by exchange
-            orderState.OrderHeader.NicTimestamp = Timestamp.UtcNow;
+            orderState.OrderHeader.NicTimestamp = Clock.Now;
             orderStateEntry.ReleaseLock();
             WriteToExecution(in orderState.OrderHeader, in orderState);
         }
@@ -504,7 +516,7 @@ public class Server : IDisposable
 
         // Identity (ClientId/StrategyId/InstrumentId) is packed inside ClientOrderId, and the equality
         // check above guarantees it matches the state's - no re-stamping needed.
-        fill.OrderHeader.NicTimestamp = Timestamp.UtcNow;
+        fill.OrderHeader.NicTimestamp = Clock.Now;
 
         int strategyId = fill.OrderHeader.OrderId.StrategyId;
         int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
@@ -527,6 +539,8 @@ public class Server : IDisposable
         localPositionHeaderEntry.AcquireLock();
         localPosition.OnFill(in fill, tickSize, multiplier);
         localPositionHeaderEntry.ReleaseLock();
+
+        _riskLayer.OnFill(in fill);
 
         int coreGroupId = instrument.Header.CoreGroupId;
         WriteToExecution(strategyId, coreGroupId, in fill);
