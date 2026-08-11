@@ -439,7 +439,7 @@ public class InstrumentSimulator
                     Console.WriteLine($"        ExecutionSimulator.Take.Fill({orderState.OrderHeader.OrderId}, {signedFillQuantity}, {level.Ticks})");
                 }
 
-                Update(ref orderState, orderProfile, signedFillQuantity, OrderStateReason.Filled);
+                Update(ref orderState, orderProfile, signedFillQuantity, OrderStateReason.PartialFill);
                 ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, level.Ticks, signedFillQuantity, FillType.Taker);
                 workingQuantity -= signedFillQuantity;
                 if (ExchangeSimulator.MaskTaken)
@@ -460,7 +460,7 @@ public class InstrumentSimulator
         if (!found)
             throw new InvalidOperationException($"ExecutionSimulator({InstrumentDetails.Symbol}) can not Make Fill for ClientOrderId {clientOrderId}. GlobalOrderIndex is occupied by ClientOrderId {orderState.OrderHeader.OrderId}.");
 
-        Update(ref orderState, orderState.OrderProfile, quantityFilled, OrderStateReason.Filled);
+        Update(ref orderState, orderState.OrderProfile, quantityFilled, OrderStateReason.PartialFill);
         ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, ticks, quantityFilled, FillType.Maker);
     }
 
@@ -501,7 +501,7 @@ public class InstrumentSimulator
             }
             int quantityAhead = orderManager.Enqeue(orderState.OrderHeader.OrderId, orderProfile.Ticks, workingQuantity);
             orderState.QuantityAhead = quantityAhead;
-            Update(ref orderState, orderProfile, 0, OrderStateReason.Filled);
+            Update(ref orderState, orderProfile, 0, OrderStateReason.Acked);
         }
     }
     private void Reduce(ref OrderState orderState, OrderManager orderManager, OrderProfile orderProfile)
@@ -512,7 +512,7 @@ public class InstrumentSimulator
         }
 
         orderManager.Reduce(orderState.OrderHeader.OrderId, orderProfile.Ticks, orderProfile.Quantity - orderState.QuantityFilled);
-        Update(ref orderState, orderProfile, 0, OrderStateReason.Filled);
+        Update(ref orderState, orderProfile, 0, OrderStateReason.Acked);
     }
 
     private void Reprice(ref OrderState orderState, OrderManager orderManager, OrderProfile orderProfile)
@@ -552,7 +552,7 @@ public class InstrumentSimulator
         if (isDone)
         {
             orderState.OrderStateStatus = OrderStateStatus.Done;
-            orderState.OrderStateReason = orderStateReason;
+            orderState.OrderStateReason = orderStateReason == OrderStateReason.PartialFill ? OrderStateReason.Filled : orderStateReason;
             if (orderState.OrderHeader.OrderId == Debug.OrderId)
             {
                 Console.WriteLine($"        ExecutionSimulator.Update.Done({orderStateReason})");
@@ -565,7 +565,12 @@ public class InstrumentSimulator
                 Console.WriteLine($"        ExecutionSimulator.Update.Active");
             }
             orderState.OrderStateStatus = OrderStateStatus.Active;
-            orderState.OrderStateReason = OrderStateReason.Acked;
+            // Keep what the caller said: the reason is WHY this state is being published, so a fill
+            // that leaves quantity working stays PartialFill and a rest/amend stays Acked.
+            // Hardcoding Acked here made PartialFill unreachable, and made RiskLayer run its ack
+            // path on every partial fill — releasing the order's reservation a second time on top
+            // of OnFill.
+            orderState.OrderStateReason = orderStateReason;
         }
         ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_OrderState(in orderState);
         UpdateMarketByPrice();
@@ -1161,46 +1166,56 @@ public class ServerSimulator
     private readonly HashMap<int, InstrumentDetails> _instrumentDetailsByInstrumentHeaderId = new HashMap<int, InstrumentDetails>();
 
 
-    public void OnInstrumentDetails(InstrumentDetails details)
+    public void OnInstrumentDetails(InstrumentDetails instrumentDetails)
     {
-        if (_instrumentDetailsBySymbol.TryAdd(details.Symbology.Symbol, details))
+        if (_instrumentDetailsBySymbol.TryAdd(instrumentDetails.Symbology.Symbol, instrumentDetails))
         {
             int instrumentHeaderId = _instrumentDetailsByInstrumentHeaderId.Count;
-            _instrumentDetailsByInstrumentHeaderId.TryAdd(instrumentHeaderId, details);
+            _instrumentDetailsByInstrumentHeaderId.TryAdd(instrumentHeaderId, instrumentDetails);
 
             InstrumentHeader128 header128 = default;
             ref InstrumentHeader header = ref Unsafe.As<InstrumentHeader128, InstrumentHeader>(ref header128);
 
             header = new InstrumentHeader()
             {
-                InstrumentType = details.InstrumentType,
+                InstrumentType = instrumentDetails.InstrumentType,
                 CoreGroupId = ExecutionCoreGroupId,
                 InstrumentId = -1,
                 InstrumentHeaderId = instrumentHeaderId,
-                Exchange = new String8(details.Exchange),
-                Root = new String8(details.Root),
-                InverseTickSize = details.InverseTickSize,
-                TickSize = details.TickSize,
+                Exchange = new String8(instrumentDetails.Exchange),
+                Root = new String8(instrumentDetails.Root),
+                InverseTickSize = instrumentDetails.InverseTickSize,
+                TickSize = instrumentDetails.TickSize,
             };
-            if (details.InstrumentType == InstrumentType.Future)
+            if (instrumentDetails.InstrumentType == InstrumentType.Future)
             {
                 ref FutureHeader future = ref Unsafe.As<InstrumentHeader128, FutureHeader>(ref header128);
-                future.Multiplier = details.Multiplier;
-                future.ExpiryDate = details.ExpiryDate!.Value;
-                future.ExpiryType = details.ExpiryType!.Value;
+                future.Multiplier = instrumentDetails.Multiplier;
+                future.MaturityDate = instrumentDetails.MaturityDate!.Value;
+                future.MaturityType = instrumentDetails.MaturityType!.Value;
             }
-            else if (details.InstrumentType == InstrumentType.Spread)
+            else if (instrumentDetails.InstrumentType == InstrumentType.Spread)
             {
+                // Legs are the source of truth; InstrumentDetails.SpreadHeader resolves them to the
+                // header's fixed long/short pair so that interpretation lives in exactly one place.
+                SpreadHeader fromDetails = instrumentDetails.SpreadHeader;
                 ref SpreadHeader spread = ref Unsafe.As<InstrumentHeader128, SpreadHeader>(ref header128);
-                spread.Multiplier = details.Multiplier;
-                spread.ShortExpiryDate = details.ShortExpiryDate!.Value;
-                spread.ShortExpiryType = details.ShortExpiryType!.Value;
-                spread.LongExpiryDate = details.LongExpiryDate!.Value;
-                spread.LongExpiryType = details.LongExpiryType!.Value;
+                spread.Multiplier = instrumentDetails.Multiplier;
+                spread.ShortMaturityDate = fromDetails.ShortMaturityDate;
+                spread.ShortMaturityType = fromDetails.ShortMaturityType;
+                spread.LongMaturityDate = fromDetails.LongMaturityDate;
+                spread.LongMaturityType = fromDetails.LongMaturityType;
                 spread.ShortInstrumentId = -1;
                 spread.LongInstrumentId = -1;
             }
             _server.OnInstrumentHeader(in header128);
+            foreach(InstrumentDetail instrumentDetail in instrumentDetails.Schedule)
+            {
+                Clock.AddReminder(new Reminder(instrumentDetail.Timestamp, ts =>
+                {
+                    throw new NotImplementedException();
+                }));
+            }
         }
     }
 

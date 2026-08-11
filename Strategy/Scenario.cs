@@ -77,7 +77,7 @@ public class Scenario
         return futureHeaders;
     }
 
-    public FutureHeader GetFutureHeader(string exchange, string root, Timestamp expiry)
+    public FutureHeader GetFutureHeader(string exchange, string root, Timestamp maturity)
     {
         Context context = ContextManager.ServerContext;
 
@@ -88,7 +88,7 @@ public class Scenario
             ref FutureHeader futureHeader = ref header128.AsFuture();
             if (futureHeader.InstrumentHeader.Exchange == _exchange && futureHeader.InstrumentHeader.Root == _root)
             {
-                if (futureHeader.ExpiryDate >= expiry)
+                if (futureHeader.MaturityDate >= maturity)
                 {
                     return futureHeader;
                 }
@@ -97,7 +97,7 @@ public class Scenario
         return default;
     }
 
-    public Future GetFuture(string exchange, string root, Timestamp expiry, int[]? months = null)
+    public Future GetFuture(string exchange, string root, Timestamp maturity, int[]? months = null)
     {
         Context context = ContextManager.ServerContext;
 
@@ -108,10 +108,10 @@ public class Scenario
             ref FutureHeader futureHeader = ref header128.AsFuture();
             if (futureHeader.InstrumentHeader.Exchange == _exchange && futureHeader.InstrumentHeader.Root == _root)
             {
-                if (months != null && !months.Contains(futureHeader.ExpiryDate.Month))
+                if (months != null && !months.Contains(futureHeader.MaturityDate.Month))
                     continue;
 
-                if (futureHeader.ExpiryDate >= expiry)
+                if (futureHeader.MaturityDate >= maturity)
                 {
                     return (Client.GetInstrument(futureHeader.InstrumentHeader.InstrumentHeaderId) as Future)!;
                 }

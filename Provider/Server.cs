@@ -401,17 +401,18 @@ public class Server : IDisposable
             existingOrderState.OrderHeader.ExchangeTimestamp = orderState.OrderHeader.ExchangeTimestamp;
             existingOrderState.OrderHeader.NicTimestamp = Clock.Now;
             orderStateEntry.ReleaseLock();
+            _riskLayer.OnOrderState(in existingOrderState);
         }
-        _riskLayer.OnOrderState(in existingOrderState);
         WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
         OrderState?.Invoke(in existingOrderState);
         return existingOrderState;
     }
 
+    private const ulong _orderNotFound = 1UL << (int)OrderRejectedReason.OrderNotFound;
     public OrderRejected OnOrderRejected(ref OrderRejected orderRejected, string message)
     {
         ref OrderState orderState = ref _serverContext.GetOrderState(orderRejected.OrderHeader.OrderId).GetRef();
-        if (orderState.OrderStateStatus == OrderStateStatus.Done && orderRejected.OrderRejectedReasons.Raw == 1UL << (int)OrderRejectedReason.OrderNotFound)
+        if (orderState.OrderStateStatus == OrderStateStatus.Done && orderRejected.OrderRejectedReasons.Raw == _orderNotFound)
             orderRejected.OrderRejectedReasons = new Bitset64(1UL << (int)OrderRejectedReason.StateIsDone);
 
         if (orderState.OrderHeader.OrderId == orderRejected.OrderHeader.OrderId)
@@ -423,7 +424,6 @@ public class Server : IDisposable
         }
         else
         {
-            Console.WriteLine($"Server::OnOrderRejected: unknown clientOrderId{Environment.NewLine}{orderRejected}");
             return new OrderRejected();
         }
     }

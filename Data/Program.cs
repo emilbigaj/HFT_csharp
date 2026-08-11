@@ -327,7 +327,7 @@ public static class Program
             Console.WriteLine(history.FilePath);
             Console.WriteLine(history.Footer);
 
-            //if ((history.Symbology as FutureSymbology).ExpiryDate < new Timestamp(2024, 1, 1))
+            //if ((history.Symbology as FutureSymbology).MaturityDate < new Timestamp(2024, 1, 1))
             //    continue;
 
             MarketByPrice64 marketByPrice64 = new MarketByPrice64();

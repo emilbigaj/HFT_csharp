@@ -65,6 +65,121 @@ namespace Tools
     }
 
 
+    /// <summary>
+    /// Exact division of a tick-aligned price mantissa by a fixed tick step, without a hardware
+    /// integer divide. Every book, order, and trade price CME publishes is a whole number of ticks,
+    /// so the mantissa is an exact multiple of the step, and exact division by an invariant divisor
+    /// is a shift plus one multiply (Granlund and Montgomery, "Division by Invariant Integers using
+    /// Multiplication"): factor the step into 2^k times an odd part, then
+    ///   ticks = (mantissa >> k) * oddInverse   (mod 2^64),
+    /// where oddInverse is the modular inverse of the odd part.
+    ///
+    /// Bit-exact across the signed 64-bit range (negative spread prices included) and - unlike a
+    /// floating reciprocal - never loses precision on a large mantissa. Valid only on tick-aligned
+    /// prices, so used only where CME guarantees alignment (never off-tick statistics entries).
+    ///
+    /// The double side (<see cref="FromPrice"/> / <see cref="ToPrice"/>) is the same conversion for
+    /// prices that are already doubles: a multiply by the tick size or its reciprocal, no divide.
+    /// The mantissa scale is a constructor argument, not an assumption - a billion for CME's
+    /// nine-decimal wire prices, 1 for a feed whose prices are already whole price units.
+    /// </summary>
+    public struct TickDivision
+    {
+        private int _shift;                 // the step's power-of-two factor (its trailing zero bits)
+        private ulong _oddInverse;          // modular inverse (mod 2^64) of the step's odd part
+        private long _step;                 // the tick step itself, in mantissa units; 0 until set
+        private long _scale;                // mantissa units to one price unit
+        private double _tickSize;           // one tick as a price
+        private double _inverseTickSize;    // its reciprocal, rounded through decimal so exact ticks stay exact
+
+        /// <summary>The inverse of an odd number modulo 2^64 by Newton-Hensel: the seed is good to five bits and each of the five steps doubles the correct bits.</summary>
+        private static ulong ModularInverse(ulong odd)
+        {
+            unchecked
+            {
+                ulong x = (3UL * odd) ^ 2UL;
+                x *= 2 - odd * x;
+                x *= 2 - odd * x;
+                x *= 2 - odd * x;
+                x *= 2 - odd * x;
+                x *= 2 - odd * x;
+                return x;
+            }
+        }
+
+        /// <param name="step">The tick step, in mantissa units per tick.</param>
+        /// <param name="scale">Mantissa units to one price unit - a billion for CME's nine-decimal wire prices.</param>
+        public TickDivision(long step, long scale) : this() { Set(step, scale); }
+
+        /// <summary>Builds the division from an instrument's display tick and factor: one tick is tickSize/displayFactor Globex units, times the mantissa scale.</summary>
+        public static TickDivision FromDisplayTick(double tickSize, double displayFactor, long scale)
+        {
+            TickDivision division = default;
+            division.SetDisplayTick(tickSize, displayFactor, scale);
+            return division;
+        }
+
+        /// <summary>Sets the tick step (a nonzero mantissa count per tick) and precomputes the divide. The price side then works in mantissa/scale units.</summary>
+        public void Set(long step, long scale) => Set(step, scale, scale == 0 ? 0.0 : step / (double)scale);
+
+        /// <summary>Sets the step from the display tick and factor, as <see cref="FromDisplayTick"/>. The price side then works in display prices.</summary>
+        public void SetDisplayTick(double tickSize, double displayFactor, long scale)
+        {
+            Set((long)Math.Round(tickSize / displayFactor, MidpointRounding.AwayFromZero) * scale, scale, tickSize);
+        }
+
+        private void Set(long step, long scale, double tickSize)
+        {
+            _step = step;
+            _scale = scale;
+            _tickSize = tickSize;
+            _inverseTickSize = tickSize == 0.0 || !double.IsFinite(tickSize) ? 0.0 : (double)(1.0m / (decimal)tickSize);
+
+            if (step == 0)
+            {
+                _shift = 0;
+                _oddInverse = 1;
+                return;
+            }
+            _shift = BitOperations.TrailingZeroCount((ulong)step);
+            _oddInverse = ModularInverse((ulong)step >> _shift);
+        }
+
+        /// <summary>The tick step in mantissa units; 0 until set.</summary>
+        public readonly long Step => _step;
+
+        /// <summary>Mantissa units to one price unit, as given to the constructor.</summary>
+        public readonly long Scale => _scale;
+
+        /// <summary>One tick as a price - the unit <see cref="FromPrice"/> and <see cref="ToPrice"/> work in.</summary>
+        public readonly double TickSize => _tickSize;
+
+        public readonly double InverseTickSize => _inverseTickSize;
+
+        public readonly bool IsSet => _step != 0;
+
+        /// <summary>The tick count of a tick-aligned price mantissa - exact, no divide; zero when the step is unset.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly long ToTicks(long priceMantissa)
+        {
+            if (_step == 0)
+                return 0;
+            return unchecked((long)((ulong)(priceMantissa >> _shift) * _oddInverse));
+        }
+
+        /// <summary>The tick-aligned price mantissa of a tick count - the exact reverse of <see cref="ToTicks"/>, a single multiply.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly long ToPriceMantissa(int ticks) => ticks * _step;
+
+        /// <summary>The tick count of a price - one multiply and a round, so an off-tick price snaps to the nearest tick; zero when the step is unset.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly int FromPrice(double price) => (price * _inverseTickSize).RoundToInt();
+
+        /// <summary>The price of a tick count - the exact reverse of <see cref="FromPrice"/> on tick-aligned input, a single multiply.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly double ToPrice(int ticks) => ticks * _tickSize;
+    }
+
     public class ThisStateShouldNeverOccur : Exception
     {
         public ThisStateShouldNeverOccur(string message) : base(message) { }

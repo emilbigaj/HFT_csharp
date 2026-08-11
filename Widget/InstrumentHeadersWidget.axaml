@@ -45,13 +45,13 @@
 			<DataGridTextColumn Header="InverseTickSize" Binding="{Binding InverseTickSize}" IsVisible="False" />
 
 			<DataGridTextColumn Header="Multiplier" Binding="{Binding Multiplier}" IsVisible="True" />
-			<DataGridTextColumn Header="ExpiryDate" Binding="{Binding ExpiryDateStr}" IsVisible="False" />
-			<DataGridTextColumn Header="ExpiryType" Binding="{Binding ExpiryType}" IsVisible="False" />
+			<DataGridTextColumn Header="MaturityDate" Binding="{Binding MaturityDateStr}" IsVisible="False" />
+			<DataGridTextColumn Header="MaturityType" Binding="{Binding MaturityType}" IsVisible="False" />
 
-			<DataGridTextColumn Header="LongExpiryDate" Binding="{Binding LongExpiryDateStr}" IsVisible="False" />
-			<DataGridTextColumn Header="LongExpiryType" Binding="{Binding LongExpiryType}" IsVisible="False" />
-			<DataGridTextColumn Header="ShortExpiryDate" Binding="{Binding ShortExpiryDateStr}" IsVisible="False" />
-			<DataGridTextColumn Header="ShortExpiryType" Binding="{Binding ShortExpiryType}" IsVisible="False" />
+			<DataGridTextColumn Header="LongMaturityDate" Binding="{Binding LongMaturityDateStr}" IsVisible="False" />
+			<DataGridTextColumn Header="LongMaturityType" Binding="{Binding LongMaturityType}" IsVisible="False" />
+			<DataGridTextColumn Header="ShortMaturityDate" Binding="{Binding ShortMaturityDateStr}" IsVisible="False" />
+			<DataGridTextColumn Header="ShortMaturityType" Binding="{Binding ShortMaturityType}" IsVisible="False" />
 			<DataGridTextColumn Header="LongInstrumentId" Binding="{Binding LongInstrumentId}" IsVisible="False" />
 			<DataGridTextColumn Header="ShortInstrumentId" Binding="{Binding ShortInstrumentId}" IsVisible="False" />
 

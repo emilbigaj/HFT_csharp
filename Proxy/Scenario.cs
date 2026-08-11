@@ -13,7 +13,7 @@ public static class GlobalVariables
 {
     public static Timestamp SimulationBegin = new Timestamp(2024, 01, 03);
     public static Timestamp SimulationEnd = new Timestamp(2025, 01, 01);
-    public static Timestamp Expiry = new Timestamp(2024, 03, 10);// 2024-03-18
+    public static Timestamp Maturity = new Timestamp(2024, 03, 10);// 2024-03-18
 }
 
 public class ClientScenario : Scenario
@@ -38,7 +38,7 @@ public class ClientScenario : Scenario
     {
         ProxyStrategy strategy = new ProxyStrategy(this);
 
-        Future future = GetFuture("XCME", "6E", GlobalVariables.Expiry);
+        Future future = GetFuture("XCME", "6E", GlobalVariables.Maturity);
         strategy.OnFuture(future);
 
         strategy.OpenWorkspace("default");
@@ -90,7 +90,7 @@ public class ServerScenario : Scenario
 
         foreach (FutureHeader header in futures)
         {
-            if (header.ExpiryDate >= GlobalVariables.Expiry)
+            if (header.MaturityDate >= GlobalVariables.Maturity)
             {
                 AllocateInstrument allocateInstrument = new()
                 {

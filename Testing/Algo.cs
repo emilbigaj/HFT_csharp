@@ -86,6 +86,10 @@ public sealed class TestingAlgo : Algo
             {
 
                 int pos = Position.Header.Quantity;
+                int max = 10;
+                int buy = max - pos;
+                int sell = -max - pos;
+                /*
                 if (pos == 0)
                 {
                     int buyTicks = _bidTicks - spread;
@@ -103,6 +107,16 @@ public sealed class TestingAlgo : Algo
                 {
                     int buyTicks = _bidTicks - 1;
                     targets.Add(new Target { Ticks = buyTicks, WorkingQuantity = 1 });
+                }*/
+                if (buy > 0)
+                {
+                    int buyTicks = _bidTicks - 1;
+                    targets.Add(new Target { Ticks = buyTicks, WorkingQuantity = buy });
+                }
+                if (sell < 0)
+                {
+                    int sellTicks = _askTicks + 1;
+                    targets.Add(new Target { Ticks = sellTicks, WorkingQuantity = sell });
                 }
             }
             

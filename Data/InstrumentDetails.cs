@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.NetworkInformation;
 using System.Text;
@@ -9,6 +10,27 @@ using Tools;
 // ======================= Supporting enums/types =======================
 
 namespace Data;
+
+// How a venue allocates fills among resting orders at the same price. Only these five occur on CME
+// (GLBX.MDP3 definition field match_algorithm); anything else the venue reports maps to Unknown.
+[RegisterJson]
+public enum MatchType : byte
+{
+    Unknown,
+    Fifo,                   // 'F' — pure time priority; every liquid product (ES, NQ, CL, ZN)
+    Configurable,           // 'K' — grains and softs (ZC, ZS, ZM, ZL, LBR, dairy)
+    FifoLmm,                // 'T' — FIFO after a lead-market-maker allocation
+    Allocation,             // 'A' — SOFR and rates (SR3, ESR, TBF3)
+    ThresholdProRataLmm,    // 'Q' — AW, AWT, DRT, GDT, GIT
+}
+
+[RegisterJson]
+public struct InstrumentDetail
+{
+    public Timestamp Timestamp { get; init; }
+    public string Field { get; init; }
+    public string Value { get; init; }
+}
 
 [RegisterJson]
 public class InstrumentDetailsSearch
@@ -94,8 +116,17 @@ public class InstrumentDetailsSearch
 
 }
 
+// calendar spread looks like , 1, -1
+// butterfly looks like , 1, -2, 1
+// strip might look like , 1, -1, -1
+[RegisterJson]
+public sealed class Leg
+{
+    public int Weight { get; init; }
+    public string Symbol { get; init; } = string.Empty;
+    public string ExchangeInstrumentId { get; init; } = string.Empty;
 
-
+}
 
 
 // ======================= The InstrumentDetails model =======================
@@ -116,6 +147,12 @@ public sealed class InstrumentDetails
     public string Description { get; init; } = string.Empty;
     public string Category { get; init; } = string.Empty;
 
+    public string DatabentoSymbol { get; init; } = string.Empty;
+
+    // The venue's own instrument id, as a string so every exchange's format fits. Reference only:
+    // it is unique within a dataset on a given day, but is reused across years, so it must never
+    // key a catalog-wide lookup.
+    public string ExchangeInstrumentId { get; init; } = string.Empty;
     public string RicRoot { get; init; } = string.Empty;
     public string RicSymbol { get; init; } = string.Empty;
     public string RicExchange { get; init; } = string.Empty;
@@ -129,29 +166,59 @@ public sealed class InstrumentDetails
     public double TickSize
     {
         get => _tickSize;
-        init
+        set
         {
             _tickSize = value;
             _inverseTickSize = (double)(1.0m / (decimal)value);
         }
     }
     public double InverseTickSize => _inverseTickSize;
+
+    /// <summary>Fill allocation at a price level — not FIFO for ~3,100 CME contracts, which changes queue modelling.</summary>
+    public MatchType MatchType { get; set; } = MatchType.Unknown;
+
     public Session[] Sessions { get; set; } = Array.Empty<Session>();
+    
+    // foreach(var detail in Schedule) Clock.AddReminder(new Reminder(detail.Timestamp, timestamp => OnInstrumentDetail(detail)));
+    public List<InstrumentDetail> Schedule { get; set; } = new List<InstrumentDetail>();
+
+    public void OnInstrumentDetail(InstrumentDetail detail)
+    {
+        switch (detail.Field)
+        {
+            case "TickSize":
+                TickSize = double.Parse(detail.Value);
+                break;
+            case "MatchType":
+                MatchType = (MatchType)Enum.Parse(typeof(MatchType), detail.Value, true);
+                break;
+            default:
+                break;
+        }
+    }
+    // financially, cash, physical etc
     public string? DeliveryMethod { get; init; } = null;
+    // Dollars, barrels, bushels, pounds, etc
     public string? Units { get; init; } = null;
-    public Timestamp? ListingDate { get; init; } = null;
-    public ExpiryType? ExpiryType { get; init; } = null;
 
-    public Timestamp? ExpiryDate { get; init; } = null;
+    //when did trading start?
+    public Timestamp? FirstTradeTimestamp { get; init; } = null;
+    //when dooes trading end? this is the date usually mislabelled "expiry"
+    public Timestamp? LastTradeTimestamp { get; init; } = null;
 
-    public ExpiryType? LongExpiryType { get; init; } = null;
+    // Does this belong to a maturity schedule (e.g. monthly, quarterly, etc.)?
+    // Some instruments have both say a monthly and daily maturity schedule and share a maturity date, so the schedule is needed to disambiguate.
+    public MaturityType? MaturityType { get; init; } = null;
 
-    public Timestamp? LongExpiryDate { get; init; } = null;
+    //when does contract mature, this is the moment spot = future
+    public Timestamp? MaturityDate { get; init; } = null;
 
-    public ExpiryType? ShortExpiryType { get; init; } = null;
+    //defines spread, strips, butterfly legs, etc.
+    public List<Leg> Legs { get; set; } = new List<Leg>();
+    // hook up to find other InstrumentDetails
+    public static Func<Leg, InstrumentDetails>? GetLeg { get; set; }
 
-    public Timestamp? ShortExpiryDate { get; init; } = null;
-
+    //For forex the base and quote currency.
     public string? BaseCurrency { get; init; } = null;
     public string? QuoteCurrency { get; init; } = null;
 
@@ -174,14 +241,30 @@ public sealed class InstrumentDetails
     private Symbology? _symbology;
     public Symbology Symbology => _symbology ??= BuildSymbology();
 
+
     private Symbology BuildSymbology()
     {
-        return InstrumentType switch
+        switch (InstrumentType)
         {
-            InstrumentType.Future => new FutureSymbology(Exchange, Root, ExpiryType!.Value, ExpiryDate!.Value),
-            InstrumentType.Spread => new SpreadSymbology(Exchange, Root, LongExpiryType!.Value, LongExpiryDate!.Value, ShortExpiryType!.Value, ShortExpiryDate!.Value),
-            _ => throw new NotImplementedException()
-        };
+            case InstrumentType.Future:
+                return new FutureSymbology(Exchange, Root, MaturityType!.Value, MaturityDate!.Value);
+
+            case InstrumentType.Spread:
+            {
+                InstrumentDetails @long = GetLeg!(Legs[0]);
+                InstrumentDetails @short = GetLeg!(Legs[1]);
+                return new SpreadSymbology(
+                    Exchange,
+                    Root,
+                    @long.MaturityType!.Value,
+                    @long.MaturityDate!.Value,
+                    @short.MaturityType!.Value,
+                    @short.MaturityDate!.Value);
+            }
+
+            default:
+                throw new NotImplementedException();
+        }
     }
 
     [JsonIgnore]
@@ -207,8 +290,8 @@ public sealed class InstrumentDetails
             return new FutureHeader()
             {
                 InstrumentHeader = InstrumentHeader,
-                ExpiryDate = ExpiryDate!.Value,
-                ExpiryType = ExpiryType!.Value,
+                MaturityDate = MaturityDate!.Value,
+                MaturityType = MaturityType!.Value,
                 Multiplier = Multiplier,
             };
         }
@@ -219,14 +302,16 @@ public sealed class InstrumentDetails
     {
         get
         {
+            InstrumentDetails @long = GetLeg!(Legs[0]);
+            InstrumentDetails @short = GetLeg!(Legs[1]);
             return new SpreadHeader()
             {
                 InstrumentHeader = InstrumentHeader,
-                LongExpiryDate = LongExpiryDate!.Value,
-                LongExpiryType = LongExpiryType!.Value,
+                LongMaturityDate = @long.MaturityDate!.Value,
+                LongMaturityType = @long.MaturityType!.Value,
                 Multiplier = Multiplier,
-                ShortExpiryDate = ShortExpiryDate!.Value,
-                ShortExpiryType = ShortExpiryType!.Value,
+                ShortMaturityDate = @short.MaturityDate!.Value,
+                ShortMaturityType = @short.MaturityType!.Value,
                 LongInstrumentId = 0,
                 ShortInstrumentId = 0
             };

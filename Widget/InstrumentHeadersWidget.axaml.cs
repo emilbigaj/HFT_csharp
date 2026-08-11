@@ -47,13 +47,13 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
         _ => 1.0
     };
 
-    public string? ExpiryDateStr => InstrumentType == InstrumentType.Future && _header128.AsFuture().ExpiryDate.NanosSinceEpoch > 0 ? _header128.AsFuture().ExpiryDate.ToDateString() : "";
-    public string? ExpiryType => InstrumentType == InstrumentType.Future ? _header128.AsFuture().ExpiryType.ToString() : "";
+    public string? MaturityDateStr => InstrumentType == InstrumentType.Future && _header128.AsFuture().MaturityDate.NanosSinceEpoch > 0 ? _header128.AsFuture().MaturityDate.ToDateString() : "";
+    public string? MaturityType => InstrumentType == InstrumentType.Future ? _header128.AsFuture().MaturityType.ToString() : "";
 
-    public string? LongExpiryDateStr => InstrumentType == InstrumentType.Spread && _header128.AsSpread().LongExpiryDate.NanosSinceEpoch > 0 ? _header128.AsSpread().LongExpiryDate.ToDateString() : "";
-    public string? LongExpiryType => InstrumentType == InstrumentType.Spread ? _header128.AsSpread().LongExpiryType.ToString() : "";
-    public string? ShortExpiryDateStr => InstrumentType == InstrumentType.Spread && _header128.AsSpread().ShortExpiryDate.NanosSinceEpoch > 0 ? _header128.AsSpread().ShortExpiryDate.ToDateString() : "";
-    public string? ShortExpiryType => InstrumentType == InstrumentType.Spread ? _header128.AsSpread().ShortExpiryType.ToString() : "";
+    public string? LongMaturityDateStr => InstrumentType == InstrumentType.Spread && _header128.AsSpread().LongMaturityDate.NanosSinceEpoch > 0 ? _header128.AsSpread().LongMaturityDate.ToDateString() : "";
+    public string? LongMaturityType => InstrumentType == InstrumentType.Spread ? _header128.AsSpread().LongMaturityType.ToString() : "";
+    public string? ShortMaturityDateStr => InstrumentType == InstrumentType.Spread && _header128.AsSpread().ShortMaturityDate.NanosSinceEpoch > 0 ? _header128.AsSpread().ShortMaturityDate.ToDateString() : "";
+    public string? ShortMaturityType => InstrumentType == InstrumentType.Spread ? _header128.AsSpread().ShortMaturityType.ToString() : "";
 
     public string? LongInstrumentId => InstrumentType == InstrumentType.Spread ? (_header128.AsSpread().LongInstrumentId == -1 ? "" : _header128.AsSpread().LongInstrumentId.ToString()) : "";
     public string? ShortInstrumentId => InstrumentType == InstrumentType.Spread ? (_header128.AsSpread().ShortInstrumentId == -1 ? "" : _header128.AsSpread().ShortInstrumentId.ToString()) : "";

@@ -112,7 +112,7 @@ public class TestingScenario : Scenario
             }
             
             {
-                Future friend = GetFuture(exchange: "XCME", "ES", expiry: Clock.Now);
+                Future friend = GetFuture(exchange: "XCME", "ES", maturity: Clock.Now);
                 Future quote = GetFuture("XCME", "MNK", Clock.Now);
                 Future hedge = GetFuture("XCME", "NKD", Clock.Now);
                 strategy.OnFuture(quote, hedge, friend);

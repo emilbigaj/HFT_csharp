@@ -132,8 +132,8 @@ namespace Simulator
                 Exchange = "XCME",
                 Root = "ES",
                 TickSize = 0.25,
-                ExpiryType = ExpiryType.Month,
-                ExpiryDate = Timestamp.MaxValue
+                MaturityType = MaturityType.Month,
+                MaturityDate = Timestamp.MaxValue
             };
 
             OrderManagerTestProgram test = new OrderManagerTestProgram(serverSim.ExchangeSimulator, details, 1);

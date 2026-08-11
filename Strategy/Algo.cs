@@ -20,6 +20,20 @@ public unsafe abstract class Algo
 
     public ulong Count { get; private set; }
 
+    /// <summary>
+    /// Hold at most one working order per (side, price).
+    ///
+    /// When a target is matched against a resting order at the same price and quantity is left over,
+    /// the remainder is discarded rather than becoming a second order at that price. A second order
+    /// rests behind our own size, so it only fills once the level is swept -- i.e. exactly when we
+    /// did not want it. The size is collected instead on the next reprice, where a price change has
+    /// already forfeited queue priority and the amend-up is therefore free.
+    ///
+    /// Cost: we quote underweight for as long as the price is stable.
+    /// Set false to restore the split-order behaviour.
+    /// </summary>
+    public bool IsOneOrderPerPrice { get; set; } = true;
+
     private const int s_maxOrders = 64;
 
     public Algo(Client client, Position position)
@@ -163,6 +177,12 @@ public unsafe abstract class Algo
         Bitset64 unmatchedTargets = new Bitset64();
         Bitset64 unmatchedActiveKeys = new Bitset64();
 
+        // Targets a same-price order was matched against that still have quantity left over. Under
+        // IsOneOrderPerPrice that remainder is dropped rather than handed to Phase 7 as a second
+        // order at the same price. With the flag off nothing is ever set here, so every target
+        // reaches Phase 7 exactly as before.
+        Bitset64 partiallyMatchedTargets = new Bitset64();
+
         {
             Target* target = sortedTargets.Ptr;
             SortKey* activeKey = activeKeys.Ptr;
@@ -189,6 +209,8 @@ public unsafe abstract class Algo
                         activeKey++;
                         if (target->WorkingQuantity == 0)
                             target++;
+                        else if (IsOneOrderPerPrice)
+                            partiallyMatchedTargets.Set((int)(target - sortedTargets.Ptr));
                     }
                     else
                     {
@@ -200,7 +222,9 @@ public unsafe abstract class Algo
                 }
                 else if (targetKeyScore < activeKeyScore)
                 {
-                    unmatchedTargets.Set((int)(target - sortedTargets.Ptr));
+                    int targetIndex = (int)(target - sortedTargets.Ptr);
+                    if (!partiallyMatchedTargets[targetIndex])
+                        unmatchedTargets.Set(targetIndex);
                     target++;
                 }
                 else
@@ -411,7 +435,9 @@ public unsafe abstract class Algo
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal OrderTarget NewAmend(in ActiveTarget active, int newTicks, int newWorkingQuantity)
     {
+        int maxOrderQuantity = OrderRisk.MaxOrderQuantity;
         bool isCancel = newWorkingQuantity == 0;
+        int orderQuantity = Math.Clamp((isCancel ? active.Target.WorkingQuantity : newWorkingQuantity) + active.QuantityFilled, -maxOrderQuantity, maxOrderQuantity);
         return new OrderTarget
         {
             OrderHeader = new OrderHeader
@@ -422,7 +448,7 @@ public unsafe abstract class Algo
             OrderProfile = new OrderProfile
             {
                 Ticks = newTicks,
-                Quantity = (isCancel ? active.Target.WorkingQuantity : newWorkingQuantity) + active.QuantityFilled
+                Quantity = orderQuantity
             },
             OrderTargetAction = isCancel ? OrderTargetAction.Cancel : OrderTargetAction.Amend
         };

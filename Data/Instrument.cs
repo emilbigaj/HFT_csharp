@@ -137,15 +137,15 @@ public struct FutureHeader
 {
     public InstrumentHeader InstrumentHeader;
     public double Multiplier;
-    public Timestamp ExpiryDate; 
-    public ExpiryType ExpiryType;
+    public Timestamp MaturityDate; 
+    public MaturityType MaturityType;
 
     public FutureSymbology Symbology =>
         new FutureSymbology(
             InstrumentHeader.Exchange.ToString(),
             InstrumentHeader.Root.ToString(),
-            ExpiryType,
-            ExpiryDate);
+            MaturityType,
+            MaturityDate);
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -154,22 +154,22 @@ public struct SpreadHeader
 {
     public InstrumentHeader InstrumentHeader;
     public double Multiplier;
-    public Timestamp LongExpiryDate;
-    public Timestamp ShortExpiryDate;
+    public Timestamp LongMaturityDate;
+    public Timestamp ShortMaturityDate;
     public int LongInstrumentId;
     public int ShortInstrumentId;
-    public ExpiryType LongExpiryType;
-    public ExpiryType ShortExpiryType;
+    public MaturityType LongMaturityType;
+    public MaturityType ShortMaturityType;
 
 
     public SpreadSymbology Symbology =>
         new SpreadSymbology(
             InstrumentHeader.Exchange.ToString(),
             InstrumentHeader.Root.ToString(),
-            LongExpiryType,
-            LongExpiryDate,
-            ShortExpiryType,
-            ShortExpiryDate);
+            LongMaturityType,
+            LongMaturityDate,
+            ShortMaturityType,
+            ShortMaturityDate);
 }
 
 public delegate void MarketByPriceDeltaEvent(in MarketByPrice delta, ReadOnlySpan<byte> bytes);
@@ -360,8 +360,8 @@ public abstract class Instrument
 // === FUTURE ===
 public class Future : Instrument
 {
-    public ExpiryType ExpiryType => _headerEntry.GetReadonlyRef().AsFuture().ExpiryType;
-    public Timestamp ExpiryDate => _headerEntry.GetReadonlyRef().AsFuture().ExpiryDate;
+    public MaturityType MaturityType => _headerEntry.GetReadonlyRef().AsFuture().MaturityType;
+    public Timestamp MaturityDate => _headerEntry.GetReadonlyRef().AsFuture().MaturityDate;
     public ref readonly FutureHeader FutureHeader => ref _headerEntry.GetReadonlyRef().AsFuture();
 
     public Future(SharedArrayEntry<FutureHeader> headerEntry, SharedArrayEntry<MarketByPrice64> mbpEntry)
@@ -389,11 +389,11 @@ public sealed class Forex : Instrument
 // === SPREAD ===
 public sealed class Spread : Future
 {
-    public ExpiryType LongExpiryType => Long.ExpiryType;
-    public Timestamp LongExpiryDate => Long.ExpiryDate;
+    public MaturityType LongMaturityType => Long.MaturityType;
+    public Timestamp LongMaturityDate => Long.MaturityDate;
 
-    public ExpiryType ShortExpiryType => Short.ExpiryType;
-    public Timestamp ShortExpiryDate => Short.ExpiryDate;
+    public MaturityType ShortMaturityType => Short.MaturityType;
+    public Timestamp ShortMaturityDate => Short.MaturityDate;
 
     public Future Long { get; }
     public Future Short { get; }

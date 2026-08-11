@@ -149,25 +149,25 @@ public class RiskLayer
             ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
             Side side = orderState.OrderProfile.Side;
 
-            int worstOrderQuantityBefore = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
+            int worstOrderQuantityBefore = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
             orderRisk.Ack(orderState.OrderProfile.Quantity);
-            int worstOrderQuantityAfter = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
-            int worstOrderQuantityDelta = (worstOrderQuantityAfter - worstOrderQuantityBefore) * orderState.OrderProfile.Sign;
+            int worstOrderQuantityAfter = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
+            int worstOrderQuantityDelta = (worstOrderQuantityAfter - worstOrderQuantityBefore);
             
             if (worstOrderQuantityDelta == 0)
                 return;   
 
             ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(orderState.OrderHeader.OrderId.InstrumentId).GetRef();
             riskLimit.WorstLongWorkingQuantity += worstOrderQuantityDelta * (side == Side.Buy ? 1 : 0);
-            riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? 1 : 0);
+            riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? -1 : 0);
         }
         else if (orderState.OrderStateStatus == OrderStateStatus.Done)
         {
             ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
             Side side = orderState.OrderProfile.Side;
 
-            int worstOrderQuantity = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
-            int released = worstOrderQuantity - orderState.QuantityFilled;
+            int worstOrderQuantity = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
+            int released = worstOrderQuantity - Math.Abs(orderState.QuantityFilled);
 
             orderRisk = default;
 
@@ -176,7 +176,7 @@ public class RiskLayer
 
             ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(orderState.OrderHeader.OrderId.InstrumentId).GetRef();
             riskLimit.WorstLongWorkingQuantity -= released * (side == Side.Buy ? 1 : 0);
-            riskLimit.WorstShortWorkingQuantity -= released * (side == Side.Sell ? 1 : 0);
+            riskLimit.WorstShortWorkingQuantity -= released * (side == Side.Sell ? -1 : 0);
         }
     }
 
@@ -206,9 +206,9 @@ public class RiskLayer
         ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderRejected.OrderHeader.OrderId).GetRef();
         Side side = orderRejected.OrderProfile.Side;
 
-        int worstOrderQuantityBefore = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
+        int worstOrderQuantityBefore = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
         orderRisk.Reject(orderRejected.OrderProfile.Quantity);
-        int worstOrderQuantityAfter = orderRisk.GetWorstOrderQuantity(orderState.OrderProfile.Quantity);
+        int worstOrderQuantityAfter = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
         int worstOrderQuantityDelta = worstOrderQuantityAfter - worstOrderQuantityBefore;
 
         if (worstOrderQuantityDelta == 0)
@@ -216,7 +216,7 @@ public class RiskLayer
 
         ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(orderRejected.OrderHeader.OrderId.InstrumentId).GetRef();
         riskLimit.WorstLongWorkingQuantity += worstOrderQuantityDelta * (side == Side.Buy ? 1 : 0);
-        riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? 1 : 0);
+        riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? -1 : 0);
     }
 
 
@@ -328,6 +328,9 @@ public class RiskLayer
             if (_orderRejectedSource != OrderRejectedSource.Server)
                 return orderRejectedReasons.IsEmpty;
 
+            if (!orderRejectedReasons.IsEmpty)
+                return false;
+
 
             // 10. RISK LIMITS
             // Only check risk on New or Amend (increasing size)
@@ -358,19 +361,14 @@ public class RiskLayer
                     orderRisk = new OrderRisk();
 
                 int sign = orderTarget.OrderProfile.Sign;
-                int worstQuantityFilledBefore = orderRisk.GetWorstOrderQuantity(ackedOrderQuantity) * sign;
+                int worstQuantityFilledBefore = orderRisk.GetAbsWorstOrderQuantity(ackedOrderQuantity);
                 if (!orderRisk.TryAdd(orderTarget.OrderProfile.Quantity, out OrderRejectedReason reason))
                 {
                     orderRejectedReasons.Set((int)reason);
                     return false;
                 }
-                        
-                int worstQuantityFilledAfter = orderRisk.GetWorstOrderQuantity(ackedOrderQuantity) * sign;
-                // GetWorstOrderQuantity is a magnitude. Both aggregates are signed — long positive,
-                // short negative, which is what GetShortQuantityAllowance and the worstShortQuantity
-                // check below assume — so the delta has to carry the order's sign. Adding an unsigned
-                // delta to WorstShortWorkingQuantity drove it positive, which meant the short leg of
-                // the position check could never trip however much was working.
+
+                int worstQuantityFilledAfter = orderRisk.GetAbsWorstOrderQuantity(ackedOrderQuantity);
                 int worstWorkingQuantityDelta = (worstQuantityFilledAfter - worstQuantityFilledBefore) * sign;
 
                 //branchless

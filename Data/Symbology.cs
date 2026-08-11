@@ -6,8 +6,11 @@ using Tools;
 
 namespace Data;
 
+// The C++ side still declares this type under its old ExpiryType name -- rename it there before
+// relying on the two lining up. Layout is unaffected either way: 1 byte, values are positive ASCII
+// so a (char) cast still yields the code letter.
 [RegisterJson]
-public enum ExpiryType : byte // 1 byte to match C++ `enum ExpiryType : char`; values are positive ASCII so (char)cast still yields the code letter
+public enum MaturityType : byte
 {
     Day = (byte)'D',
     Week = (byte)'W',
@@ -77,17 +80,17 @@ public class Symbology
         // Spread: "<Root> <E><Date> - <E><Date>"
         int spaceAfterRoot = ticker.IndexOf(' ');
         if (spaceAfterRoot < 0)
-            throw new FormatException("Ticker must contain root and an expiry part.");
+            throw new FormatException("Ticker must contain root and a maturity part.");
 
         string root = ticker.Substring(0, spaceAfterRoot);
         string remainder = ticker.Substring(spaceAfterRoot + 1);
 
         if (instrumentType == InstrumentType.Future)
         {
-            ExpiryType expiryType;
-            Timestamp expiryDate;
-            ParseExpiryTokenUsingFromDateString(remainder, out expiryType, out expiryDate);
-            return new FutureSymbology(exchange, root, expiryType, expiryDate);
+            MaturityType maturityType;
+            Timestamp maturityDate;
+            ParseMaturityTokenUsingFromDateString(remainder, out maturityType, out maturityDate);
+            return new FutureSymbology(exchange, root, maturityType, maturityDate);
         }
         else if (instrumentType == InstrumentType.Spread)
         {
@@ -96,43 +99,43 @@ public class Symbology
                 throw new FormatException("Spread ticker must be in the form \"<E><Date> - <E><Date>\".");
 
             // Long leg
-            ExpiryType longExpiryType;
-            Timestamp longExpiryDate;
-            ParseExpiryTokenUsingFromDateString(legs[0], out longExpiryType, out longExpiryDate);
+            MaturityType longMaturityType;
+            Timestamp longMaturityDate;
+            ParseMaturityTokenUsingFromDateString(legs[0], out longMaturityType, out longMaturityDate);
 
             // Short leg
-            ExpiryType shortExpiryType;
-            Timestamp shortExpiryDate;
-            ParseExpiryTokenUsingFromDateString(legs[1], out shortExpiryType, out shortExpiryDate);
+            MaturityType shortMaturityType;
+            Timestamp shortMaturityDate;
+            ParseMaturityTokenUsingFromDateString(legs[1], out shortMaturityType, out shortMaturityDate);
 
-            return new SpreadSymbology(exchange, root, longExpiryType, longExpiryDate, shortExpiryType, shortExpiryDate);
+            return new SpreadSymbology(exchange, root, longMaturityType, longMaturityDate, shortMaturityType, shortMaturityDate);
         }
 
         throw new NotSupportedException($"FromString does not yet support InstrumentType {instrumentType}.");
     }
 
-    // Helper: token is like "M20251215" where 'M' is the ExpiryType code char.
-    private static void ParseExpiryTokenUsingFromDateString(string token,
-                                                            out ExpiryType expiryType,
-                                                            out Timestamp expiryDate)
+    // Helper: token is like "M20251215" where 'M' is the MaturityType code char.
+    private static void ParseMaturityTokenUsingFromDateString(string token,
+                                                            out MaturityType maturityType,
+                                                            out Timestamp maturityDate)
     {
         if (string.IsNullOrWhiteSpace(token) || token.Length < 2)
-            throw new FormatException("Expiry token must start with a letter and include a date, e.g., M20251215.");
+            throw new FormatException("Maturity token must start with a letter and include a date, e.g., M20251215.");
 
         char typeChar = token[0];
-        expiryType = (ExpiryType)typeChar; // enum values defined as 'D','W','M','Q','Y'
+        maturityType = (MaturityType)typeChar; // enum values defined as 'D','W','M','Q','Y'
 
         string dateText = token.Substring(1);
 
         try
         {
             // Your requested form:
-            // Timestamp longExpiryDate = Timestamp.FromDateString(longExpiryDateToken);
-            expiryDate = Timestamp.FromString(dateText, "yyyy-MM-dd");
+            // Timestamp longMaturityDate = Timestamp.FromDateString(longMaturityDateToken);
+            maturityDate = Timestamp.FromString(dateText, "yyyy-MM-dd");
         }
         catch (Exception ex)
         {
-            throw new FormatException($"Invalid expiry date: \"{dateText}\".", ex);
+            throw new FormatException($"Invalid maturity date: \"{dateText}\".", ex);
         }
     }
 
@@ -143,26 +146,26 @@ public class Symbology
 [RegisterJson]
 public class FutureSymbology : Symbology
 {
-    public ExpiryType ExpiryType { get; protected set; }
-    public Timestamp ExpiryDate { get; protected set; }
+    public MaturityType MaturityType { get; protected set; }
+    public Timestamp MaturityDate { get; protected set; }
     public override string ShortSymbol { get; }
 
 
     // Normal ctor for outright futures: fixes InstrumentType.Future and auto-builds ticker.
-    public FutureSymbology(string exchange, string root, ExpiryType expiryType, Timestamp expiryDate)
-        : this(InstrumentType.Future, exchange, root, $"{root} {(char)expiryType}{expiryDate.ToDateString()}", expiryType, expiryDate)
+    public FutureSymbology(string exchange, string root, MaturityType maturityType, Timestamp maturityDate)
+        : this(InstrumentType.Future, exchange, root, $"{root} {(char)maturityType}{maturityDate.ToDateString()}", maturityType, maturityDate)
     {
 
     }
 
     // Protected flex ctor for subclasses (e.g., Spread) to set InstrumentType and custom ticker.
-    protected FutureSymbology(InstrumentType instrumentType, string exchange, string root, string ticker, ExpiryType expiryType, Timestamp expiryDate)
+    protected FutureSymbology(InstrumentType instrumentType, string exchange, string root, string ticker, MaturityType maturityType, Timestamp maturityDate)
         : base(instrumentType, exchange, root, ticker)
     {
-        ExpiryType = expiryType;
-        ExpiryDate = expiryDate;
-        string shortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(expiryDate.Month);
-        ShortSymbol = $"{root} {shortMonthName} {expiryDate.Year}";
+        MaturityType = maturityType;
+        MaturityDate = maturityDate;
+        string shortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(maturityDate.Month);
+        ShortSymbol = $"{root} {shortMonthName} {maturityDate.Year}";
     }
 }
 
@@ -172,13 +175,13 @@ public class SpreadSymbology : FutureSymbology
     public FutureSymbology LongSymbology { get; }
     public FutureSymbology ShortSymbology { get; }
     public override string ShortSymbol { get; }
-    public SpreadSymbology(string exchange, string root, ExpiryType longExpiryType, Timestamp longExpiryDate, ExpiryType shortExpiryType, Timestamp shortExpiryDate)
-        : base(InstrumentType.Spread, exchange, root, $"{root} {(char)longExpiryType}{longExpiryDate.ToDateString()} - {(char)shortExpiryType}{shortExpiryDate.ToDateString()}", (longExpiryDate <= shortExpiryDate) ? longExpiryType : shortExpiryType, (longExpiryDate <= shortExpiryDate) ? longExpiryDate : shortExpiryDate)
+    public SpreadSymbology(string exchange, string root, MaturityType longMaturityType, Timestamp longMaturityDate, MaturityType shortMaturityType, Timestamp shortMaturityDate)
+        : base(InstrumentType.Spread, exchange, root, $"{root} {(char)longMaturityType}{longMaturityDate.ToDateString()} - {(char)shortMaturityType}{shortMaturityDate.ToDateString()}", (longMaturityDate <= shortMaturityDate) ? longMaturityType : shortMaturityType, (longMaturityDate <= shortMaturityDate) ? longMaturityDate : shortMaturityDate)
     {
-        LongSymbology = new FutureSymbology(exchange, root, longExpiryType, longExpiryDate);
-        ShortSymbology = new FutureSymbology(exchange, root, shortExpiryType, shortExpiryDate);
-        string longShortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(longExpiryDate.Month);
-        string shortShortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(shortExpiryDate.Month);
-        ShortSymbol = $"{root} {longShortMonthName} {longExpiryDate.Year} - {shortShortMonthName} {shortExpiryDate.Year}";
+        LongSymbology = new FutureSymbology(exchange, root, longMaturityType, longMaturityDate);
+        ShortSymbology = new FutureSymbology(exchange, root, shortMaturityType, shortMaturityDate);
+        string longShortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(longMaturityDate.Month);
+        string shortShortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(shortMaturityDate.Month);
+        ShortSymbol = $"{root} {longShortMonthName} {longMaturityDate.Year} - {shortShortMonthName} {shortMaturityDate.Year}";
     }
 }

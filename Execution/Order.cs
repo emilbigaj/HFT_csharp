@@ -220,7 +220,7 @@ public struct RiskLimit(int instrumentId)
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct OrderRisk
 {
-    private const int MaxOrderQuantity = 56;
+    public const int MaxOrderQuantity = 55;
 
     private Bitset64 _quantities;                       // struct — must NOT be readonly
     private Array56<byte> _counts;
@@ -234,7 +234,7 @@ public struct OrderRisk
         return (int)(((uint)v ^ m) - m);
     }
 
-    public readonly int GetWorstOrderQuantity(int ackedOrderQuantity)
+    public readonly int GetAbsWorstOrderQuantity(int ackedOrderQuantity)
     {
         int absAckedOrderQuantity = Abs(ackedOrderQuantity);
         return Math.Max(absAckedOrderQuantity, _quantities.HighestSet);
@@ -243,7 +243,7 @@ public struct OrderRisk
     public bool TryAdd(int orderQuantity, out OrderRejectedReason reason)
     {
         int absQuantity = Abs(orderQuantity);
-        if ((uint)absQuantity >= MaxOrderQuantity || absQuantity == 0)
+        if ((uint)absQuantity > MaxOrderQuantity || absQuantity == 0)
         {
             reason = OrderRejectedReason.QuantityNotValid;
             return false;
@@ -270,7 +270,7 @@ public struct OrderRisk
     private void Remove(int orderQuantity)
     {
         int absQuantity = Abs(orderQuantity);
-        if ((uint)absQuantity >= MaxOrderQuantity)
+        if ((uint)absQuantity > MaxOrderQuantity)
             return;
 
         ref byte count = ref _counts[absQuantity];
