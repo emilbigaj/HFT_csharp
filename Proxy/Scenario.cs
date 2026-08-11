@@ -83,25 +83,7 @@ public class ServerScenario : Scenario
         server.Connect();
 
         ContextManager.Initialize(ServerName);
-            
-            
-        using ArrayList<FutureHeader> futures = GetFutureHeaders("XCME", "6E");
-
-
-        foreach (FutureHeader header in futures)
-        {
-            if (header.MaturityDate >= GlobalVariables.Maturity)
-            {
-                AllocateInstrument allocateInstrument = new()
-                {
-                    InstrumentHeaderId = header.InstrumentHeader.InstrumentHeaderId,
-                    Symbol = "",
-                };
-                server.Server.OnAllocateInstrument(ref allocateInstrument);
-                break;
-            }
-            
-        }
+        
 
         return server;
 

@@ -75,6 +75,8 @@ public abstract class Context
 {
     public FileSystemPath ServerName { get; }
     public FileSystemPath LoggingServerName { get; }
+    // Strategy 0's directory: the house book lives in the Strategies tree like any other strategy (see Spec.md).
+    public FileSystemPath ServerStrategyName { get; }
     public FileSystemPath DirectoryPath { get; }
 
     public Access ServerAccess { get; }
@@ -184,6 +186,7 @@ public abstract class Context
 
         ServerName = serverName;
         LoggingServerName = GetLoggingServerDirectoryPath(ServerName);
+        ServerStrategyName = ClientContext.GetDirectoryPath(ServerName);
         DirectoryPath = directoryPath;
         ServerAccess = serverAccess;
         ClientAccess = clientAccess;
@@ -580,6 +583,7 @@ public sealed class ClientContext : Context
 
     public static FileSystemPath GetDirectoryPath(string clientName)
     {
+        clientName = Path.GetFileName(clientName);
         return Path.Combine(DirectoriesPath, clientName);
     }
 
@@ -763,9 +767,10 @@ public sealed class ServerContext : Context
 
     public static FileSystemPath DirectoriesPath => @$"S:\Servers\{Clock.Mode}";
 
-    public static FileSystemPath GetDirectoryPath(string clientName)
+    public static FileSystemPath GetDirectoryPath(string serverName)
     {
-        return Path.Combine(DirectoriesPath, clientName);
+        serverName = Path.GetFileName(serverName);
+        return Path.Combine(DirectoriesPath, serverName);
     }
 
     public static LetterBox<ServerHeader> Connect(in ServerHeader serverHeader)
@@ -821,6 +826,10 @@ public sealed class ServerContext : Context
 
     public int AllocateClientId(in SocketHeader socketHeader)
     {
+        // The server's leaf name is reserved for strategy 0's directory — a client named after the server would share the house book's files (see Spec.md).
+        if (socketHeader.ClientName == ServerStrategyName.Path)
+            throw new InvalidOperationException($"ServerContext.AllocateClientId({ServerName}), client name {socketHeader.ClientName} collides with the reserved server strategy name.");
+
         ref SharedArrayEntry<ServerHeader> serverHeaderEntry = ref ServerHeader;
         ref ServerHeader serverHeader = ref serverHeaderEntry.GetRef();
         ref Bitset64 clientIds = ref ServerHeader.GetRef().ClientIds;
@@ -963,7 +972,10 @@ public sealed class ServerContext : Context
         ref InstrumentHeader128 header128 = ref GetInstrumentHeader(instrumentHeaderId).GetRef();
         Symbology symbology = header128.Symbology;
 
-        string clientName = GetSocketHeader(clientId).GetReadonlyRef().ClientName.ToString();
+        // Strategy 0 has no socket to take a name from; its book lives at ServerStrategyName (see Spec.md).
+        string clientName = clientId == OrderIdAllocator.ServerStrategyId
+            ? ServerStrategyName.ToString()
+            : GetSocketHeader(clientId).GetReadonlyRef().ClientName.ToString();
         string positionPath = GetPositionFilePath(clientName, symbology.Symbol).ToString();
         string? positionLine = Tools.Tools.ReadLastLine(positionPath);
         PositionHeader positionHeader = positionLine != null ? Json.Deserialize<PositionHeader>(positionLine) : new PositionHeader();

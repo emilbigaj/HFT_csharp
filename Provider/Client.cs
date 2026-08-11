@@ -76,6 +76,16 @@ public sealed class ManualClient : Client
         _writeQueue.Enqueue(() => _socket.Write(SocketChannel.Admin, in copy));
     }
 
+    // Any-thread API: allocate an instrument to this GUI client. The first allocation of an
+    // instrument is what makes the server open its data feed, so this is how a workspace lights up
+    // a book it wants to ladder. GetInstrument blocks on the admin echo, so it runs on the owner
+    // thread via the write queue like every other socket mutation; the server side is idempotent,
+    // and OpenInstrumentDataSocket is a no-op here — the GUI reads the server's book directly.
+    public void OnAllocateInstrument(int instrumentHeaderId)
+    {
+        _writeQueue.Enqueue(() => GetInstrument(instrumentHeaderId));
+    }
+
     // Owner thread drains pending mutations. Call before ReadSocket() each tick.
     public void WriteSocket()
     {

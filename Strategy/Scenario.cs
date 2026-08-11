@@ -59,43 +59,6 @@ public class Scenario
         riskLimit.Timestamp = Clock.Now;
         ServerSimulator!.ServerContext.GetRiskLimit(instrument.InstrumentId).Write(in riskLimit);
     }
-    public ArrayList<FutureHeader> GetFutureHeaders(string exchange, string root)
-    {
-        Context context = ContextManager.ServerContext;
-
-        ArrayList<FutureHeader> futureHeaders = new ArrayList<FutureHeader>();
-        String8 _exchange = new String8(exchange);
-        String8 _root = new String8(root);
-        foreach (var header128 in context.EnumerateInstrumentHeaders())
-        {
-            ref FutureHeader futureHeader = ref header128.AsFuture();
-            if (futureHeader.InstrumentHeader.Exchange == _exchange && futureHeader.InstrumentHeader.Root == _root)
-            {
-                futureHeaders.Add(futureHeader);
-            }
-        }
-        return futureHeaders;
-    }
-
-    public FutureHeader GetFutureHeader(string exchange, string root, Timestamp maturity)
-    {
-        Context context = ContextManager.ServerContext;
-
-        String8 _exchange = new String8(exchange);
-        String8 _root = new String8(root);
-        foreach (var header128 in context.EnumerateInstrumentHeaders())
-        {
-            ref FutureHeader futureHeader = ref header128.AsFuture();
-            if (futureHeader.InstrumentHeader.Exchange == _exchange && futureHeader.InstrumentHeader.Root == _root)
-            {
-                if (futureHeader.MaturityDate >= maturity)
-                {
-                    return futureHeader;
-                }
-            }
-        }
-        return default;
-    }
 
     public Future GetFuture(string exchange, string root, Timestamp maturity, int[]? months = null)
     {
@@ -105,6 +68,8 @@ public class Scenario
         String8 _root = new String8(root);
         foreach (var header128 in context.EnumerateInstrumentHeaders())
         {
+            if (header128.AsInstrumentHeader().InstrumentType != InstrumentType.Future)
+                continue;
             ref FutureHeader futureHeader = ref header128.AsFuture();
             if (futureHeader.InstrumentHeader.Exchange == _exchange && futureHeader.InstrumentHeader.Root == _root)
             {

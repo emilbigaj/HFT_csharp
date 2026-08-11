@@ -84,6 +84,8 @@ public class TestingScenario : Scenario
             Future friend = GetFuture("XCBT", "YM", Clock.Now, months);
 
             strategy.OnFuture(quote, hedge);
+            strategy.OnFuture(hedge, hedge);
+
         }
         else if (CoreGroupName == CoreGroupId.Equity)
         {

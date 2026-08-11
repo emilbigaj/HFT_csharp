@@ -133,10 +133,29 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
 
         HeadersGrid.PointerMoved += (s, e) => _lastPointerPos = e.GetPosition(HeadersGrid);
 
+        // Targeted refresh for allocations made through this GUI. The timer diff below only watches
+        // Primary.InstrumentIds — in a strategy workspace that is the algo's context, which a
+        // GUI-client allocation never touches, so without this the InstrumentId column stays blank.
+        _context.Manual.Instrument += OnManualInstrumentAllocated;
+
         _refreshTimer = new Timer(100);
         _refreshTimer.Elapsed += OnRefresh;
         _refreshTimer.AutoReset = false;
         _refreshTimer.Start();
+    }
+
+    // Fires on the ManualClient's owner thread once the allocation echo lands — re-read the one
+    // header (the server has stamped InstrumentId into shared memory by then) and update that row.
+    private void OnManualInstrumentAllocated(Instrument instrument)
+    {
+        int instrumentHeaderId = instrument.Header.InstrumentHeaderId;
+        InstrumentHeader128 header128 = _context.Primary.GetInstrumentHeader(instrumentHeaderId).Read();
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_disposed) return;
+            if (_headersById.TryGetValue(instrumentHeaderId, out WidgetInstrumentHeader? row))
+                row.Update(in header128);
+        });
     }
 
     private void LoadAllHeaders()
@@ -213,6 +232,7 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
 
         var visual = HeadersGrid.InputHitTest(_lastPointerPos) as Visual;
         bool isHeader = false;
+        WidgetInstrumentHeader? row = null;
 
         var v = visual;
         while (v != null)
@@ -222,8 +242,14 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
                 isHeader = true;
                 break;
             }
+            if (v is DataGridRow dataGridRow)
+            {
+                row = dataGridRow.DataContext as WidgetInstrumentHeader;
+                break;
+            }
             v = v.GetVisualParent() as Visual;
         }
+        row ??= HeadersGrid.SelectedItem as WidgetInstrumentHeader;
 
         if (isHeader)
         {
@@ -254,6 +280,23 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
                 item.Click += (_, _) => ToggleFilter(currentType);
                 menu.Items.Add(item);
             }
+
+            menu.Items.Add(new Separator());
+
+            // Allocating to the GUI client is what makes the server open the instrument's data
+            // feed, so any header in this grid can be lit up and laddered from here — in both a
+            // strategy workspace and a server workspace. Idempotent if already allocated.
+            var allocateItem = new MenuItem
+            {
+                Header = row != null ? $"Allocate {row.Symbol}" : "Allocate Instrument",
+                IsEnabled = row != null
+            };
+            if (row != null)
+            {
+                int instrumentHeaderId = row.InstrumentHeaderId;
+                allocateItem.Click += (_, _) => _context.Manual.OnAllocateInstrument(instrumentHeaderId);
+            }
+            menu.Items.Add(allocateItem);
         }
     }
 
@@ -327,6 +370,8 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
     {
         if (_disposed) return;
         _disposed = true;
+        if (_context is not null)
+            _context.Manual.Instrument -= OnManualInstrumentAllocated;
         _refreshTimer?.Stop();
         _refreshTimer?.Dispose();
     }

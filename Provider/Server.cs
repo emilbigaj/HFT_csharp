@@ -519,6 +519,10 @@ public class Server : IDisposable
 
         _serverContext.AllocateInstrument(clientId, instrumentId);
 
+        // Strategy 0 is the house book: it holds the union of every client's allocations (see Spec.md).
+        if (clientId != OrderIdAllocator.ServerStrategyId)
+            _serverContext.AllocateInstrument(OrderIdAllocator.ServerStrategyId, instrumentId);
+
         // Remember this client now trades the instrument's CoreGroup, so ReadExecution polls that channel.
         int coreGroupId = _serverContext.GetInstrument(instrumentId).Header.CoreGroupId;
         _clientIdsByCoreGroupId[coreGroupId].AtomicSet(clientId);

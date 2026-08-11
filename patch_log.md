@@ -4,6 +4,38 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## Unreleased (working tree, 2026-08-11)
+
+### Strategy 0 / house book (see Spec.md)
+
+- `Spec.md` (new) — normative model: strategies, strategy 0, workspaces, allocation union.
+- `Provider/Server.cs` — every allocation also provisions strategy 0 (the union rule), which is
+  what lets a server workspace create orders without a validator special-case.
+- `Provider/Context.cs` — `ServerStrategyName` (house directory = Strategies tree under the
+  server's leaf name), used for strategy 0's position files; `AllocateClientId` throws if a client
+  takes the server's name.
+- `cpp_alignment.md` (new) — full handoff list to bring HFT_cpp in line (wire structs, renames,
+  RiskLayer port, strategy 0, guards).
+
+### GUI: allocate instruments from the grid
+
+- `Provider/Client.cs` — `ManualClient.OnAllocateInstrument` (any-thread, drains on owner thread).
+- `Widget/InstrumentHeadersWidget.axaml.cs` — right-click → Allocate <symbol>; row refreshes alone
+  via the client's `Instrument` event (the subs-diff timer never fires for GUI allocations in a
+  strategy workspace).
+
+### Fixes
+
+- `Strategy/Scenario.cs` — type-guard before `AsFuture()` in the three lookup loops; a realtime
+  context contains spreads/empty slots and the blind cast crashed live startup with
+  NotSupportedException.
+- `Provider/RiskLayer.cs` — reserve path applied the order sign three times (cancels for sells:
+  WorstShortWorkingQuantity climbed positive, the +13 in the widget); now magnitude deltas with
+  the direction applied once at the aggregate. Exchange-reject release direction fixed the same
+  way.
+
+---
+
 ## Unreleased (working tree)
 
 ### `Header<T>.Type` is no longer `readonly` — JSON round-trip was silently zeroing the message type
