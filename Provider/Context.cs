@@ -449,13 +449,12 @@ public abstract class Context
     private void ThrowClientIdOutOfRange(int clientId)
         => throw new ArgumentOutOfRangeException(nameof(clientId), $"{GetType()}.ThrowIfClientIdOutOfRange({clientId}), clientId has not been allocated.");
 
-    private ulong _lock = 0;
+    private bool _lock;
     private void CreateInstrument(int instrumentId)
     {
-        MultiSeqLockWriter.AcquireLock(ref _lock);
+        using RAIISpinLock spinLock = new(ref _lock);
         if (_instruments[instrumentId] != null)
         {
-            MultiSeqLockWriter.ReleaseLock(ref _lock);
             return;
         }
         int instrumentHeaderId = GetInstrumentHeaderIdByInstrumentId(instrumentId).Read();
@@ -488,24 +487,19 @@ public abstract class Context
         }
         instrument.SessionManager = new SessionManager(Session.CME);
         _instruments[instrumentId] = instrument;
-        MultiSeqLockWriter.ReleaseLock(ref _lock);
-
     }
 
     protected void CreatePosition(Instrument instrument)
     {
-        MultiSeqLockWriter.AcquireLock(ref _lock);
+        using RAIISpinLock spinLock = new(ref _lock);
         if (_positions[instrument.InstrumentId] != null)
         {
-            MultiSeqLockWriter.ReleaseLock(ref _lock);
             return;
         }
         // A ServerContext's positions are the server-wide rows; no client owns their order slots
         // (only Client.Create ever sets one), so the house id is the correct inert owner.
         Position position = new Position(instrument, this, (this as ClientContext)?.ClientId ?? OrderIdAllocator.ServerStrategyId);
         _positions[instrument.InstrumentId] = position;
-        MultiSeqLockWriter.ReleaseLock(ref _lock);
-        return;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

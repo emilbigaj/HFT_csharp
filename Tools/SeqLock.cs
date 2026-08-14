@@ -238,4 +238,40 @@ namespace Tools
             Reset(ref seq);
         }
     }
+
+    // ===============================================================
+    // RAII spinlock — C# shape of C++ Tools::RAIISpinLock: ref struct + using.
+    // TTAS: exchange to acquire, spin on plain reads while held (no coherence storm), pause in the
+    // wait loop. The flag is a bool like the C++ atomic<bool>; Interlocked has no bool overload, so
+    // the exchange reinterprets it as the same-width byte (never int — a 4-byte RMW on a 1-byte
+    // field would also touch the 3 bytes beside it).
+    // ===============================================================
+    public readonly ref struct RAIISpinLock
+    {
+        private readonly ref bool _flag;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public RAIISpinLock(ref bool flag)
+        {
+            _flag = ref flag;
+            while (true)
+            {
+                if (Interlocked.Exchange(ref Unsafe.As<bool, byte>(ref _flag), 1) == 0)
+                {
+                    return;
+                }
+
+                while (Volatile.Read(ref _flag))
+                {
+                    X86BaseWrapper.Pause();
+                }
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Dispose()
+        {
+            Volatile.Write(ref _flag, false);
+        }
+    }
 }

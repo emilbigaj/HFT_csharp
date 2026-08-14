@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading;
 using Data;
 using Execution;
 using Socket;
@@ -29,7 +28,6 @@ namespace Provider;
 //    project, which references Provider, so Provider cannot reference them back.
 //  - WriteToExecution's one-argument template took value.OrderHeader by duck typing. C# generics
 //    cannot read a field off an unconstrained T, so the header is passed explicitly.
-//  - Tools has no RAIISpinLock; ExecutionLock below is the minimal equivalent with try/finally.
 //  - Context indexes order rows by OrderId rather than a raw global index, so CancelAllOrders
 //    builds a probe OrderId per local slot instead of walking first..last global index.
 public class Server : IDisposable
@@ -44,12 +42,12 @@ public class Server : IDisposable
     private readonly RiskLayer _riskLayer;
     private readonly WriteOnlySocket?[] _instrumentData;
 
-    // One spinlock per CoreGroup (index == CoreGroupId; 0 = admin). C++ uses Tools::RAIISpinLock;
-    // this is the same thing with the flag isolated to its own cache line.
+    // One spinlock flag per CoreGroup (index == CoreGroupId; 0 = admin), guarded by
+    // Tools.RAIISpinLock — mirrors the C++ alignas(64) ExecutionLock { atomic<bool> Flag }.
     [StructLayout(LayoutKind.Sequential, Size = 64)]
     private struct ExecutionLock
     {
-        public int Flag;
+        public bool Flag;
     }
 
     // Guards WriteToExecution (return channel, S->C). Multi-writer per segment (RX fills/states +
@@ -170,17 +168,9 @@ public class Server : IDisposable
         int coreGroupId = instrument.Header.CoreGroupId;
         ByteQueue queue = _orderTargetQueues[coreGroupId]!;
 
-        ref ExecutionLock sendLock = ref _sendToExchangeLocks[coreGroupId];
-        Acquire(ref sendLock);
-        try
-        {
-            Span<byte> dst = queue.Enqueue(Unsafe.SizeOf<OrderTarget>());
-            MemoryMarshal.Write(dst, in orderTarget);
-        }
-        finally
-        {
-            Release(ref sendLock);
-        }
+        using RAIISpinLock spinLock = new(ref _sendToExchangeLocks[coreGroupId].Flag);
+        Span<byte> dst = queue.Enqueue(Unsafe.SizeOf<OrderTarget>());
+        MemoryMarshal.Write(dst, in orderTarget);
     }
 
     // Per-CoreGroup hot poll: ONE thread per CoreGroup busy-polls this with its own coreGroupId,
@@ -341,15 +331,13 @@ public class Server : IDisposable
         _serverContext.OnInstrumentHeader(in instrumentHeader128);
     }
 
-    public void OnQuantityAhead(ulong clientOrderId, int quantityAhead)
+    public void OnQuantityAhead(OrderId clientOrderId, int quantityAhead)
     {
-        ref SharedArrayEntry<OrderState> orderStateEntry = ref _serverContext.GetOrderState(clientOrderId);
-        ref OrderState orderState = ref orderStateEntry.GetRef();
+        ref OrderState orderState = ref _serverContext.GetOrderState(clientOrderId).GetRef();
         if (orderState.OrderHeader.OrderId == clientOrderId)
         {
-            orderStateEntry.AcquireLock();
+            // Quick write, its atomic, do not lock, it would contend with OnOrderState
             orderState.QuantityAhead = quantityAhead;
-            orderStateEntry.ReleaseLock();
         }
     }
 
@@ -635,16 +623,8 @@ public class Server : IDisposable
     // Without the lock on THIS (hot) path the rare concurrent reject would tear the SPSC ring.
     public void WriteToExecution<T>(int clientId, int coreGroupId, in T value) where T : unmanaged
     {
-        ref ExecutionLock recvLock = ref _recvFromExchangeLocks[coreGroupId];
-        Acquire(ref recvLock);
-        try
-        {
-            _serverSocket.Write(clientId, coreGroupId, in value);
-        }
-        finally
-        {
-            Release(ref recvLock);
-        }
+        using RAIISpinLock spinLock = new(ref _recvFromExchangeLocks[coreGroupId].Flag);
+        _serverSocket.Write(clientId, coreGroupId, in value);
     }
 
     // Convenience overload for the order/admin/reject paths: derive (clientId, CoreGroupId) from the
@@ -743,19 +723,6 @@ public class Server : IDisposable
         FileSystemPath instrumentsFilePath = _serverContext.GetInstrumentsFilePath(date);
         string line = Json.SerializeToLine(allocateInstrument);
         File.AppendAllLines(instrumentsFilePath, new string[] { line });
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Acquire(ref ExecutionLock executionLock)
-    {
-        while (Interlocked.CompareExchange(ref executionLock.Flag, 1, 0) != 0)
-            X86BaseWrapper.Pause();
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Release(ref ExecutionLock executionLock)
-    {
-        Volatile.Write(ref executionLock.Flag, 0);
     }
 
     private void OnClientAllocated(in SocketHeader socketHeader)
