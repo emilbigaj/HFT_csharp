@@ -12,6 +12,7 @@
   <Project Path="Build/Build.csproj" />
   <Project Path="Chart/Chart.csproj" />
   <Project Path="Data/Data.csproj" />
+  <Project Path="Debug/Debug.csproj" />
   <Project Path="Execution/Execution.csproj" />
   <Project Path="Generator/Generator.csproj" Id="66e37c86-e6d9-4e9d-8492-d8457753c40b" />
   <Project Path="Logging/Logging.csproj" />

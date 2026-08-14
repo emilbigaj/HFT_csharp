@@ -1012,6 +1012,82 @@ public sealed class ServerContext : Context
         return new OrderEnumerable(_orderStates, _orderTargets, 0, OrderIdAllocator.GetLastGlobalIndex(ServerHeader.GetReadonlyRef().ClientIds.Length - 1), instrumentId);
     }
 
+    // Full state dump for debugging: every entry of every shared structure, zeroed slots included.
+    // Reads are unsynchronised — a torn row under concurrent writes is acceptable here; the printed
+    // seq tells you (odd = write in progress at read time).
+    public void PrintDebug()
+    {
+        ref SharedArrayEntry<ServerHeader> serverHeaderEntry = ref ServerHeader;
+        ServerHeader serverHeader = serverHeaderEntry.GetReadonlyRef();
+        int instrumentsLength = serverHeader.InstrumentIds.Length;
+
+        Console.WriteLine($"===== {GetType().Name}.PrintDebug({ServerName}) =====");
+        Console.WriteLine($"DirectoryPath: {DirectoryPath}, ServerAccess: {ServerAccess}, ClientAccess: {ClientAccess}, SharedArrays: {SharedArraysCount}");
+        Console.WriteLine();
+        Console.WriteLine($"--- ServerHeader letterbox seq={serverHeaderEntry.GetSeq()} ---");
+        Console.WriteLine(serverHeader.ToString());
+
+        PrintSharedArray(_clientSocketHeaders, "ClientSocketHeaders [clientId]");
+        PrintSharedArray(_instrumentIdsByClientId, "InstrumentIdsByClientId [clientId]");
+        PrintSharedArray(_clientIdsByInstrumentId, "ClientIdsByInstrumentId [instrumentId]");
+        PrintSharedArray(_instrumentHeaderIdByInstrumentId, "InstrumentHeaderIdByInstrumentId [instrumentId]");
+
+        // Custom loop: InstrumentHeader128 has no JSON ToString, and Symbology throws on anything
+        // but Future/Spread (Forex symbology is not implemented), so print raw fields + guarded symbol.
+        Console.WriteLine();
+        Console.WriteLine($"--- InstrumentHeaders [instrumentHeaderId] x {_instrumentHeaders.Capacity} ---");
+        for (int i = 0; i < _instrumentHeaders.Capacity; i++)
+        {
+            ref SharedArrayEntry<InstrumentHeader128> entry = ref _instrumentHeaders.GetEntry(i);
+            ref readonly InstrumentHeader128 header128 = ref entry.GetReadonlyRef();
+            InstrumentHeader header = header128.AsInstrumentHeader();
+            string symbol = header.InstrumentType == InstrumentType.Future || header.InstrumentType == InstrumentType.Spread ? header128.Symbology.Symbol : "-";
+            Console.WriteLine($"[{i}] seq={entry.GetSeq()} type={header.InstrumentType} symbol={symbol} instrumentId={header.InstrumentId} exchangeInstrumentId={header.ExchangeInstrumentId} coreGroupId={header.CoreGroupId} tradingStatus={header.TradingStatus} tickSize={header.TickSize}");
+        }
+
+        PrintSharedArray(_riskLimits, "RiskLimits [instrumentId]");
+        PrintSharedArray(_serverPositionHeaders, "ServerPositionHeaders [instrumentId]");
+
+        Console.WriteLine();
+        Console.WriteLine($"--- LocalPositionHeaders [index] clientId.instrumentId x {_localPositionHeaders.Capacity} ---");
+        for (int i = 0; i < _localPositionHeaders.Capacity; i++)
+        {
+            ref SharedArrayEntry<PositionHeader> entry = ref _localPositionHeaders.GetEntry(i);
+            Console.WriteLine($"[{i}] {i / instrumentsLength}.{i % instrumentsLength} seq={entry.GetSeq()} {entry.GetReadonlyRef()}");
+        }
+
+        // Orders grouped per slot: target, state and risk side by side is what slot-level debugging
+        // (id mismatches, leaked reservations) actually needs.
+        Console.WriteLine();
+        Console.WriteLine($"--- Orders [globalOrderIndex] clientId.localOrderIndex x {_orderTargets.Capacity} ---");
+        for (int globalOrderIndex = 0; globalOrderIndex < _orderTargets.Capacity; globalOrderIndex++)
+        {
+            int clientId = globalOrderIndex >> OrderIdAllocator.OrdersPerClientBitShift;
+            int localOrderIndex = globalOrderIndex & (OrderIdAllocator.OrdersPerClient - 1);
+            ref SharedArrayEntry<OrderTarget> targetEntry = ref _orderTargets.GetEntry(globalOrderIndex);
+            ref SharedArrayEntry<OrderState> stateEntry = ref _orderStates.GetEntry(globalOrderIndex);
+            ref SharedArrayEntry<OrderRisk> riskEntry = ref _orderRisks.GetEntry(globalOrderIndex);
+            OrderRisk orderRisk = riskEntry.GetReadonlyRef();
+            Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} target seq={targetEntry.GetSeq()} {targetEntry.GetReadonlyRef()}");
+            Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} state  seq={stateEntry.GetSeq()} {stateEntry.GetReadonlyRef()}");
+            Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} risk   seq={riskEntry.GetSeq()} absWorstOrderQuantity={orderRisk.GetAbsWorstOrderQuantity(0)}");
+        }
+
+        PrintSharedArray(_marketsByPrice, "MarketsByPrice [instrumentId]");
+        PrintSharedArray(_messageEfficiency, "MessageEfficiency [productGroupId]");
+    }
+
+    private static void PrintSharedArray<T>(SharedArray<T> sharedArray, string title) where T : unmanaged
+    {
+        Console.WriteLine();
+        Console.WriteLine($"--- {title} x {sharedArray.Capacity} ---");
+        for (int i = 0; i < sharedArray.Capacity; i++)
+        {
+            ref SharedArrayEntry<T> entry = ref sharedArray.GetEntry(i);
+            Console.WriteLine($"[{i}] seq={entry.GetSeq()} {entry.GetReadonlyRef()}");
+        }
+    }
+
     public override void Dispose()
     {
         _serverPositionHeaders.Dispose();
