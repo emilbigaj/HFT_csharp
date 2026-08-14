@@ -119,14 +119,18 @@ public struct SocketHeader
     public override string ToString() => Json.Serialize(this);
 }
 
-// Renumbered to insert Detached. This lives only in ServerSocket's per-client bookkeeping — it is
-// never written to shared memory, so the renumber is not a wire change.
+// Renumbered to insert Closing (Closed 3→4). This lives only in ServerSocket's per-client
+// bookkeeping — it is never written to shared memory, so the renumber is not a wire change; keep
+// both sides (C++/C#) identical anyway.
 // Detached means: the socket exists and is writable, but no client process is attached.
+// Closing means: a reader saw the client's close and REQUESTED it; only the listen thread performs
+// transitions — see Spec.md "Socket close protocol".
 //
-//   Persistance = true                     Persistance = false
-//   Disposed --connect--> Open             Disposed --connect--> Open
-//   Open --client dies--> Detached         Open --client dies--> Closed
-//   Detached --reconnect--> Open           Closed --1s--> Disposed
+//   Persistance = true                       Persistance = false
+//   Disposed --connect--> Open               Disposed --connect--> Open
+//   Open --close msg--> Closing              Open --close msg--> Closing
+//   Open|Closing --listen--> Detached        Open|Closing --listen--> Closed
+//   Detached --reconnect--> Open             Closed --1s--> Disposed
 //
 // Under Persistance, Closed and DisposeClient are never reached — so ClientDeallocated never fires
 // and the logging server's audit tap is never torn down (which is the point: the tap must survive
@@ -136,7 +140,8 @@ public enum ClientStatus : byte
     Disposed = 0,
     Detached = 1,
     Open = 2,
-    Closed = 3
+    Closing = 3,
+    Closed = 4
 }
 
 public sealed class ReadOnlySocket : IDisposable
@@ -503,6 +508,25 @@ public sealed class Socket : IDisposable
         _sharedMemory.Clear();
     }
 
+    // Re-attach to a socket whose peer has restarted, keeping the ring. Same work the constructor
+    // does, minus the Clear(): park every cursor at the head and drop the closed latch, so the
+    // dead incarnation's close message cannot terminate the new one. Reset() cannot serve here —
+    // it wipes shared memory an audit reader is still walking.
+    public void Recover()
+    {
+        if (_isDisposed) throw new ObjectDisposedException(Name);
+        _isClosed = false;
+
+        foreach (WriteOnlySocket writer in _writeOnlySockets)
+        {
+            if (writer != null) writer.Recover();
+        }
+        foreach (ReadOnlySocket reader in _readOnlySockets)
+        {
+            if (reader != null) reader.Recover();
+        }
+    }
+
     public void Close()
     {
         if (_isDisposed) throw new ObjectDisposedException(Name);
@@ -823,7 +847,10 @@ public sealed class ServerSocket : IDisposable
     [StructLayout(LayoutKind.Sequential, Size = 64)]
     private struct ClientHeader()
     {
-        public volatile ClientStatus Status = ClientStatus.Disposed;
+        // {status, epoch} in one word: readers request Open -> Closing with a CAS against the
+        // snapshot they read the close under, so a reader that slept through a close+reconnect
+        // cannot mark the NEW session Closing off the OLD session's evidence.
+        public AtomicTransition<ClientStatus> Status = new(ClientStatus.Disposed);
 
         private long _closedTimestamp = Timestamp.MaxValue.NanosSinceEpoch;
         public Timestamp ClosedTimestamp
@@ -924,7 +951,7 @@ public sealed class ServerSocket : IDisposable
     private void DisposeClient(int clientId)
     {
         ref ClientHeader clientHeader = ref _clientHeaders[clientId];
-        if (clientHeader.Status != ClientStatus.Disposed)
+        if (clientHeader.Status.State != ClientStatus.Disposed)
         {
             SocketHeader socketHeader = DeallocateClient(clientId);
             if (ClientDeallocated != null)
@@ -934,7 +961,7 @@ public sealed class ServerSocket : IDisposable
 
             Console.WriteLine($"{ServerName}: {socketHeader.ClientName.ToString()} Disconnected id {clientId}");
 
-            clientHeader.Status = ClientStatus.Disposed;
+            clientHeader.Status.Store(ClientStatus.Disposed);
             clientHeader.ClientSocket?.Dispose();
             clientHeader.ClientSocket = null;
         }
@@ -951,7 +978,7 @@ public sealed class ServerSocket : IDisposable
             throw new ArgumentOutOfRangeException(nameof(socketHeader), $"{GetType().Name}.CreateDetatchedClient: invalid clientId {socketHeader.ClientId}.");
 
         CreateClient(in socketHeader);
-        _clientHeaders[socketHeader.ClientId].Status = ClientStatus.Detached;
+        _clientHeaders[socketHeader.ClientId].Status.Store(ClientStatus.Detached);
     }
 
     private void CreateClient(in SocketHeader socketHeader)
@@ -992,9 +1019,17 @@ public sealed class ServerSocket : IDisposable
         int clientId = socketHeader.ClientId;
         ref ClientHeader clientHeader = ref _clientHeaders[clientId];
 
-        if (!Persistance)
+        // A reconnect re-enters here from Detached holding the PREVIOUS incarnation's cursors and
+        // closed latch: the client wrote a close message into the ring on its way out, and that
+        // byte outlives it. Unhandled, the server either reads it again and tears the new session
+        // down, or — if it already consumed it — short-circuits every read on the latch and can
+        // never accept this client again. The client side gets this for free by building a fresh
+        // Socket, whose constructor recovers; the server reuses the object, so it must ask.
+        if (Persistance)
+            clientHeader.ClientSocket?.Recover();
+        else
             clientHeader.ClientSocket?.Reset();
-            
+
         clientHeader.ClosedTimestamp = Timestamp.MaxValue;
         clientHeader.ClientProcessId = socketHeader.ClientProcessId;
 
@@ -1004,7 +1039,7 @@ public sealed class ServerSocket : IDisposable
             Thread.Sleep(1);
         }
 
-        clientHeader.Status = ClientStatus.Open;
+        clientHeader.Status.Store(ClientStatus.Open);
         _clientIds.AtomicSet(clientId);
 
         ClientOpened?.Invoke(clientId);
@@ -1022,14 +1057,17 @@ public sealed class ServerSocket : IDisposable
             // Socket outlives the client process: the server keeps writing into its ring, so fills
             // the exchange retransmits while the client is away still land somewhere, and the audit
             // tap on the same region still sees them.
-            clientHeader.Status = ClientStatus.Detached;
+            clientHeader.Status.Store(ClientStatus.Detached);
         }
         else
         {
             clientHeader.ClosedTimestamp = Timestamp.UtcNow;
-            clientHeader.Status = ClientStatus.Closed;
+            clientHeader.Status.Store(ClientStatus.Closed);
         }
         ClientClosed?.Invoke(clientId);
+
+        Console.WriteLine($"{ServerName}: Closed id {clientId}");
+
     }
 
     private void PollLetterBox()
@@ -1047,16 +1085,17 @@ public sealed class ServerSocket : IDisposable
                 return;
             }
 
-            ClientStatus status = _clientHeaders[clientId].Status;
+            ClientStatus status = _clientHeaders[clientId].Status.State;
 
             if (status == ClientStatus.Open)
             {
                 Console.WriteLine($"{GetType().Name}::{ServerName}: Client {clientName} is already connected.");
                 return;
             }
-            else if (status == ClientStatus.Closed)
+            else if (status == ClientStatus.Closing || status == ClientStatus.Closed)
             {
-                Console.WriteLine($"{GetType().Name}::{ServerName}: Client {clientName} is in the process of disposing. Try again in a moment.");
+                // An unhandled status would fall through into OpenClient and swallow the close.
+                Console.WriteLine($"{GetType().Name}::{ServerName}: Client {clientName} is in the process of closing. Try again in a moment.");
                 return;
             }
             else if (status == ClientStatus.Detached)
@@ -1083,9 +1122,14 @@ public sealed class ServerSocket : IDisposable
         for (int clientId = 0; clientId < Capacity; ++clientId)
         {
             ref ClientHeader clientHeader = ref _clientHeaders[clientId];
-            ClientStatus status = clientHeader.Status;
+            ClientStatus status = clientHeader.Status.State;
 
-            if (status == ClientStatus.Open)
+            // The listen thread owns every transition; readers only request Closing.
+            if (status == ClientStatus.Closing)
+            {
+                CloseClient(clientId);
+            }
+            else if (status == ClientStatus.Open)
             {
                 if (!ProcessId.IsAlive(clientHeader.ClientProcessId))
                 {
@@ -1126,7 +1170,11 @@ public sealed class ServerSocket : IDisposable
     {
         if (clientId < 0 || clientId >= Capacity) return ReadStatus.Empty;
         ref ClientHeader client = ref _clientHeaders[clientId];
-        if (client.Status != ClientStatus.Open) return ReadStatus.Closed;
+
+        // The snapshot the close is read under is the snapshot the CAS must use: a fresh Load()
+        // at the transition would adopt a newer epoch and let stale evidence close a new session.
+        AtomicTransition<ClientStatus>.Snapshot snapshot = client.Status.Load();
+        if (snapshot.State != ClientStatus.Open) return ReadStatus.Closed;
 
         try
         {
@@ -1136,7 +1184,7 @@ public sealed class ServerSocket : IDisposable
                 ReadStatus result = clientSocket.GetReadStatus(channelId);
                 if (result == ReadStatus.Closed)
                 {
-                    CloseClient(clientId);
+                    client.Status.TryTransition(snapshot, ClientStatus.Closing);
                 }
                 return result;
             }
@@ -1157,7 +1205,10 @@ public sealed class ServerSocket : IDisposable
         ref ClientHeader clientHeader = ref _clientHeaders[clientId];
         Socket clientSocket = clientHeader.ClientSocket!;
 
-        if (clientHeader.Status != ClientStatus.Open || clientSocket == null) return ReadStatus.Closed;
+        // Same snapshot discipline as GetReadStatus; TryTransition replaces the old
+        // recheck-then-store, which two threads could interleave into a double close.
+        AtomicTransition<ClientStatus>.Snapshot snapshot = clientHeader.Status.Load();
+        if (snapshot.State != ClientStatus.Open || clientSocket == null) return ReadStatus.Closed;
 
         try
         {
@@ -1166,10 +1217,7 @@ public sealed class ServerSocket : IDisposable
             ReadStatus result = clientSocket.TryRead(channelId, out rdst);
             if (result == ReadStatus.Closed)
             {
-                if (clientHeader.Status == ClientStatus.Open)
-                {
-                    CloseClient(clientId);
-                }
+                clientHeader.Status.TryTransition(snapshot, ClientStatus.Closing);
             }
             return result;
         }
@@ -1193,8 +1241,11 @@ public sealed class ServerSocket : IDisposable
         // whose process is gone. Reads stay Open-only — nothing writes to a detached client's
         // inbound ring, and refusing to act on a dead client's last unread order target is
         // deliberate (CancelAllOrders is about to cancel it anyway).
-        ClientStatus status = client.Status;
-        if (status != ClientStatus.Open && status != ClientStatus.Detached) return;
+        // Persistance keeps the ≤1ms Closing window writable too — a fill landing there must not
+        // vanish from the very ring persistence exists to preserve (Spec.md "Socket close protocol").
+        ClientStatus status = client.Status.State;
+        bool canWrite = status == ClientStatus.Open || status == ClientStatus.Detached || (Persistance && status == ClientStatus.Closing);
+        if (!canWrite) return;
         Socket clientSocket = client.ClientSocket!;
 
         try
@@ -1216,8 +1267,9 @@ public sealed class ServerSocket : IDisposable
         if (clientId < 0 || clientId >= Capacity) return;
         ref ClientHeader client = ref _clientHeaders[clientId];
 
-        ClientStatus status = client.Status;
-        if (status != ClientStatus.Open && status != ClientStatus.Detached) return;
+        ClientStatus status = client.Status.State;
+        bool canWrite = status == ClientStatus.Open || status == ClientStatus.Detached || (Persistance && status == ClientStatus.Closing);
+        if (!canWrite) return;
         Socket clientSocket = client.ClientSocket!;
 
         try

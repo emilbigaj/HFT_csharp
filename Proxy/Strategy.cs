@@ -15,6 +15,8 @@ public sealed class ProxyAlgo : Algo
 
     public void Execute()
     {
+        SnapshotActives(); // before any position read — the era rule (see Spec.md)
+
         StackList<Target> targets = new StackList<Target>(stackalloc Target[64]);
 
         int offset = 8;

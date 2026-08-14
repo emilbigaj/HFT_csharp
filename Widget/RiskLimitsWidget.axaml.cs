@@ -153,6 +153,11 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
         _refreshTimer.Start();
     }
 
+    // Both read the server row, never Primary: limits are server-wide and RiskLayer gates them on the server position.
+    private static RiskLimit GetRiskLimit(int instrumentId) => ContextManager.ServerContext.GetRiskLimit(instrumentId).Read();
+
+    private static int GetPositionQuantity(int instrumentId) => ContextManager.ServerContext.GetPosition(instrumentId).Profit.Quantity;
+
     private void OnRefresh(object? sender, ElapsedEventArgs e)
     {
         if (_disposed) return;
@@ -169,8 +174,8 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
                     try
                     {
                         Instrument instrument = _context.Primary.GetInstrument(instrumentId);
-                        int positionQuantity = _context.Primary.GetPosition(instrumentId).Profit.Quantity;
-                        RiskLimit riskLimit = _context.Primary.GetRiskLimit(instrumentId).Read();
+                        int positionQuantity = GetPositionQuantity(instrumentId);
+                        RiskLimit riskLimit = GetRiskLimit(instrumentId);
                         _rowsByInstrumentId[instrumentId] = new WidgetRiskLimit(instrument, positionQuantity, riskLimit);
                     }
                     catch
@@ -190,8 +195,8 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
 
                 try
                 {
-                    RiskLimit current = _context.Primary.GetRiskLimit(instrumentId).Read();
-                    int positionQty = _context.Primary.GetPosition(instrumentId).Profit.Quantity;
+                    RiskLimit current = GetRiskLimit(instrumentId);
+                    int positionQty = GetPositionQuantity(instrumentId);
                     row.Refresh(in current, positionQty);
                 }
                 catch
@@ -324,7 +329,7 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
             // Read a fresh copy rather than using the row's cached value, which can be up to one
             // refresh tick stale. The whole struct goes back to the server, so every field we are
             // not editing has to be current or we would silently revert it.
-            RiskLimit current = _context.Primary.GetRiskLimit(row.InstrumentId).Read();
+            RiskLimit current = GetRiskLimit(row.InstrumentId);
 
             RiskLimitEditDialog dialog = new RiskLimitEditDialog(row.ShortSymbol, current);
             RiskLimit? edited = await dialog.ShowDialog<RiskLimit?>(window);

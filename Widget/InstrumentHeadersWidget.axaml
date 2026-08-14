@@ -12,6 +12,7 @@
 			  Background="Transparent"
 			  AutoGenerateColumns="False"
 			  IsReadOnly="True"
+			  CanUserSortColumns="True"
 			  GridLinesVisibility="All"
 			  BorderThickness="1"
 			  BorderBrush="Gray"
@@ -29,34 +30,37 @@
 			<ContextMenu Opened="OnContextMenuOpened" />
 		</DataGrid.ContextMenu>
 
+		<!-- SortMemberPath is explicit on every column: these are compiled bindings (x:DataType),
+		     and the DataGrid cannot infer a sort path from them — without it a header click is a no-op.
+		     Date columns sort on their ISO yyyy-MM-dd strings (chronological == lexical). -->
 		<DataGrid.Columns>
-			<DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" />
-			<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" />
-			<DataGridTextColumn Header="InstrumentType" Binding="{Binding InstrumentType}" />
-			<DataGridTextColumn Header="CoreGroupId" Binding="{Binding CoreGroupId}" />
-			<DataGridTextColumn Header="InstrumentHeaderId" Binding="{Binding InstrumentHeaderId}" />
-			<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentIdStr}" />
-			<DataGridTextColumn Header="ExchangeInstrumentId" Binding="{Binding ExchangeInstrumentId}" />
-			<DataGridTextColumn Header="Exchange" Binding="{Binding Exchange}" />
-			<DataGridTextColumn Header="Root" Binding="{Binding Root}" />
-			<DataGridTextColumn Header="TradingStatus" Binding="{Binding TradingStatus}" />
+			<DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" SortMemberPath="ShortSymbol" />
+			<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" SortMemberPath="Symbol" />
+			<DataGridTextColumn Header="InstrumentType" Binding="{Binding InstrumentType}" SortMemberPath="InstrumentType" />
+			<DataGridTextColumn Header="CoreGroupId" Binding="{Binding CoreGroupId}" SortMemberPath="CoreGroupId" />
+			<DataGridTextColumn Header="InstrumentHeaderId" Binding="{Binding InstrumentHeaderId}" SortMemberPath="InstrumentHeaderId" />
+			<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentId}" SortMemberPath="InstrumentId" />
+			<DataGridTextColumn Header="ExchangeInstrumentId" Binding="{Binding ExchangeInstrumentId}" SortMemberPath="ExchangeInstrumentId" />
+			<DataGridTextColumn Header="Exchange" Binding="{Binding Exchange}" SortMemberPath="Exchange" />
+			<DataGridTextColumn Header="Root" Binding="{Binding Root}" SortMemberPath="Root" />
+			<DataGridTextColumn Header="TradingStatus" Binding="{Binding TradingStatus}" SortMemberPath="TradingStatus" />
 
-			<DataGridTextColumn Header="TickSize" Binding="{Binding TickSize}" />
-			<DataGridTextColumn Header="InverseTickSize" Binding="{Binding InverseTickSize}" IsVisible="False" />
+			<DataGridTextColumn Header="TickSize" Binding="{Binding TickSize}" SortMemberPath="TickSize" />
+			<DataGridTextColumn Header="InverseTickSize" Binding="{Binding InverseTickSize}" SortMemberPath="InverseTickSize" IsVisible="False" />
 
-			<DataGridTextColumn Header="Multiplier" Binding="{Binding Multiplier}" IsVisible="True" />
-			<DataGridTextColumn Header="MaturityDate" Binding="{Binding MaturityDateStr}" IsVisible="False" />
-			<DataGridTextColumn Header="MaturityType" Binding="{Binding MaturityType}" IsVisible="False" />
+			<DataGridTextColumn Header="Multiplier" Binding="{Binding Multiplier}" SortMemberPath="Multiplier" IsVisible="True" />
+			<DataGridTextColumn Header="MaturityDate" Binding="{Binding MaturityDate}" SortMemberPath="MaturityDate" IsVisible="False" />
+			<DataGridTextColumn Header="MaturityType" Binding="{Binding MaturityType}" SortMemberPath="MaturityType" IsVisible="False" />
 
-			<DataGridTextColumn Header="LongMaturityDate" Binding="{Binding LongMaturityDateStr}" IsVisible="False" />
-			<DataGridTextColumn Header="LongMaturityType" Binding="{Binding LongMaturityType}" IsVisible="False" />
-			<DataGridTextColumn Header="ShortMaturityDate" Binding="{Binding ShortMaturityDateStr}" IsVisible="False" />
-			<DataGridTextColumn Header="ShortMaturityType" Binding="{Binding ShortMaturityType}" IsVisible="False" />
-			<DataGridTextColumn Header="LongInstrumentId" Binding="{Binding LongInstrumentId}" IsVisible="False" />
-			<DataGridTextColumn Header="ShortInstrumentId" Binding="{Binding ShortInstrumentId}" IsVisible="False" />
+			<DataGridTextColumn Header="LongMaturityDate" Binding="{Binding LongMaturityDate}" SortMemberPath="LongMaturityDate" IsVisible="False" />
+			<DataGridTextColumn Header="LongMaturityType" Binding="{Binding LongMaturityType}" SortMemberPath="LongMaturityType" IsVisible="False" />
+			<DataGridTextColumn Header="ShortMaturityDate" Binding="{Binding ShortMaturityDate}" SortMemberPath="ShortMaturityDate" IsVisible="False" />
+			<DataGridTextColumn Header="ShortMaturityType" Binding="{Binding ShortMaturityType}" SortMemberPath="ShortMaturityType" IsVisible="False" />
+			<DataGridTextColumn Header="LongInstrumentId" Binding="{Binding LongInstrumentId}" SortMemberPath="LongInstrumentId" IsVisible="False" />
+			<DataGridTextColumn Header="ShortInstrumentId" Binding="{Binding ShortInstrumentId}" SortMemberPath="ShortInstrumentId" IsVisible="False" />
 
-			<DataGridTextColumn Header="BaseCurrency" Binding="{Binding BaseCurrency}" IsVisible="False" />
-			<DataGridTextColumn Header="QuoteCurrency" Binding="{Binding QuoteCurrency}" IsVisible="False" />
+			<DataGridTextColumn Header="BaseCurrency" Binding="{Binding BaseCurrency}" SortMemberPath="BaseCurrency" IsVisible="False" />
+			<DataGridTextColumn Header="QuoteCurrency" Binding="{Binding QuoteCurrency}" SortMemberPath="QuoteCurrency" IsVisible="False" />
 		</DataGrid.Columns>
 	</DataGrid>
 </UserControl>

@@ -43,9 +43,10 @@ public sealed class WidgetOrderAudit
     public int OrderType { get; }
     public int Action { get; }
     public Instrument Instrument { get; }
-    public string Message { get; }
+    public string Reason { get; }
     public string Symbol { get; }
     public string ShortSymbol => Instrument.ShortSymbol;
+
 
     public int? Ticks { get; }
     public int Quantity { get; }
@@ -68,7 +69,7 @@ public sealed class WidgetOrderAudit
         double price = double.NaN,
         int? quantityFilled = null,
         int? workingQuantity = null,
-        string message = "")
+        string reason = "")
     {
         Instrument = instrument;
         OrderHeader = header;
@@ -79,7 +80,7 @@ public sealed class WidgetOrderAudit
         Price = double.IsNaN(price) ? (ticks.HasValue ? instrument.TicksToPrice(ticks.Value) : double.NaN) : price;
         QuantityFilled = quantityFilled;
         WorkingQuantity = workingQuantity;
-        Message = message;
+        Reason = reason;
         Symbol = instrument.Symbol;
 
         // --- Perform heavy lifting ONCE here ---
@@ -301,7 +302,7 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
             {
                 case OrderType.OrderState:
                     var state = Json.Deserialize<OrderState>(json);
-                    widgetAudit = new WidgetOrderAudit(instrument!, state.OrderHeader, (int)OrderType.OrderState, (int)state.OrderStateStatus, state.OrderProfile.Quantity, ticks: state.OrderProfile.Ticks, quantityFilled: state.QuantityFilled, workingQuantity: state.WorkingQuantity);
+                    widgetAudit = new WidgetOrderAudit(instrument!, state.OrderHeader, (int)OrderType.OrderState, (int)state.OrderStateStatus, state.OrderProfile.Quantity, ticks: state.OrderProfile.Ticks, quantityFilled: state.QuantityFilled, workingQuantity: state.WorkingQuantity, reason: state.OrderStateReason.ToString() );
                     return true;
                 case OrderType.OrderTarget:
                     var target = Json.Deserialize<OrderTarget>(json);
@@ -309,7 +310,7 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
                     return true;
                 case OrderType.OrderRejected:
                     var rejected = Json.Deserialize<OrderRejected>(json);
-                    widgetAudit = new WidgetOrderAudit(instrument!, rejected.OrderHeader, (int)OrderType.OrderRejected, (int)rejected.OrderTargetAction, rejected.OrderProfile.Quantity, ticks: rejected.OrderProfile.Ticks, message: rejected.OrderRejectedReasonsString);
+                    widgetAudit = new WidgetOrderAudit(instrument!, rejected.OrderHeader, (int)OrderType.OrderRejected, (int)rejected.OrderTargetAction, rejected.OrderProfile.Quantity, ticks: rejected.OrderProfile.Ticks, reason: rejected.OrderRejectedReasonsString);
                     return true;
                 case OrderType.Fill:
                     var fill = Json.Deserialize<Fill>(json);

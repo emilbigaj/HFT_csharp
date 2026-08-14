@@ -139,7 +139,7 @@ public class RiskLayer
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void OnOrderState(in OrderState orderState)
+    public void OnOrderState(in OrderState orderState, int beforeAckedOrderQuantity)
     {
         if (_orderRejectedSource != OrderRejectedSource.Server)
             return;
@@ -149,7 +149,7 @@ public class RiskLayer
             ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
             Side side = orderState.OrderProfile.Side;
 
-            int worstOrderQuantityBefore = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
+            int worstOrderQuantityBefore = orderRisk.GetAbsWorstOrderQuantity(beforeAckedOrderQuantity);
             orderRisk.Ack(orderState.OrderProfile.Quantity);
             int worstOrderQuantityAfter = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
             int worstOrderQuantityDelta = (worstOrderQuantityAfter - worstOrderQuantityBefore);
@@ -380,8 +380,9 @@ public class RiskLayer
                 int quantity = serverPosition.Header.Quantity;
                 int worstLongQuantity = quantity + worstLongWorkingQuantity;
                 int worstShortQuantity = quantity + worstShortWorkingQuantity;
-
-                if (worstLongQuantity > riskLimit.MaxPositionQuantity || worstShortQuantity < -riskLimit.MaxPositionQuantity)
+                
+                bool isRiskLimitExceeded = sign > 0 ? worstLongQuantity > riskLimit.MaxPositionQuantity : worstShortQuantity < -riskLimit.MaxPositionQuantity;
+                if (isRiskLimitExceeded)
                 {
                     orderRisk.Reject(orderTarget.OrderProfile.Quantity);
                     orderRejectedReasons.Set((int)OrderRejectedReason.PositionExceedsRiskLimit);

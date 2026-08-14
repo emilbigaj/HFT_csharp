@@ -17,7 +17,13 @@ the source of truth for every item below; file references name the C# implementa
 pushing. Verify against the C# mirror after merge:
 
 - `ServerHeader.Persistance` — one byte, offset 172, `sizeof(ServerHeader) == 173` (C# `Socket/Socket.cs`)
-- `ClientStatus::Detached`; write gate accepts `Open || Detached`, reads stay `Open`-only
+- `ClientStatus` ladder `Disposed=0, Detached=1, Open=2, Closing=3, Closed=4` (process-local, but
+  keep both sides identical); write gate accepts `Open || Detached || (Persistance && Closing)`,
+  reads stay `Open`-only
+- `Tools::AtomicTransition` ({state, epoch} in one word): readers request `Open → Closing` via
+  snapshot-CAS, the listen thread performs every transition; `OpenClient` recovers (persist) or
+  resets (non-persist) the reused server-side Socket — see Spec.md "Socket close protocol".
+  Landed in C++ first (2026-08); mirrored into C# `Tools/AtomicTransition.cs` + `Socket/Socket.cs`
 - `Protocol::SkipRing` + `Recover()` on both socket halves; **nothing calls `Reset()`** on shared memory
 - Read-status probes check `Magic` and resolve cursors the same way the read path does
 - Shared-memory region names built with `std::filesystem::path::operator/` (C# mirrors this via
@@ -27,7 +33,11 @@ pushing. Verify against the C# mirror after merge:
 
 ### 1.1 `RiskLimit` (Execution/Order.hpp ~144)
 
-C++ still has the 40-byte struct with `RateLimit` members. C# (`Execution/Order.cs`) is now:
+> **Status 2026-08-11: already done in the local C++ tree** (36-byte struct with static_assert,
+> matching glaze schema — confirmed by inspection). GitHub `origin/main` still shows the old
+> 40-byte version; push the local work. Verify against the layout below rather than reimplementing.
+
+C++ still has the 40-byte struct with `RateLimit` members on origin/main. C# (`Execution/Order.cs`) is now:
 
 ```
 Header<OrderType> Header          (4 B, Type = OrderType::RiskLimit)

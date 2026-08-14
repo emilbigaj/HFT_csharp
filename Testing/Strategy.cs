@@ -49,9 +49,7 @@ public class TestingStrategy : Strategy.Strategy
         Position position = GetPosition(future);
         _positions.Add(position);
 
-        Mean ratio = NewMean(lead.Root + friend.Root + "Ratio", halfLife: 5 * 10, 1);
-
-        TestingAlgo executionAlgo = new TestingAlgo(position, Client, lead, friend, ratio);
+        TestingAlgo executionAlgo = new TestingAlgo(position, Client, lead, friend);
 
         
         // Hook up the flush handler. This fires automatically when ReadSocket() hits its Dispose().
@@ -73,14 +71,6 @@ public class TestingStrategy : Strategy.Strategy
             }
         };
 
-        MS100 += (Timestamp ts) =>
-        {
-            if (friend.TryGetQuote(out Quote f) && lead.TryGetQuote(out Quote l))
-            {
-                ratio += l.MidPrice / f.MidPrice;
-            }
-            
-        };
 
         lead.SettlementChanged += (in Settlement settlement) =>
         {

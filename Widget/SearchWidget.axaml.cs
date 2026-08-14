@@ -40,13 +40,15 @@ public partial class SearchWidget : Window
     {
         if (_isCacheLoaded) return;
 
-        // Populate cache from headers
+        // Populate from SymbolCache: no Symbology construction, and unknown types ("?") can no
+        // longer throw out of the enumeration.
         foreach (var header in _context.EnumerateInstrumentHeaders())
         {
-            string symbol = header.Symbology.Symbol;
-            if (!string.IsNullOrEmpty(symbol))
+            int instrumentHeaderId = header.AsInstrumentHeader().InstrumentHeaderId;
+            string symbol = SymbolCache.Get(instrumentHeaderId).Symbol;
+            if (!string.IsNullOrEmpty(symbol) && symbol != "?")
             {
-                _symbolCache.TryAdd(symbol, header.AsInstrumentHeader().InstrumentHeaderId);
+                _symbolCache.TryAdd(symbol, instrumentHeaderId);
             }
         }
 

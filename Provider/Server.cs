@@ -162,29 +162,6 @@ public class Server : IDisposable
         _serverSocket.Listen();
     }
 
-    // Disconnect housekeeping — run by ONE thread (the hub), NOT per-segment: it owns _clientIds and
-    // CancelAllOrders is cross-segment. Cancels a dropped client's working orders and clears it from
-    // each CoreGroup's client set so ReadExecution stops polling it (AtomicClear => race-free vs readers).
-    private Bitset64 _clientIds = new Bitset64();
-    public void PollDisconnects()
-    {
-        Bitset64 clientIds = _serverSocket.ClientIds();
-        Bitset64 closedClientIds = _clientIds & ~clientIds;
-        _clientIds = clientIds;
-        if (closedClientIds.IsEmpty)
-            return;
-
-        foreach (int clientId in closedClientIds)
-            CancelAllOrders(clientId);
-
-        for (int coreGroupId = 0; coreGroupId < _clientIdsByCoreGroupId.Length; coreGroupId++)
-        {
-            ref Bitset64 coreGroupClientIds = ref _clientIdsByCoreGroupId[coreGroupId];
-            foreach (int clientId in closedClientIds)
-                coreGroupClientIds.AtomicClear(clientId);
-        }
-    }
-
     // Producer API for the injection queue (derives cg from the instrument). Hub + vendor RX call this
     // instead of sending; writers serialise on _sendToExchangeLocks, full queue spins (never drops).
     public void EnqueueOrderTarget(in OrderTarget orderTarget)
@@ -324,8 +301,6 @@ public class Server : IDisposable
 
     public void ReadAdmin()
     {
-        PollDisconnects();
-
         foreach (int clientId in _serverSocket.ClientIds())
         {
             while (_serverSocket.TryRead(clientId, SocketChannel.Admin, out ReadOnlySpan<byte> rdst) == ReadStatus.New)
@@ -391,17 +366,19 @@ public class Server : IDisposable
 
         if (isSafeToOverwrite)
         {
+            int beforeAckedOrderQuantity = existingOrderState.OrderProfile.Quantity;
+            int quantityFilled = Math.Abs(existingOrderState.QuantityFilled) > Math.Abs(orderState.QuantityFilled) ? existingOrderState.QuantityFilled : orderState.QuantityFilled;
             orderStateEntry.AcquireLock();
             existingOrderState.OrderHeader.Seq = orderState.OrderHeader.Seq;
             existingOrderState.ExchangeOrderId = orderState.ExchangeOrderId;
             existingOrderState.OrderProfile = orderState.OrderProfile;
             existingOrderState.OrderStateStatus = orderState.OrderStateStatus;
             existingOrderState.OrderStateReason = orderState.OrderStateReason;
-            existingOrderState.QuantityFilled = orderState.QuantityFilled;
+            existingOrderState.QuantityFilled = quantityFilled;
             existingOrderState.OrderHeader.ExchangeTimestamp = orderState.OrderHeader.ExchangeTimestamp;
             existingOrderState.OrderHeader.NicTimestamp = Clock.Now;
             orderStateEntry.ReleaseLock();
-            _riskLayer.OnOrderState(in existingOrderState);
+            _riskLayer.OnOrderState(in existingOrderState, beforeAckedOrderQuantity);
         }
         WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
         OrderState?.Invoke(in existingOrderState);
@@ -493,18 +470,16 @@ public class Server : IDisposable
         int instrumentId = _serverContext.AllocateInstrument(allocateInstrument.InstrumentHeaderId);
         allocateInstrument.InstrumentId = instrumentId;
 
-        if (_instrumentData[instrumentId] != null)
-            return instrumentId; // already attached + seeded
-
         ref InstrumentHeader128 header128 = ref _serverContext.GetInstrumentHeader(allocateInstrument.InstrumentHeaderId).GetRef();
         allocateInstrument.Symbol = header128.Symbology.Symbol;
         allocateInstrument.ExchangeInstrumentId = header128.AsInstrumentHeader().ExchangeInstrumentId;
 
+        if (_instrumentData[instrumentId] != null)
+            return instrumentId; // already attached + seeded
+
         OpenInstrumentData(instrumentId, allocateInstrument.Symbol.ToString());
 
         WriteToAudit(SocketChannel.Admin, in allocateInstrument);
-
-        AllocateInstrument?.Invoke(allocateInstrument);
 
         return instrumentId;
     }
@@ -528,6 +503,11 @@ public class Server : IDisposable
         _clientIdsByCoreGroupId[coreGroupId].AtomicSet(clientId);
 
         WriteToAdmin(clientId, in allocateInstrument);
+
+        // After the work, not before: on entry InstrumentId is still -1 and Symbol is empty.
+        Console.WriteLine($"{ServerName}::OnAllocateInstrument()\n{allocateInstrument}");
+
+        AllocateInstrument?.Invoke(allocateInstrument);
     }
 
     public Fill OnFill(ref Fill fill)
@@ -780,21 +760,37 @@ public class Server : IDisposable
 
     private void OnClientAllocated(in SocketHeader socketHeader)
     {
+        Console.WriteLine($"{ServerName}::OnClientAllocated()\n{socketHeader}");
+
         // this is the open signal for the logger
         _loggingServer.Write(in socketHeader);
         AllocateClient?.Invoke(in socketHeader);
     }
 
+    // Fired by the listen thread only (exactly-once per close — see Spec.md "Socket close
+    // protocol"), which is what lets the cross-segment CancelAllOrders and bitset clearing live
+    // here instead of a hub-side PollDisconnects.
     private void OnClientClosed(int clientId)
     {
         CancelAllOrders(clientId);
+
+        for (int coreGroupId = 0; coreGroupId < _clientIdsByCoreGroupId.Length; coreGroupId++)
+        {
+            _clientIdsByCoreGroupId[coreGroupId].AtomicClear(clientId);
+        }
+
         ClientClosed?.Invoke(clientId);
     }
 
     private void OnClientOpened(int clientId)
     {
+        Console.WriteLine("OnClientOpened: clientId " + clientId);
         foreach (int instrumentId in _serverContext.GetInstrumentIdsByClientId(clientId).GetReadonlyRef())
+        {
             _clientIdsByCoreGroupId[_serverContext.GetInstrument(instrumentId).Header.CoreGroupId].AtomicSet(clientId);
+            Console.WriteLine($"Trades instrumentId {instrumentId} ({_serverContext.GetInstrument(instrumentId).Symbol})");
+        }
+            
     }
 
     private void OnClientDeallocated(in SocketHeader socketHeader)

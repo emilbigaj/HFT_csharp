@@ -50,6 +50,27 @@ public unsafe abstract class Algo
         public int Index;
     }
 
+    private readonly ArrayList<ActiveTarget> _activeTargets = new ArrayList<ActiveTarget>(s_maxOrders);
+    private bool _hasSnapshot;
+
+    // Take at the top of the tick, BEFORE reading position — the era rule (see Spec.md).
+    public void SnapshotActives()
+    {
+        _hasSnapshot = true;
+        _activeTargets.Clear();
+        foreach (ActiveTarget active in Position.ActiveTargets)
+        {
+            _activeTargets.Add(active);
+        }
+    }
+
+    protected int GetPositionQuantity()
+    {
+        SnapshotActives();
+        int quantity = Position.Header.Quantity;
+        return quantity;
+    }
+
     private struct SortKeyComparer : IComparer<SortKey>
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -120,23 +141,19 @@ public unsafe abstract class Algo
         // ---------------------------------------------------------
         // 2. Setup & Sort Actives
         // ---------------------------------------------------------
-        int estimatedActiveCount = Position.IsOrderActive.Count;
+        // Un-migrated caller: snapshot now — era-unsafe but identical to pre-snapshot behaviour; never zipper a previous tick's actives.
+        if (!_hasSnapshot)
+            SnapshotActives();
+        _hasSnapshot = false; // consumed; next tick must re-take it
 
-        ActiveTarget* activeTargetsPtr = stackalloc ActiveTarget[estimatedActiveCount];
-        UnsafeStackList<ActiveTarget> activeTargets = new(activeTargetsPtr);
-
-        SortKey* activeKeysPtr = stackalloc SortKey[estimatedActiveCount + 1]; // add 1 for sentinel
+        SortKey* activeKeysPtr = stackalloc SortKey[_activeTargets.Count + 1]; // add 1 for sentinel
         UnsafeStackList<SortKey> activeKeys = new(activeKeysPtr);
 
         int minActiveSellPrice = int.MaxValue;
         int maxActiveBuyPrice = int.MinValue;
 
-        foreach (ActiveTarget active in Position.ActiveTargets)
+        foreach (ActiveTarget active in _activeTargets)
         {
-            if (activeTargets.Count == estimatedActiveCount)
-                throw new ArgumentOutOfRangeException("Can not save an active order beyond stack allocation.");
-
-            activeTargets.Add(active);
             activeKeys.Add() = new SortKey
             {
                 PackedScore = GetPackedActiveKey(in active),
@@ -198,7 +215,7 @@ public unsafe abstract class Algo
                         break;
 
                     int activeIndex = activeKey->Index;
-                    ref ActiveTarget active = ref activeTargets[activeIndex];
+                    ref ActiveTarget active = ref _activeTargets[activeIndex];
 
                     int absTargetQty = (target->WorkingQuantity < 0) ? -target->WorkingQuantity : target->WorkingQuantity;
                     int absActiveQty = (active.Target.WorkingQuantity < 0) ? -active.Target.WorkingQuantity : active.Target.WorkingQuantity;
@@ -253,7 +270,7 @@ public unsafe abstract class Algo
             int activeKeyIndex = unmatchedActiveKeysCopy.LowestSet;
 
             ref Target target = ref sortedTargets[targetIndex];
-            ref ActiveTarget active = ref activeTargets[activeKeys[activeKeyIndex].Index];
+            ref ActiveTarget active = ref _activeTargets[activeKeys[activeKeyIndex].Index];
 
             if (target.Sign == active.Target.Sign)
             {
@@ -297,7 +314,7 @@ public unsafe abstract class Algo
 
         while (unmatchedActiveKeys.TryPopLowest(out int activeKeyIndex))
         {
-            ref ActiveTarget active = ref activeTargets[activeKeys[activeKeyIndex].Index];
+            ref ActiveTarget active = ref _activeTargets[activeKeys[activeKeyIndex].Index];
             // We use |= to flag if ANY order on this side is being cancelled.
             isPendingSellCancel |= (active.Target.Sign < 0);
             isPendingBuyCancel |= (active.Target.Sign > 0);

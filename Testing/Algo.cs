@@ -14,13 +14,11 @@ public sealed class TestingAlgo : Algo
 {
     public Future Lead { get; }
     public Future Friend { get; }
-    public Mean Ratio { get; }
 
-    public TestingAlgo(Position position, Client client, Future lead, Future friend, Mean ratio) : base(client, position)
+    public TestingAlgo(Position position, Client client, Future lead, Future friend) : base(client, position)
     {
         Lead = lead;
         Friend = friend;
-        Ratio = ratio;
     }
 
     public static bool s_exit = false;
@@ -52,19 +50,19 @@ public sealed class TestingAlgo : Algo
     {
         //using Latency latency = new Latency(CallId.AlgoExecute);
 
-
         StackList<Target> targets = new StackList<Target>(stackalloc Target[64]);
+        int pos = GetPositionQuantity();
 
-        if (Lead.TryGetQuote(out Quote quote) && Instrument.TryGetQuote(out Quote inst) && Friend.TryGetQuote(out Quote friend))
+        if (Instrument.TryGetQuote(out Quote inst))
         {
-            double pc = quote.MidPrice * 0.0001;
+            double pc = inst.MidPrice * 0.0001;
             int spread = Instrument.RoundToTicks(pc);
             int half = Math.Max(spread / 2, 2);
 
-            int bidTicks = Instrument.RoundToTicks(quote.BidPrice);
+            int bidTicks = Instrument.RoundToTicks(inst.BidPrice);
             if (Math.Abs(bidTicks - _bidTicks) >= half)
                 _bidTicks = bidTicks;
-            int askTicks = Instrument.RoundToTicks(quote.AskPrice);
+            int askTicks = Instrument.RoundToTicks(inst.AskPrice);
             if (Math.Abs(askTicks - _askTicks) >= half)
                 _askTicks = askTicks;
 
@@ -72,7 +70,6 @@ public sealed class TestingAlgo : Algo
             {
                 int buyTicks = _bidTicks;
                 int sellTicks = _askTicks;
-                int pos = Position.Header.Quantity;
                 if (pos > 0)
                 {
                     targets.Add(new Target { Ticks = sellTicks, WorkingQuantity = -1 });
@@ -85,7 +82,6 @@ public sealed class TestingAlgo : Algo
             else
             {
 
-                int pos = Position.Header.Quantity;
                 int max = 10;
                 int buy = max - pos;
                 int sell = -max - pos;

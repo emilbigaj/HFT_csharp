@@ -44,6 +44,9 @@ public partial class Workspace : Window, IWidgetHost
     {
         Context = context ?? throw new ArgumentNullException(nameof(context));
 
+        // Idempotent: sizes the symbology-string cache and warms it off-thread (see Spec.md).
+        SymbolCache.Initialize(ContextManager.ServerContext);
+
         // Passing ServerName for both names selects server mode: the GUI still connects as its own
         // "<server>_GUI" client, but shadows every client instead of one algo and books manual
         // orders to the reserved house strategy.

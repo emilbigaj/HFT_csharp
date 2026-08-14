@@ -183,8 +183,9 @@ public class ClientSocketReader : IReader
         // Release everything older than (maxSeen - margin) in timestamp order; hold the newer records for
         // next pass (a lagging channel could still emit something earlier). Sorted -> the split is one index.
         Timestamp watermark = _maxSeen - WatermarkMargin;
-        executions.Sort((PooledBuffer a, PooledBuffer b) => GetCreationTimestamp(a.Span, @default).CompareTo(GetCreationTimestamp(b.Span, @default)));
-        int hold = executions.FindIndex(pb => GetCreationTimestamp(pb.Span, @default) > watermark);
+        // OrderBy, not List.Sort: stability is the point — fill/state/position clusters share one
+        // timestamp and must keep arrival order.
+        executions = executions.OrderBy(pb => GetCreationTimestamp(pb.Span, @default)).ToList();        int hold = executions.FindIndex(pb => GetCreationTimestamp(pb.Span, @default) > watermark);
         if (hold < 0) hold = executions.Count;
 
         results.AddRange(clientToServerAdmin);

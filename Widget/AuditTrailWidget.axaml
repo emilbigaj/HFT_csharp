@@ -45,7 +45,7 @@
 				<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentId}" IsVisible="False" Width="Auto"/>
 				<DataGridTextColumn Header="ClientOrderId" Binding="{Binding ClientOrderId}" Width="Auto"/>
 				<DataGridTextColumn Header="Seq" Binding="{Binding Seq}" Width="Auto"/>
-				<DataGridTextColumn Header="Message" Binding="{Binding Message}" Width="Auto"/>
+				<DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="Auto"/>
 				<DataGridTextColumn Header="Type" Binding="{Binding OrderTypeName}" Width="Auto"/>
 				<DataGridTextColumn Header="Action" Binding="{Binding ActionName}" Width="Auto"/>
 				<DataGridTextColumn Header="Side" Binding="{Binding Side}" Width="Auto"  IsVisible="False"/>
