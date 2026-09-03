@@ -48,7 +48,7 @@
 				<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" Width="Auto" IsVisible="False"/>
 				<DataGridTextColumn Header ="AlgoStatus" Binding="{Binding AlgoStatus}" Width ="Auto"/>
 				<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentId}" IsVisible="False" Width="Auto"/>
-				<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity}" Width="Auto"/>
+				<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity, StringFormat={}{0:N0}}" Width="Auto"/>
 				<DataGridTextColumn Header="AvgPrice" Binding="{Binding AvgPriceStr}" Width="Auto"/>
 				<DataGridTemplateColumn Header="Profit" SortMemberPath="Profit" Width="Auto">
 					<DataGridTemplateColumn.CellTemplate>
@@ -92,7 +92,7 @@
 						</DataTemplate>
 					</DataGridTemplateColumn.CellTemplate>
 				</DataGridTemplateColumn>
-				<DataGridTextColumn Header="QuantityTraded" Binding="{Binding QuantityTraded}" Width="Auto"/>
+				<DataGridTextColumn Header="QuantityTraded" Binding="{Binding QuantityTraded, StringFormat={}{0:N0}}" Width="Auto"/>
 			</DataGrid.Columns>
 		</DataGrid>
 	</Grid>

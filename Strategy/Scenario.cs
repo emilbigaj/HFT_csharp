@@ -7,6 +7,7 @@ using System;
 using System.Runtime.Versioning;
 using Execution;
 using Simulator;
+using System.Collections.Generic;
 
 namespace Strategy;
 
@@ -35,6 +36,10 @@ public class Scenario
     public Timestamp SimulationEnd { get; set; } = Timestamp.MaxValue;
     public ServerSimulator? ServerSimulator { get; private set; }
 
+    public virtual FileSystemPath DefaultTickHistoryDirectoryPath { get; } = $"Z:\\TickHistory\\Databento\\";
+    public virtual FileSystemPath DefaultInstrumentDetailsDirectoryPath { get; } = $"Z:\\InstrumentDetails\\Databento\\";
+
+
     public Scenario(string name)
     {
         Name = name;
@@ -62,6 +67,8 @@ public class Scenario
 
     public Future GetFuture(string exchange, string root, Timestamp maturity, int[]? months = null)
     {
+        AddProductSearch(exchange, root);
+
         Context context = ContextManager.ServerContext;
 
         String8 _exchange = new String8(exchange);
@@ -83,6 +90,34 @@ public class Scenario
             }
         }
         return default!;
+    }
+
+    public FutureChain GetFutureChain(string exchange, string root, Timestamp maturity, int[]? months = null)
+    {
+        AddProductSearch(exchange, root);
+        List<Future> futures = new List<Future>();
+
+        Context context = ContextManager.ServerContext;
+
+        String8 _exchange = new String8(exchange);
+        String8 _root = new String8(root);
+        foreach (var header128 in context.EnumerateInstrumentHeaders())
+        {
+            if (header128.AsInstrumentHeader().InstrumentType != InstrumentType.Future)
+                continue;
+            ref FutureHeader futureHeader = ref header128.AsFuture();
+            if (futureHeader.InstrumentHeader.Exchange == _exchange && futureHeader.InstrumentHeader.Root == _root)
+            {
+                if (months != null && !months.Contains(futureHeader.MaturityDate.Month))
+                    continue;
+
+                if (futureHeader.MaturityDate >= maturity)
+                {
+                    futures.Add((Client.GetInstrument(futureHeader.InstrumentHeader.InstrumentHeaderId) as Future)!);
+                }
+            }
+        }
+        return new FutureChain(futures);
     }
 
 
@@ -153,6 +188,30 @@ public class Scenario
     {
         return null!;
 
+    }
+    
+    public void AddProductSearch(string exchange, string root)
+    {
+        if (Clock.Mode == ClockMode.Realtime)
+            throw new InvalidOperationException("Cannot add product in realtime mode");
+
+        string product = $"{exchange} {root}";
+        ServerSimulator!.ExchangeSimulator.DataSimulator.AddSearch(new TickHistorySearch()
+        {
+            DirectoryPath = $"{DefaultTickHistoryDirectoryPath}\\{product}",
+        });
+
+        InstrumentDetailsSearch search = new InstrumentDetailsSearch
+        {
+            DirectoryPath = $"{DefaultInstrumentDetailsDirectoryPath}\\{product}",
+        };
+
+        using ArrayList<InstrumentDetails> found = InstrumentDetailsSearch.Search(search);
+        foreach (InstrumentDetails details in found)
+        {
+            details.Sessions = new Session[] { Session.CME };
+            ServerSimulator!.OnInstrumentDetails(details);
+        }
     }
 
     public virtual void BuildRealtime()

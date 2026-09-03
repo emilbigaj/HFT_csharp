@@ -55,7 +55,7 @@ public sealed class TestingAlgo : Algo
 
         if (Instrument.TryGetQuote(out Quote inst))
         {
-            double pc = inst.MidPrice * 0.0001;
+            double pc = inst.MidPrice * 0.00;
             int spread = Instrument.RoundToTicks(pc);
             int half = Math.Max(spread / 2, 2);
 

@@ -90,7 +90,7 @@ A client's close is two different jobs on two different kinds of thread:
   and on an execution thread, where the cancel-all callback has no business) is gone by
   construction.
 
-The request is a CAS against the **snapshot the close was read under** (`Tools/AtomicTransition`:
+The request is a CAS against the **snapshot the close was read under** (`Tools/AtomicEnum`:
 {state, epoch} packed in one 64-bit word, the epoch advancing on every transition). That kills the
 two races the naive `if (Status == Open) Status = Closing` has:
 
@@ -117,6 +117,34 @@ Consequences kept deliberately:
 - **Recover-on-reconnect skips the dead client's unread backlog** (`Socket.Recover` parks readers
   at the writer's head). Consistent with the persist design — the client is gone and its orders get
   cancelled — but it is a choice, not a neutral fact.
+
+## TickHistoryWriter crash safety (day-boundary resume only)
+
+A `TickHistoryWriter` may only be stopped at a day boundary and resumed on a later day. **Stop/resume
+within the same day is not safe**: same-day continuation appends into the last day's block by
+overwriting the footer and trailing snapshot with update frames, and the first zstd flush destroys
+the recovery point mid-frame.
+
+Day-boundary resume, by contrast, is corruption-proof — including power loss — because every write
+of the resume rollover lands on bytes that are already identical or equivalent on disk:
+
+- **Previous day header rewrite** is byte-identical: its `PositionOfTomorrow` is set to the value it
+  already has (no compression stream exists at resume, so no empty zstd frame shifts the position —
+  that ~13-byte shift was the original corruption mechanism).
+- **New day header over the footer** differs in one field (`ExchangeTimestamp`), a single-sector write;
+  either version resumes correctly.
+- **The rollover snapshot overwrites the trailing snapshot byte-identically**, so torn pages splice
+  identical bytes into identical bytes. Identity holds because the encoded record is the same (same
+  book, same delta baseline, and timestamps encode as zero deltas — `WriteSnapshot` stamps the exact
+  timestamp it deltas against), and the compression is the same (fresh stream, same dictionary and
+  level, and the load-bearing `Flush()` after `WriteSnapshot` closes the block at the same input
+  boundary `Dispose` does). The frames diverge only at the old 3-byte end-of-frame marker, past the
+  one record resume ever decodes.
+
+Preconditions for the byte-identity — changing any of these silently reopens a torn-page window
+under power loss: same ZstdSharp version and dictionary across sessions, same compression level, the
+snapshot written as a single `Write`, no zstd checksum flag, and the `Flush()` directly after
+`WriteSnapshot` in `WriteTomorrowHeader`.
 
 ## Open items
 

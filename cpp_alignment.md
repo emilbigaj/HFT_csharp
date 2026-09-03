@@ -20,10 +20,11 @@ pushing. Verify against the C# mirror after merge:
 - `ClientStatus` ladder `Disposed=0, Detached=1, Open=2, Closing=3, Closed=4` (process-local, but
   keep both sides identical); write gate accepts `Open || Detached || (Persistance && Closing)`,
   reads stay `Open`-only
-- `Tools::AtomicTransition` ({state, epoch} in one word): readers request `Open → Closing` via
-  snapshot-CAS, the listen thread performs every transition; `OpenClient` recovers (persist) or
-  resets (non-persist) the reused server-side Socket — see Spec.md "Socket close protocol".
-  Landed in C++ first (2026-08); mirrored into C# `Tools/AtomicTransition.cs` + `Socket/Socket.cs`
+- `Tools::AtomicEnum` ({state, epoch} in one word; C++ tree may still name it AtomicTransition —
+  rename to match): readers request `Open → Closing` via snapshot-CAS, the listen thread performs
+  every transition; `OpenClient` recovers (persist) or resets (non-persist) the reused server-side
+  Socket — see Spec.md "Socket close protocol".
+  Landed in C++ first (2026-08); mirrored into C# `Tools/AtomicEnum.cs` + `Socket/Socket.cs`
 - `Protocol::SkipRing` + `Recover()` on both socket halves; **nothing calls `Reset()`** on shared memory
 - Read-status probes check `Magic` and resolve cursors the same way the read path does
 - Shared-memory region names built with `std::filesystem::path::operator/` (C# mirrors this via
@@ -85,11 +86,10 @@ enum class OrderStateReason : uint8_t
     Unknown = 0,
     PendingNew = 1,
     Acked = 2,
-    PartialFill = 3,
-    Filled = 4,      // here onwards -> Done
-    Canceled = 5,
-    Rejected = 6,    // create rejected, not amend/cancel rejected
-    Eliminated = 7,
+    Fill = 3,        // partial vs complete lives in OrderStateStatus: Fill+Active / Fill+Done
+    Canceled = 4,    // here onwards -> Done unconditionally
+    Rejected = 5,    // create rejected, not amend/cancel rejected
+    Eliminated = 6,
 };
 ```
 
@@ -97,6 +97,11 @@ Semantics (FIX): `OrderStateReason` = ExecType — *why this state was published
 `OrderStateStatus` = OrdStatus — *what the order is*. A cancel preserves `OrderProfile.Quantity`
 (OrderQty survives; CumQty reports fills; LeavesQty goes to zero via status, never by rewriting
 the order). Delete every use of `OrderStateDoneReason`.
+
+**Renumbered 2026-09 (C# done): PartialFill/Filled merged into `Fill`** — FIX itself deprecated the
+partial/complete ExecTypes; OrdStatus carries that. Canceled/Rejected/Eliminated shifted down one.
+WIRE CHANGE on a shared-memory byte: both sides must deploy in lockstep, and JSON logs written
+before the rename ("PartialFill"/"Filled" strings) no longer deserialize.
 
 ### 1.4 `AllocateInstrument` (Provider/Allocate.hpp ~34)
 

@@ -5,6 +5,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Media;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Data;
@@ -16,6 +17,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Tools;
@@ -54,6 +56,7 @@ public sealed class WidgetOrderAudit
 
     // Pass-throughs for bindings if needed
     public ulong ClientOrderId => OrderHeader.OrderId;
+    public string Source => OrderHeader.OrderId.IsAlgoOrder() ? "Algo" : "Manual";
     public int Seq => OrderHeader.Seq;
     public Timestamp ExchangeTimestamp => OrderHeader.ExchangeTimestamp;
     public Timestamp NicTimestamp => OrderHeader.NicTimestamp;
@@ -124,7 +127,25 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
     // Filter state
     private readonly HashSet<int> _visibleOrderTypes = new HashSet<int>();
 
-    private LogReader? _logReader;
+    // Source filter ("Algo"/"Manual"); both visible by default.
+    private static readonly string[] s_sources = new[] { "Algo", "Manual" };
+    private readonly HashSet<string> _visibleSources = new HashSet<string>(s_sources);
+
+    // Regex filtering (shared machinery in ColumnRegexFilters): rows must pass every active column
+    // filter (AND).
+    private readonly ColumnRegexFilters<WidgetOrderAudit> _columnRegexFilters;
+
+    // Filterable text per column — cached row fields only, no formatting work.
+    private static readonly Dictionary<string, Func<WidgetOrderAudit, string>> s_columnText = new()
+    {
+        ["ShortSymbol"] = r => r.ShortSymbol,
+        ["Symbol"] = r => r.Symbol,
+        ["ClientOrderId"] = r => r.ClientOrderId.ToString(),
+    };
+
+    // One reader per audit directory (primary tap + manual _GUI client tap), merged by timestamp.
+    private readonly List<LogReader> _logReaders = new List<LogReader>();
+    private readonly List<System.Collections.Generic.Queue<WidgetOrderAudit>> _historyQueues = new List<System.Collections.Generic.Queue<WidgetOrderAudit>>();
     private bool _isLoadingHistory = false;
     private const int BatchSize = 100;
     public string TypeKey => "AuditTrailWidget";
@@ -142,6 +163,7 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
         _context = null!;
         InitializeComponent();
         DataContext = this;
+        _columnRegexFilters = new ColumnRegexFilters<WidgetOrderAudit>(AuditGrid, s_columnText, ApplyFilter);
         Title = "Audit Trail (Design)";
     }
 
@@ -167,6 +189,8 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
         DataContext = this;
         AuditGrid.ItemsSource = Rows;
 
+        _columnRegexFilters = new ColumnRegexFilters<WidgetOrderAudit>(AuditGrid, s_columnText, ApplyFilter);
+
         // Track pointer for context menu
         AuditGrid.PointerMoved += (s, e) => _lastPointerPos = e.GetPosition(AuditGrid);
 
@@ -176,11 +200,24 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
             _visibleOrderTypes.Add((int)orderType);
         }
 
-        _logReader = new LogReader(_context.Primary.AuditDirectoryPath.Path, "*.audit");
-        _logReader.LiveLines += OnLiveLines;
-        _logReader.Start();
+        // Primary carries the algo/server tap; the manual client's order traffic is tapped into its
+        // own <name>_GUI/Audit directory, so read both (they coincide when the workspace IS the _GUI client).
+        string primaryAuditDirectoryPath = _context.Primary.AuditDirectoryPath.Path;
+        string manualAuditDirectoryPath = Provider.Context.GetAuditDirectoryPath(_context.Manual.ClientName);
+        AddLogReader(primaryAuditDirectoryPath);
+        if (!string.Equals(manualAuditDirectoryPath, primaryAuditDirectoryPath, StringComparison.OrdinalIgnoreCase))
+            AddLogReader(manualAuditDirectoryPath);
 
         LoadHistoryAsync();
+    }
+
+    private void AddLogReader(string auditDirectoryPath)
+    {
+        LogReader logReader = new LogReader(auditDirectoryPath, "*.audit");
+        logReader.LiveLines += OnLiveLines;
+        logReader.Start();
+        _logReaders.Add(logReader);
+        _historyQueues.Add(new System.Collections.Generic.Queue<WidgetOrderAudit>());
     }
 
     private void OnScrollChanged(object? sender, ScrollEventArgs e)
@@ -215,24 +252,22 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
 
     private async void LoadHistoryAsync()
     {
-        if (_isLoadingHistory || _logReader == null) return;
+        if (_isLoadingHistory || _logReaders.Count == 0) return;
         _isLoadingHistory = true;
 
         await Task.Run(() =>
         {
-            List<string> lines = _logReader.LoadHistory(BatchSize);
+            List<WidgetOrderAudit> audits = MergeHistory(BatchSize);
 
-            if (lines.Count > 0)
+            if (audits.Count > 0)
             {
-                List<WidgetOrderAudit> audits = ParseLines(lines);
-
                 Dispatcher.UIThread.Post(() =>
                 {
                     // Add to master list
                     _allAudits.AddRange(audits);
 
                     // Add to visible list if type matches
-                    var filteredToAdd = audits.Where(a => _visibleOrderTypes.Contains(a.OrderType)).ToList();
+                    var filteredToAdd = audits.Where(IsRowVisible).ToList();
                     Rows.AddRange(filteredToAdd);
 
                     _isLoadingHistory = false;
@@ -245,6 +280,39 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
         });
     }
 
+    // K-way merge across the readers: emit the newest head first, refilling each queue from its
+    // reader as it empties, so paging stays newest-to-oldest across both directories.
+    private List<WidgetOrderAudit> MergeHistory(int count)
+    {
+        List<WidgetOrderAudit> merged = new List<WidgetOrderAudit>(count);
+
+        while (merged.Count < count)
+        {
+            System.Collections.Generic.Queue<WidgetOrderAudit>? newestQueue = null;
+
+            for (int readerIndex = 0; readerIndex < _logReaders.Count; readerIndex++)
+            {
+                System.Collections.Generic.Queue<WidgetOrderAudit> historyQueue = _historyQueues[readerIndex];
+
+                // Refill until we have a head or the reader is exhausted (a batch can parse to zero rows).
+                while (historyQueue.Count == 0)
+                {
+                    List<string> lines = _logReaders[readerIndex].LoadHistory(BatchSize);
+                    if (lines.Count == 0) break;
+                    foreach (WidgetOrderAudit audit in ParseLines(lines)) historyQueue.Enqueue(audit);
+                }
+
+                if (historyQueue.Count == 0) continue;
+                if (newestQueue == null || historyQueue.Peek().Timestamp.CompareTo(newestQueue.Peek().Timestamp) > 0) newestQueue = historyQueue;
+            }
+
+            if (newestQueue == null) break;
+            merged.Add(newestQueue.Dequeue());
+        }
+
+        return merged;
+    }
+
     private void OnLiveLines(List<string> lines)
     {
         List<WidgetOrderAudit> audits = ParseLines(lines);
@@ -254,7 +322,7 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
             _allAudits.InsertRange(0, audits);
 
             // Filter
-            var filteredToAdd = audits.Where(a => _visibleOrderTypes.Contains(a.OrderType)).ToList();
+            var filteredToAdd = audits.Where(IsRowVisible).ToList();
             Rows.InsertRange(0, filteredToAdd);
         });
     }
@@ -336,14 +404,16 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
         // Perform Hit Test
         var visual = AuditGrid.InputHitTest(_lastPointerPos) as Visual;
         bool isHeader = false;
+        string? clickedColumn = null;
 
         // Walk up logic
         var v = visual;
         while (v != null)
         {
-            if (v is DataGridColumnHeader)
+            if (v is DataGridColumnHeader columnHeader)
             {
                 isHeader = true;
+                clickedColumn = columnHeader.Content?.ToString();
                 break;
             }
             v = v.GetVisualParent() as Visual;
@@ -351,6 +421,10 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
 
         if (isHeader)
         {
+            // Filter section for the column that was right-clicked: a regex over its display text.
+            // All active filters AND together.
+            _columnRegexFilters.AddMenuItems(menu, clickedColumn);
+
             // --- HEADER: Column Toggles ---
             foreach (DataGridColumn col in AuditGrid.Columns)
             {
@@ -380,6 +454,25 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
                 item.Click += (_, _) => ToggleFilter(typeInt);
                 menu.Items.Add(item);
             }
+
+            // --- CONTENT: Source Filters ---
+            menu.Items.Add(new Separator());
+            var sourceHeader = new MenuItem { Header = "Filter Source", FontWeight = Avalonia.Media.FontWeight.Bold, IsEnabled = false };
+            menu.Items.Add(sourceHeader);
+            menu.Items.Add(new Separator());
+
+            foreach (string source in s_sources)
+            {
+                var item = new MenuItem
+                {
+                    Header = source,
+                    ToggleType = MenuItemToggleType.CheckBox,
+                    IsChecked = _visibleSources.Contains(source)
+                };
+
+                item.Click += (_, _) => ToggleSource(source);
+                menu.Items.Add(item);
+            }
         }
     }
 
@@ -391,6 +484,24 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
             _visibleOrderTypes.Add(orderType);
 
         ApplyFilter();
+    }
+
+    private void ToggleSource(string source)
+    {
+        if (_visibleSources.Contains(source))
+            _visibleSources.Remove(source);
+        else
+            _visibleSources.Add(source);
+
+        ApplyFilter();
+    }
+
+    // Row must pass the OrderType mask, the Source mask, and every active column regex (AND).
+    private bool IsRowVisible(WidgetOrderAudit audit)
+    {
+        if (!_visibleOrderTypes.Contains(audit.OrderType)) return false;
+        if (!_visibleSources.Contains(audit.Source)) return false;
+        return _columnRegexFilters.Matches(audit);
     }
 
     private void ApplyFilter()
@@ -406,7 +517,7 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
         Rows.Clear();
 
         // 3. Add matching rows
-        var matches = _allAudits.Where(a => _visibleOrderTypes.Contains(a.OrderType));
+        var matches = _allAudits.Where(IsRowVisible);
         Rows.AddRange(matches);
     }
 
@@ -414,6 +525,6 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
     public void LoadStateJson(string? json) { }
     public void Dispose()
     {
-        _logReader?.Dispose();
+        foreach (LogReader logReader in _logReaders) logReader.Dispose();
     }
 }

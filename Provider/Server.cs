@@ -343,6 +343,14 @@ public class Server : IDisposable
 
     public OrderState OnOrderState(ref OrderState orderState)
     {
+        ref OrderState existingOrderState = ref WriteOrderState(ref orderState);
+        WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
+        OrderState?.Invoke(in existingOrderState);
+        return existingOrderState;
+    }
+
+    private ref OrderState WriteOrderState(ref OrderState orderState)
+    {
         ref SharedArrayEntry<OrderState> orderStateEntry = ref _serverContext.GetOrderState(orderState.OrderHeader.OrderId);
         ref SharedArrayEntry<OrderTarget> orderTargetEntry = ref _serverContext.GetOrderTarget(orderState.OrderHeader.OrderId);
         ref OrderState existingOrderState = ref orderStateEntry.GetRef();
@@ -368,9 +376,7 @@ public class Server : IDisposable
             orderStateEntry.ReleaseLock();
             _riskLayer.OnOrderState(in existingOrderState, beforeAckedOrderQuantity);
         }
-        WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
-        OrderState?.Invoke(in existingOrderState);
-        return existingOrderState;
+        return ref existingOrderState;
     }
 
     private const ulong _orderNotFound = 1UL << (int)OrderRejectedReason.OrderNotFound;
@@ -396,7 +402,7 @@ public class Server : IDisposable
     public void Reject(in OrderRejected orderRejected, string message)
     {
         WriteToExecution(in orderRejected.OrderHeader, in orderRejected);
-        if (!orderRejected.OrderRejectedReasons.IsEmpty && orderRejected.OrderRejectedReasons.IsSubsetOf(Execution.OrderRejected.OrderDiscarded))
+        if (Client.IsDiscarded(in orderRejected))
             return;
         OnControlAlgoStatus(orderRejected.OrderHeader.OrderId.StrategyId, orderRejected.OrderHeader.OrderId.InstrumentId, AlgoStatus.Paused);
         OrderRejected?.Invoke(orderRejected, message);
@@ -498,11 +504,11 @@ public class Server : IDisposable
         AllocateInstrument?.Invoke(allocateInstrument);
     }
 
-    public Fill OnFill(ref Fill fill)
+    public Fill OnFill(ref OrderState orderState, ref Fill fill)
     {
-        ref readonly OrderState orderState = ref _serverContext.GetOrderState(fill.OrderHeader.OrderId).GetReadonlyRef();
+        ref readonly OrderState existingOrderState = ref _serverContext.GetOrderState(fill.OrderHeader.OrderId).GetReadonlyRef();
 
-        if (orderState.OrderHeader.OrderId != fill.OrderHeader.OrderId)
+        if (existingOrderState.OrderHeader.OrderId != fill.OrderHeader.OrderId)
             throw new ArgumentOutOfRangeException(nameof(fill), "Server.OnFill: unknown clientOrderId");
 
         // Identity (ClientId/StrategyId/InstrumentId) is packed inside ClientOrderId, and the equality
@@ -520,24 +526,33 @@ public class Server : IDisposable
         // Global Update
         ref SharedArrayEntry<PositionHeader> serverPositionHeaderEntry = ref _serverContext.GetPositionHeader(instrumentId);
         ref PositionHeader serverPosition = ref serverPositionHeaderEntry.GetRef();
-        serverPositionHeaderEntry.AcquireLock();
-        serverPosition.OnFill(in fill, tickSize, multiplier);
-        serverPositionHeaderEntry.ReleaseLock();
 
-        // Local Update
         ref SharedArrayEntry<PositionHeader> localPositionHeaderEntry = ref _serverContext.GetPositionHeader(strategyId, instrumentId);
         ref PositionHeader localPosition = ref localPositionHeaderEntry.GetRef();
-        localPositionHeaderEntry.AcquireLock();
-        localPosition.OnFill(in fill, tickSize, multiplier);
-        localPositionHeaderEntry.ReleaseLock();
 
+        // Fill is now atomic - no torn orderstate, position reads by client. WriteOrderState, not
+        // OnOrderState: row write + ledger only — the forward and callback run after release below.
+        serverPositionHeaderEntry.AcquireLock();
+        localPositionHeaderEntry.AcquireLock();
+
+        WriteOrderState(ref orderState);
+        serverPosition.OnFill(in fill, tickSize, multiplier);
+        localPosition.OnFill(in fill, tickSize, multiplier);
         _riskLayer.OnFill(in fill);
 
+        localPositionHeaderEntry.ReleaseLock();
+        serverPositionHeaderEntry.ReleaseLock();
+
+
+
         int coreGroupId = instrument.Header.CoreGroupId;
+        WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
         WriteToExecution(strategyId, coreGroupId, in fill);
         WriteToExecution(strategyId, coreGroupId, in localPosition);
+
         WriteToAudit(coreGroupId, in fill);
         WriteToAudit(coreGroupId, in serverPosition);
+        OrderState?.Invoke(in existingOrderState);
         Fill?.Invoke(in fill);
         return fill;
     }

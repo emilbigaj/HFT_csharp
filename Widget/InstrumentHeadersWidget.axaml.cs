@@ -111,13 +111,13 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
     public string MaturityDate { get; private set; } = "";
     public string MaturityType { get; private set; } = "";
 
-    public string LongMaturityDate { get; private set; } = "";
-    public string LongMaturityType { get; private set; } = "";
-    public string ShortMaturityDate { get; private set; } = "";
-    public string ShortMaturityType { get; private set; } = "";
-
-    public int? LongInstrumentId { get; private set; }
-    public int? ShortInstrumentId { get; private set; }
+    // One display string per leg slot ("+ES Dec2025"); blank when the row has fewer legs.
+    public string Leg0 { get; private set; } = "";
+    public string Leg1 { get; private set; } = "";
+    public string Leg2 { get; private set; } = "";
+    public string Leg3 { get; private set; } = "";
+    public string Leg4 { get; private set; } = "";
+    public string Leg5 { get; private set; } = "";
 
     public string BaseCurrency { get; private set; } = "";
     public string QuoteCurrency { get; private set; } = "";
@@ -155,9 +155,7 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
 
         Multiplier = 1.0;
         MaturityDate = ""; MaturityType = "";
-        LongMaturityDate = ""; LongMaturityType = "";
-        ShortMaturityDate = ""; ShortMaturityType = "";
-        LongInstrumentId = null; ShortInstrumentId = null;
+        Leg0 = ""; Leg1 = ""; Leg2 = ""; Leg3 = ""; Leg4 = ""; Leg5 = "";
         BaseCurrency = ""; QuoteCurrency = "";
 
         if (instrumentType == Data.InstrumentType.Future)
@@ -169,14 +167,15 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
         }
         else if (instrumentType == Data.InstrumentType.Spread)
         {
-            ref readonly SpreadHeader spread = ref _header128.AsSpread();
-            Multiplier = spread.Multiplier;
-            LongMaturityType = spread.LongMaturityType.ToString();
-            ShortMaturityType = spread.ShortMaturityType.ToString();
-            LongMaturityDate = spread.LongMaturityDate.NanosSinceEpoch > 0 ? spread.LongMaturityDate.ToDateString() : "";
-            ShortMaturityDate = spread.ShortMaturityDate.NanosSinceEpoch > 0 ? spread.ShortMaturityDate.ToDateString() : "";
-            LongInstrumentId = spread.LongInstrumentId == -1 ? null : spread.LongInstrumentId;
-            ShortInstrumentId = spread.ShortInstrumentId == -1 ? null : spread.ShortInstrumentId;
+            ref LeggedHeader leggedHeader = ref _header128.AsLegged();
+            Multiplier = leggedHeader.Multiplier;
+            string[] legTexts = new string[] { "", "", "", "", "", "" };
+            int legIndex = 0;
+            foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
+            {
+                legTexts[legIndex++] = LeggedSymbology.GetSignedWeight(legHeader.Weight) + SymbolCache.Get(legHeader.InstrumentHeaderId).ShortSymbol;
+            }
+            Leg0 = legTexts[0]; Leg1 = legTexts[1]; Leg2 = legTexts[2]; Leg3 = legTexts[3]; Leg4 = legTexts[4]; Leg5 = legTexts[5];
         }
         else if (instrumentType == Data.InstrumentType.Forex)
         {
@@ -228,17 +227,9 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
     private readonly List<WidgetInstrumentHeader> _allHeaders = new();
     private readonly Dictionary<int, WidgetInstrumentHeader> _headersById = new();
 
-    // One regex filter per column, keyed by the column's base name; rows must pass every active
+    // Regex filtering (shared machinery in ColumnRegexFilters): rows must pass every active column
     // filter (AND). Enum columns filter on their display text like any other — "Future|Spread".
-    private sealed class ColumnFilter
-    {
-        public string? Pattern;
-        public Regex? Regex;
-        public bool IsEmpty => Regex == null;
-    }
-
-    private readonly Dictionary<string, ColumnFilter> _columnFilters = new();
-    private readonly Dictionary<DataGridColumn, string> _columnBaseNames = new();
+    private readonly ColumnRegexFilters<WidgetInstrumentHeader> _columnRegexFilters;
 
     // Filterable text per column — cached row fields only, no symbology or formatting work.
     private static readonly Dictionary<string, Func<WidgetInstrumentHeader, string>> s_columnText = new()
@@ -258,12 +249,12 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         ["Multiplier"] = r => r.Multiplier.ToString(),
         ["MaturityDate"] = r => r.MaturityDate,
         ["MaturityType"] = r => r.MaturityType,
-        ["LongMaturityDate"] = r => r.LongMaturityDate,
-        ["LongMaturityType"] = r => r.LongMaturityType,
-        ["ShortMaturityDate"] = r => r.ShortMaturityDate,
-        ["ShortMaturityType"] = r => r.ShortMaturityType,
-        ["LongInstrumentId"] = r => r.LongInstrumentId?.ToString() ?? "",
-        ["ShortInstrumentId"] = r => r.ShortInstrumentId?.ToString() ?? "",
+        ["Leg0"] = r => r.Leg0,
+        ["Leg1"] = r => r.Leg1,
+        ["Leg2"] = r => r.Leg2,
+        ["Leg3"] = r => r.Leg3,
+        ["Leg4"] = r => r.Leg4,
+        ["Leg5"] = r => r.Leg5,
         ["BaseCurrency"] = r => r.BaseCurrency,
         ["QuoteCurrency"] = r => r.QuoteCurrency,
     };
@@ -276,6 +267,7 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         _refreshTimer = null!;
         InitializeComponent();
         DataContext = this;
+        _columnRegexFilters = new ColumnRegexFilters<WidgetInstrumentHeader>(HeadersGrid, s_columnText, () => _view?.Refresh());
         Title = "Instrument Headers (Design)";
     }
 
@@ -292,10 +284,7 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         };
         HeadersGrid.ItemsSource = _view;
 
-        // Header text gets decorated with the active filter ("ShortSymbol (^es)"), so the stable
-        // identity of each column is captured once here — persistence and the filter map key on it.
-        foreach (DataGridColumn col in HeadersGrid.Columns)
-            _columnBaseNames[col] = col.Header?.ToString() ?? "";
+        _columnRegexFilters = new ColumnRegexFilters<WidgetInstrumentHeader>(HeadersGrid, s_columnText, () => _view?.Refresh());
 
         HeadersGrid.PointerMoved += (s, e) => _lastPointerPos = e.GetPosition(HeadersGrid);
 
@@ -419,32 +408,7 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         {
             // Filter section for the column that was right-clicked: a regex over its display text,
             // enum columns included ("Future|Spread"). All active filters AND together.
-            clickedColumn = ResolveBaseName(clickedColumn);
-            if (clickedColumn != null && s_columnText.ContainsKey(clickedColumn))
-            {
-                string column = clickedColumn;
-                _columnFilters.TryGetValue(column, out ColumnFilter? active);
-                var regexItem = new MenuItem
-                {
-                    Header = active?.Pattern is { Length: > 0 } pattern ? $"Filter {column}: /{pattern}/ …" : $"Filter {column} (regex)…"
-                };
-                regexItem.Click += async (_, _) => await PromptForRegexFilter(column);
-                menu.Items.Add(regexItem);
-
-                if (_columnFilters.ContainsKey(column))
-                {
-                    var clearItem = new MenuItem { Header = $"Clear {column} filter" };
-                    clearItem.Click += (_, _) => ClearColumnFilter(column);
-                    menu.Items.Add(clearItem);
-                }
-                if (_columnFilters.Count > 0)
-                {
-                    var clearAllItem = new MenuItem { Header = "Clear all filters" };
-                    clearAllItem.Click += (_, _) => ClearAllFilters();
-                    menu.Items.Add(clearAllItem);
-                }
-                menu.Items.Add(new Separator());
-            }
+            _columnRegexFilters.AddMenuItems(menu, clickedColumn);
 
             foreach (DataGridColumn col in HeadersGrid.Columns)
             {
@@ -475,167 +439,7 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
 
     private bool FilterRow(object item)
     {
-        if (item is not WidgetInstrumentHeader row)
-            return false;
-
-        foreach (KeyValuePair<string, ColumnFilter> pair in _columnFilters)
-        {
-            if (!s_columnText.TryGetValue(pair.Key, out Func<WidgetInstrumentHeader, string>? text))
-                continue;
-            if (pair.Value.Regex != null && !pair.Value.Regex.IsMatch(text(row)))
-                return false;
-        }
-        return true;
-    }
-
-    private void ApplyFilter()
-    {
-        _view?.Refresh();
-        UpdateColumnHeaders();
-    }
-
-    private string GetBaseName(DataGridColumn col) =>
-        _columnBaseNames.TryGetValue(col, out string? name) ? name : col.Header?.ToString() ?? "";
-
-    // Headers show their active filter: "ShortSymbol (^es)", "InstrumentType (Future|Spread)".
-    // Display-only — every lookup keys on the base name captured at construction.
-    private void UpdateColumnHeaders()
-    {
-        if (HeadersGrid == null)
-            return;
-        foreach (DataGridColumn col in HeadersGrid.Columns)
-        {
-            string baseName = GetBaseName(col);
-            string decorated = baseName;
-            if (_columnFilters.TryGetValue(baseName, out ColumnFilter? filter))
-            {
-                if (filter.Pattern is { Length: > 0 })
-                    decorated = $"{baseName} ({filter.Pattern})";
-            }
-            if (!string.Equals(col.Header?.ToString(), decorated, StringComparison.Ordinal))
-                col.Header = decorated;
-        }
-    }
-
-    // A right-clicked header carries the decorated text; resolve it back to the column's identity.
-    private string? ResolveBaseName(string? headerText)
-    {
-        if (headerText == null || s_columnText.ContainsKey(headerText))
-            return headerText;
-        int suffix = headerText.IndexOf(" (", StringComparison.Ordinal);
-        if (suffix > 0 && s_columnText.ContainsKey(headerText[..suffix]))
-            return headerText[..suffix];
-        return headerText;
-    }
-
-    private ColumnFilter GetOrAddFilter(string column)
-    {
-        if (!_columnFilters.TryGetValue(column, out ColumnFilter? filter))
-        {
-            filter = new ColumnFilter();
-            _columnFilters[column] = filter;
-        }
-        return filter;
-    }
-
-    private void PruneFilter(string column)
-    {
-        if (_columnFilters.TryGetValue(column, out ColumnFilter? filter) && filter.IsEmpty)
-            _columnFilters.Remove(column);
-    }
-
-    private void SetRegexFilter(string column, string pattern, Regex regex)
-    {
-        ColumnFilter filter = GetOrAddFilter(column);
-        filter.Pattern = pattern;
-        filter.Regex = regex;
-        ApplyFilter();
-    }
-
-    private void ClearRegexFilter(string column)
-    {
-        if (_columnFilters.TryGetValue(column, out ColumnFilter? filter))
-        {
-            filter.Pattern = null;
-            filter.Regex = null;
-            PruneFilter(column);
-        }
-        ApplyFilter();
-    }
-
-    private void ClearColumnFilter(string column)
-    {
-        _columnFilters.Remove(column);
-        ApplyFilter();
-    }
-
-    private void ClearAllFilters()
-    {
-        _columnFilters.Clear();
-        ApplyFilter();
-    }
-
-    // Code-built prompt: regex applies on commit only; an invalid pattern shows its parse error and
-    // keeps the previous filter untouched.
-    private async System.Threading.Tasks.Task PromptForRegexFilter(string column)
-    {
-        if (TopLevel.GetTopLevel(this) is not Window owner)
-            return;
-
-        _columnFilters.TryGetValue(column, out ColumnFilter? existing);
-
-        TextBox input = new TextBox { Text = existing?.Pattern ?? "", PlaceholderText = "regex, e.g. ^SR1|ES  (case-insensitive)" };
-        TextBlock error = new TextBlock { Foreground = Brushes.Red, IsVisible = false, TextWrapping = TextWrapping.Wrap };
-        Button apply = new Button { Content = "Apply", IsDefault = true };
-        Button clear = new Button { Content = "Clear", IsEnabled = existing?.Regex != null };
-        Button cancel = new Button { Content = "Cancel", IsCancel = true };
-
-        Window dialog = new Window
-        {
-            Title = $"Filter {column}",
-            Width = 420,
-            SizeToContent = SizeToContent.Height,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            CanResize = false,
-            Content = new StackPanel
-            {
-                Margin = new Thickness(12),
-                Spacing = 8,
-                Children =
-                {
-                    input,
-                    error,
-                    new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { apply, clear, cancel } }
-                }
-            }
-        };
-
-        apply.Click += (_, _) =>
-        {
-            string pattern = input.Text ?? "";
-            if (pattern.Length == 0)
-            {
-                ClearRegexFilter(column);
-                dialog.Close();
-                return;
-            }
-            try
-            {
-                Regex regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-                SetRegexFilter(column, pattern, regex);
-                dialog.Close();
-            }
-            catch (ArgumentException ex)
-            {
-                error.Text = ex.Message;
-                error.IsVisible = true;
-            }
-        };
-        clear.Click += (_, _) => { ClearRegexFilter(column); dialog.Close(); };
-        cancel.Click += (_, _) => dialog.Close();
-        dialog.Opened += (_, _) => input.Focus();
-
-        await dialog.ShowDialog(owner);
+        return item is WidgetInstrumentHeader row && _columnRegexFilters.Matches(row);
     }
 
     public string? SaveStateJson()
@@ -645,15 +449,17 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         {
             state.Columns.Add(new InstrumentHeadersColumnState
             {
-                Header = col.Header?.ToString() ?? "",
+                // Base name, not the decorated header — a filter active at save time must not
+                // change the column's saved identity.
+                Header = _columnRegexFilters.GetBaseName(col),
                 Width = col.Width.Value,
                 DisplayIndex = col.DisplayIndex,
                 IsVisible = col.IsVisible
             });
         }
-        foreach (KeyValuePair<string, ColumnFilter> pair in _columnFilters)
+        foreach ((string column, string pattern) in _columnRegexFilters.GetActivePatterns())
         {
-            state.Filters.Add(new InstrumentHeadersFilterState { Column = pair.Key, Pattern = pair.Value.Pattern });
+            state.Filters.Add(new InstrumentHeadersFilterState { Column = column, Pattern = pattern });
         }
         return Json.Serialize(state);
     }
@@ -668,7 +474,7 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
 
             foreach (var colState in state.Columns)
             {
-                var col = HeadersGrid.Columns.FirstOrDefault(c => (c.Header?.ToString() ?? "") == colState.Header);
+                var col = HeadersGrid.Columns.FirstOrDefault(c => _columnRegexFilters.GetBaseName(c) == colState.Header);
                 if (col != null)
                 {
                     col.Width = new DataGridLength(colState.Width);
@@ -677,19 +483,18 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
                 }
             }
 
-            _columnFilters.Clear();
+            _columnRegexFilters.ClearAllFilters();
             foreach (InstrumentHeadersFilterState filterState in state.Filters ?? new())
             {
-                if (string.IsNullOrEmpty(filterState.Pattern) || !s_columnText.ContainsKey(filterState.Column))
+                if (string.IsNullOrEmpty(filterState.Pattern) || !_columnRegexFilters.IsFilterable(filterState.Column))
                     continue;
                 try
                 {
-                    SetRegexFilter(filterState.Column, filterState.Pattern,
+                    _columnRegexFilters.SetRegexFilter(filterState.Column, filterState.Pattern,
                         new Regex(filterState.Pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
                 }
                 catch (ArgumentException) { }
             }
-            ApplyFilter();
         }
         catch { }
     }

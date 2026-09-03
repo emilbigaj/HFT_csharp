@@ -15,6 +15,8 @@ public class TestingScenario : Scenario
 {
     public override FileSystemPath ServerName { get; }
     public override FileSystemPath ClientName { get; }
+    public override FileSystemPath DefaultTickHistoryDirectoryPath { get; } = $"Z:\\TickHistory\\Deleted";
+    public override FileSystemPath DefaultInstrumentDetailsDirectoryPath { get; } = $"Z:\\InstrumentDetails\\Deleted";
 
     public TestingScenario(string name) : base(name)
     {
@@ -47,12 +49,12 @@ public class TestingScenario : Scenario
         }
         else
         {
-            CoreGroupName = CoreGroupId.Equity;
+            CoreGroupName = CoreGroupId.SandP500;
             ServerName = ServerContext.GetDirectoryPath("ServerSimulation");
             ClientName = ClientContext.GetDirectoryPath($"{CoreGroupName}");
         }
-        SimulationBegin = new Timestamp(2026, 7, 1);
-        SimulationEnd = new Timestamp(2026, 7, 21, 0, 0, 0);
+        SimulationBegin = new Timestamp(2024, 9, 1);
+        SimulationEnd = new Timestamp(2026, 8, 21, 0, 0, 0);
     }
 
     public override void BuildStrategies()
@@ -78,14 +80,12 @@ public class TestingScenario : Scenario
         int[] months = new int[] { 3, 6, 9, 12 };
         if (CoreGroupName == CoreGroupId.SandP500)
         {
-
-            Future quote = GetFuture("XCME", "MES", Clock.Now, months);
-            Future hedge = GetFuture("XCME", "ES", Clock.Now, months);
-            Future friend = GetFuture("XCBT", "YM", Clock.Now, months);
-
-            strategy.OnFuture(quote, hedge);
-            strategy.OnFuture(hedge, hedge);
-
+            FutureChain quoteChain = GetFutureChain("XCME", "MES", Clock.Now, months);
+            foreach(Future quote in quoteChain.Futures)
+            {
+                Future hedge = GetFuture("XCME", "ES", quote.MaturityDate.Date, months);
+                strategy.OnFuture(quote, hedge);
+            }
         }
         else if (CoreGroupName == CoreGroupId.Equity)
         {
@@ -173,23 +173,6 @@ public class TestingScenario : Scenario
         server.OverrideNicTimestamp = false;
         server.FromExchangeToNicLatency = 250;
         server.FromNicToClientLatency = 0;
-        server.ExchangeSimulator.DataSimulator.Searches.Add(new TickHistorySearch()
-        {
-            DirectoryPath = "Z:\\TickHistory\\Databento",
-        });
-
-        InstrumentDetailsSearch search = new InstrumentDetailsSearch
-        {
-            DirectoryPath = "Z:\\InstrumentDetails\\Databento",
-        };
-
-        using ArrayList<InstrumentDetails> found = InstrumentDetailsSearch.Search(search);
-        foreach (InstrumentDetails details in found)
-        {
-            details.Sessions = new Session[] { Session.CME };
-            server.OnInstrumentDetails(details);
-        }
-
 
         server.Connect();
 

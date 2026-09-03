@@ -28,11 +28,10 @@ public struct MessageEfficiency(String4 productGroup)
 {
     public bool Reset(DateTime dateTime)
     {
-        DateTime tradeDate = dateTime.Date.AddDays(1);
-        TimeSpan tradeTime = dateTime - tradeDate;
-        if (tradeDate > TradeDate && tradeTime >= TradeTime)
+        DateTime tradeDateTime = TradeDate.Add(TradeTime);
+        if (dateTime >= tradeDateTime)
         {
-            TradeDate = tradeDate;
+            TradeDate = dateTime.Date.AddDays(1);
             RawMessages = 0;
             WeightedMessages = 0;
             QuantityTraded = 0;

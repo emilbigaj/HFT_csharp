@@ -14,6 +14,20 @@ namespace Testing;
 
 public class TestingStrategy : Strategy.Strategy
 {
+    Dictionary<string, List<Position>> _positionsByRoot = new Dictionary<string, List<Position>>();
+    Dictionary<string, Series<Point>> _profitByRoot = new Dictionary<string, Series<Point>>();
+
+    private void OnPosition(Position position)
+    {
+        _positions.Add(position);
+        if (!_positionsByRoot.TryGetValue(position.Instrument.Root, out List<Position>? instrumentIds))
+        {
+            _profitByRoot[position.Instrument.Root] = NewSeries<Point>("Profit By Root");
+            instrumentIds = new List<Position>();
+            _positionsByRoot[position.Instrument.Root] = instrumentIds;
+        }
+        instrumentIds.Add(position);
+    }
     public TestingStrategy(Scenario scenario) : base(scenario)
     {
         _latency = NewSeries<Point>("Latency");
@@ -38,6 +52,7 @@ public class TestingStrategy : Strategy.Strategy
     private readonly Series<Point> _latency;
     private readonly Series<Point> _profit;
 
+
     private List<Position> _positions = new List<Position>();
 
     public void OnFuture(Future future, Future lead, Future? friend = null)
@@ -47,7 +62,8 @@ public class TestingStrategy : Strategy.Strategy
         if (future == null || lead == null || friend == null)
             return;
         Position position = GetPosition(future);
-        _positions.Add(position);
+
+        OnPosition(position);
 
         TestingAlgo executionAlgo = new TestingAlgo(position, Client, lead, friend);
 
@@ -77,7 +93,7 @@ public class TestingStrategy : Strategy.Strategy
             Console.WriteLine(settlement);
         };
 
-        position.PositionHeader += (in PositionHeader header) =>
+        position.PositionChanged += (in PositionHeader header) =>
         {
             using Latency latency = new Latency((int)CallId.InstrumentOnMarketByPrice);
             executionAlgo.Execute();
@@ -89,7 +105,7 @@ public class TestingStrategy : Strategy.Strategy
             executionAlgo.Execute();
         };
 
-        Series<Point> total = NewSeries(position.Instrument.Symbology.Root + " Profit", ref TickTock!, ()=> position.Profit.Total);
+        Series<Point> total = NewSeries(position.Instrument.Symbology + " Profit", ref TickTock!, ()=> position.Profit.Total);
 
         TickTock += timestamp =>
         {
@@ -103,6 +119,20 @@ public class TestingStrategy : Strategy.Strategy
             }
             if (_valid)
                 _profit.Append(new Point(timestamp, totalProfit));
+
+            foreach (KeyValuePair<string, List<Position>> kvp in _positionsByRoot)
+            {
+                bool valid = false;
+                double rootProfit = 0;
+                foreach (Position position in kvp.Value)
+                {
+                    bool positionValid = double.IsFinite(position.Profit.Total);
+                    rootProfit += positionValid ? position.Profit.Total : 0;
+                    valid |= positionValid;
+                }
+                if (valid)
+                    _profitByRoot[kvp.Key].Append(new Point(timestamp, rootProfit));
+            }
 
         };
         

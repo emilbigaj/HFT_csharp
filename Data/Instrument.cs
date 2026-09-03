@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -79,7 +81,7 @@ public struct InstrumentHeader128
                 case InstrumentType.Forex:
                     return AsForex().Symbology;
                 case InstrumentType.Spread:
-                    return AsSpread().Symbology;
+                    return AsLegged().Symbology;
                 default:
                     throw new NotSupportedException($"Instrument type '{header.InstrumentType}' is not supported.");
             }
@@ -105,12 +107,12 @@ public struct InstrumentHeader128
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref SpreadHeader AsSpread()
+    public ref LeggedHeader AsLegged()
     {
         ref InstrumentHeader instrumentHeader = ref AsInstrumentHeader();
         if (instrumentHeader.InstrumentType != InstrumentType.Spread)
             throw new NotSupportedException();
-        return ref Unsafe.As<InstrumentHeader128, SpreadHeader>(ref Unsafe.AsRef(in this));
+        return ref Unsafe.As<InstrumentHeader128, LeggedHeader>(ref Unsafe.AsRef(in this));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -150,26 +152,58 @@ public struct FutureHeader
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
-public struct SpreadHeader
+public struct LegHeader
 {
+    public int InstrumentHeaderId;
+    public int Weight;
+}
+
+
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[RegisterJson]
+public struct LeggedHeader
+{
+    // 128-byte overlay budget: InstrumentHeader 64 + Multiplier 8 + LegCount 4 + 6*8 legs = 124.
     public InstrumentHeader InstrumentHeader;
     public double Multiplier;
-    public Timestamp LongMaturityDate;
-    public Timestamp ShortMaturityDate;
-    public int LongInstrumentId;
-    public int ShortInstrumentId;
-    public MaturityType LongMaturityType;
-    public MaturityType ShortMaturityType;
+    public int LegCount;
+    private unsafe fixed byte _reserved[4];
+    public LegHeader Leg0;
+    public LegHeader Leg1;
+    public LegHeader Leg2;
+    public LegHeader Leg3;
+    public LegHeader Leg4;
+    public LegHeader Leg5;
 
+    static LeggedHeader()
+    {
+        if (Unsafe.SizeOf<LeggedHeader>() > Unsafe.SizeOf<InstrumentHeader128>())
+            throw new InvalidOperationException($"LeggedHeader ({Unsafe.SizeOf<LeggedHeader>()} bytes) must fit within InstrumentHeader128.");
+    }
 
-    public SpreadSymbology Symbology =>
-        new SpreadSymbology(
-            InstrumentHeader.Exchange.ToString(),
-            InstrumentHeader.Root.ToString(),
-            LongMaturityType,
-            LongMaturityDate,
-            ShortMaturityType,
-            ShortMaturityDate);
+    // Live legs, maturity-ascending — same invariant as the ticker. Clamped: LegCount comes from
+    // shared memory, and CreateSpan does no validation.
+    [UnscopedRef]
+    public Span<LegHeader> Legs => MemoryMarshal.CreateSpan(ref Leg0, Math.Clamp(LegCount, 0, 6));
+
+    // Legs reference sibling headers by id; the context hooks this, like InstrumentDetails.GetLeg.
+    public static Func<int, InstrumentHeader128>? GetLegHeader;
+
+    public SpreadSymbology Symbology
+    {
+        get
+        {
+            List<Symbology> symbologies = new List<Symbology>(LegCount);
+            List<int> weights = new List<int>(LegCount);
+            foreach (ref readonly LegHeader legHeader in Legs)
+            {
+                symbologies.Add(GetLegHeader!(legHeader.InstrumentHeaderId).Symbology);
+                weights.Add(legHeader.Weight);
+            }
+            return new SpreadSymbology(InstrumentHeader.Exchange.ToString(), InstrumentHeader.Root.ToString(), symbologies, weights);
+        }
+    }
 }
 
 public delegate void MarketByPriceDeltaEvent(in MarketByPrice delta, ReadOnlySpan<byte> bytes);
@@ -371,6 +405,27 @@ public class Future : Instrument
     }
 }
 
+public class FutureChain
+{
+    public Future Active {get; private set;}
+    public List<Future> Futures { get; } = new List<Future>();
+    public int Count => Futures.Count;
+
+    public event Action<Future>? Rolled;
+
+    public FutureChain(List<Future> futures)
+    {
+        Futures.AddRange(futures);
+        Active = Futures[0];
+    }
+
+    public void Roll()
+    {
+        Active = Futures[1];
+        Rolled?.Invoke(Active);
+    }
+}
+
 // === FOREX ===
 public sealed class Forex : Instrument
 {
@@ -398,10 +453,10 @@ public sealed class Spread : Future
     public Future Long { get; }
     public Future Short { get; }
 
-    public ref readonly SpreadHeader SpreadHeader => ref _headerEntry.GetReadonlyRef().AsSpread();
+    public ref readonly LeggedHeader SpreadHeader => ref _headerEntry.GetReadonlyRef().AsLegged();
 
 
-    public Spread(SharedArrayEntry<SpreadHeader> headerEntry, SharedArrayEntry<MarketByPrice64> mbpEntry, Future @long, Future @short)
+    public Spread(SharedArrayEntry<LeggedHeader> headerEntry, SharedArrayEntry<MarketByPrice64> mbpEntry, Future @long, Future @short)
         : base(headerEntry.Cast<FutureHeader>(), mbpEntry)
     {
         Long = @long;

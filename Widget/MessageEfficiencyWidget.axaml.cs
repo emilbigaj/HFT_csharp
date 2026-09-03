@@ -35,14 +35,14 @@ public sealed class WidgetMessageEfficiency : INotifyPropertyChanged
     public string QuantityTraded => _messageEfficiency.QuantityTraded.ToString("N0");
     public string Efficiency => _messageEfficiency.Efficiency.ToString("N2");
 
-    public string Tier0 => _messageEfficiency.Tier0.DailyRawMessages.ToString();
-    public string Tier0Benchmark => _messageEfficiency.Tier0.Benchmark.ToString();
-    public string Tier1 => _messageEfficiency.Tier1.DailyRawMessages.ToString();
-    public string Tier1Benchmark => _messageEfficiency.Tier1.Benchmark.ToString();
-    public string Tier2 => _messageEfficiency.Tier2.DailyRawMessages.ToString();
-    public string Tier2Benchmark => _messageEfficiency.Tier2.Benchmark.ToString();
-    public string Tier3 => _messageEfficiency.Tier3.DailyRawMessages.ToString();
-    public string Tier3Benchmark => _messageEfficiency.Tier3.Benchmark.ToString();
+    public string Tier0 => _messageEfficiency.Tier0.DailyRawMessages.ToString("N0");
+    public string Tier0Benchmark => _messageEfficiency.Tier0.Benchmark.ToString("N0");
+    public string Tier1 => _messageEfficiency.Tier1.DailyRawMessages.ToString("N0");
+    public string Tier1Benchmark => _messageEfficiency.Tier1.Benchmark.ToString("N0");
+    public string Tier2 => _messageEfficiency.Tier2.DailyRawMessages.ToString("N0");
+    public string Tier2Benchmark => _messageEfficiency.Tier2.Benchmark.ToString("N0");
+    public string Tier3 => _messageEfficiency.Tier3.DailyRawMessages.ToString("N0");
+    public string Tier3Benchmark => _messageEfficiency.Tier3.Benchmark.ToString("N0");
 
     public string TradeDate => _messageEfficiency.TradeDate.ToString("yyyy-MM-dd");
 

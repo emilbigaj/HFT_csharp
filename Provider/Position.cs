@@ -74,14 +74,14 @@ public struct Profit(Timestamp timestamp, double total, double floating, double 
 
 public sealed class Position
 {
-    public AlgoStatus AlgoStatus => Header.AlgoStatus;
+    public AlgoStatus AlgoStatus => _headerEntry.GetReadonlyRef().AlgoStatus;
 
     // Context reference removed.
     public Instrument Instrument { get; }
 
     // Direct access to the specific header entry for this position
     private readonly SharedArrayEntry<PositionHeader> _headerEntry;
-    public ref readonly PositionHeader Header => ref _headerEntry.GetReadonlyRef();
+    public ref readonly SharedArrayEntry<PositionHeader> PositionHeader => ref _headerEntry;
 
 
     public Profit Profit
@@ -109,10 +109,10 @@ public sealed class Position
         }
     }
 
-    public event PositionHeaderHandler? PositionHeader;
+    public event PositionHeaderHandler? PositionChanged;
     public void OnPositionHeader(in PositionHeader positionHeader)
     {
-        PositionHeader?.Invoke(in positionHeader);
+        PositionChanged?.Invoke(in positionHeader);
     }
 
     public event RefAction<Fill>? Fill;
@@ -307,14 +307,12 @@ public sealed class Position
                     // might be false if New not set yet by server, OrderTargetAction.Create must be inflight
                     bool sameOrder = state.OrderHeader.OrderId == target.OrderHeader.OrderId;
 
-                    // fills already reported by the exchange overtook the inflight target's total quantity,
-                    // so the exchange is guaranteed to reject it (QuantityNotValid) — same check as the server side
-                    targetRejected |= sameOrder && target.OrderProfile.Sign * (target.OrderProfile.Quantity - state.QuantityFilled) < 0;
+                    bool targetIsCancel = !targetRejected && (target.OrderTargetAction == OrderTargetAction.Cancel || target.OrderProfile.Sign * (target.OrderProfile.Quantity - state.QuantityFilled) <= 0);
 
                     bool stateIsTruth = targetRejected || (sameOrder && state.OrderHeader.Seq >= target.OrderHeader.Seq);
 
                     // if its the same order and state says done (if its not the same order that suggest create still inflight)
-                    bool isOrderDone = sameOrder && state.OrderStateStatus == OrderStateStatus.Done;
+                    bool isOrderDone = sameOrder && (state.OrderStateStatus == OrderStateStatus.Done || targetIsCancel);
 
                     if (isOrderDone)
                     {

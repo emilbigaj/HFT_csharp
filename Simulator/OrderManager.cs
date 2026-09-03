@@ -6,7 +6,7 @@ using System;
 
 namespace Simulator;
 
-public struct SimOrder(ulong orderId, int quantity) : IEquatable<SimOrder>
+public struct SimOrder(ulong orderId, ulong priorityId, int quantity) : IEquatable<SimOrder>
 {
     public bool IsUserOrder
     {
@@ -16,10 +16,20 @@ public struct SimOrder(ulong orderId, int quantity) : IEquatable<SimOrder>
         }
     }
     public ulong OrderId = orderId;
+    public ulong PriorityId = priorityId;
+
     public int Quantity { get; private set; } = quantity;
 
     public void AmendTo(int quantity)
     {
+        Quantity = quantity;
+        if (Quantity < 0)
+            throw new ArgumentOutOfRangeException();
+    }
+
+        public void AmendTo(ulong priorityId, int quantity)
+    {
+        PriorityId = priorityId;
         Quantity = quantity;
         if (Quantity < 0)
             throw new ArgumentOutOfRangeException();
@@ -39,6 +49,7 @@ public struct SimOrder(ulong orderId, int quantity) : IEquatable<SimOrder>
 
 public class QueueManager
 {
+
     // this is the current total quantity of user orders
     public bool IsMarkedForRemoval { get; set; } = false;
     public int UserQuantity { get; private set; }
@@ -57,6 +68,7 @@ public class QueueManager
     //
     public int _traded = 0;
     private OrderManager _orderManager;
+    private ulong PriorityId => _orderManager.PriorityId;
     public InstrumentSimulator InstrumentSimulator => _orderManager.InstrumentSimulator;
     public ServerSimulator ServerSimlator => InstrumentSimulator.ExchangeSimulator.ServerSimulator;
     public QueueManager(int ticks, OrderManager orderManager)
@@ -111,7 +123,7 @@ public class QueueManager
             ref SimOrder order = ref node.Item;
             quantityAhead += order.Quantity;
         }
-        Orders.AddLast(new SimOrder(orderId, quantity));
+        Orders.AddLast(new SimOrder(orderId, PriorityId, quantity));
         return quantityAhead;
     }
 
@@ -207,6 +219,7 @@ public class QueueManager
         ReduceMarketBy(ghostReduce);
     }
 
+    // MBP entries
     public void OnMarketByPriceDelta(int delta)
     {
         delta += _traded;
@@ -227,7 +240,7 @@ public class QueueManager
         ref SimOrder tail = ref Orders.LastRef;
         if (Unsafe.IsNullRef(in tail) || tail.IsUserOrder)
         {
-            Orders.AddLast(new SimOrder(0, quantity));
+            Orders.AddLast(new SimOrder(0,PriorityId, quantity));
         }
         else
         {
@@ -287,6 +300,64 @@ public class QueueManager
         PublishQuantityAhead();
     }
 
+
+    // MBO entries
+    public void OnMarketByPriceByOrderDelta(ulong priorityId, int delta)
+    {
+        if (delta > 0)
+        {
+            EnqueueMarket(priorityId, delta);
+        }
+        else if (delta < 0)
+        {
+            int quantity = -delta;
+            int skip = Math.Min(_traded, quantity);   // fill-removals OnTrade already consumed, plus the displaced ghost portion
+            _traded -= skip;
+            quantity -= skip;
+            if (quantity > 0)
+                ReduceMarketBy(priorityId, quantity);
+        }
+    }
+
+    private void EnqueueMarket(ulong priorityId, int quantity)
+    {
+        ref SimOrder tail = ref Orders.LastRef;
+        if (Unsafe.IsNullRef(in tail) || tail.IsUserOrder)
+        {
+            Orders.AddLast(new SimOrder(0,priorityId, quantity));
+        }
+        else
+        {
+            tail.AmendTo(priorityId, tail.Quantity + quantity);
+        }
+        MarketQuantity += quantity;
+    }
+
+    private void ReduceMarketBy(ulong priorityId, int quantity)
+    {
+        if (MarketQuantity == 0)
+            return;
+        else if (MarketQuantity < 0)
+            throw new Exception();
+
+        foreach (ref NodeList<SimOrder>.Node node in Orders.Nodes)
+        {
+            ref SimOrder order = ref node.Item;
+            if (order.IsUserOrder || order.PriorityId < priorityId)
+                continue;   // a blob only holds ids <= its PriorityId: the order lives further back
+
+            int reduce = Math.Min(order.Quantity, quantity);   // clamp: any remainder was counterfactually consumed
+            order.AmendTo(order.Quantity - reduce);
+            MarketQuantity -= reduce;
+            if (order.Quantity == 0)
+                Orders.Remove(in node);
+            break;   // an order lives in exactly one blob
+        }
+        PublishQuantityAhead();
+    }
+
+    
+
     private void PublishQuantityAhead()
     {
         int quantityAhead = 0;
@@ -321,6 +392,12 @@ public class QueueManager
 
 public class OrderManager
 {
+    public ulong PriorityId {get; private set;} = 0;
+    public void OnPriorityId(ulong priorityId)
+    {
+        PriorityId = Math.Max(PriorityId, priorityId);
+    }
+
     private readonly ArrayList<QueueManager> _pool = new ArrayList<QueueManager>(16);
     private QueueManager RentQueueManager(int ticks)
     {
@@ -385,9 +462,9 @@ public class OrderManager
 
         return isQuantityUnfilled && isHitOrTake;
     }
-    private int GetQuantity(int ticks)
+    private int GetMarketQuantity(int ticks)
     {
-        return SideByPrice64.GetQuantity(ticks);
+        return InstrumentSimulator.GetMarketQuantity(Side, ticks);
     }
 
     private bool TryGetWorstTicks(out int ticks)
@@ -453,11 +530,11 @@ public class OrderManager
         }
 
         QueueManager queueManager = RentQueueManager(ticks);
-        int quantity = GetQuantity(ticks);
+        int quantity = GetMarketQuantity(ticks);
         if (quantity == 0 && TryGetWorstTicks(out int worstTicks)) // pretend the 
         {
             if ((worstTicks - ticks) * Sign > 0)
-              quantity = GetQuantity(worstTicks);
+              quantity = GetMarketQuantity(worstTicks);
         }
         
         queueManager.OnMarketByPriceDelta(quantity);
@@ -568,6 +645,19 @@ public class OrderManager
             InstrumentSimulator.ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Trade(new Trade(trade.TickHeader.InstrumentId, trade.TickHeader.ExchangeTimestamp, trade.TickHeader.SendingTimestamp, trade.TickHeader.NicTimestamp, trade.Level.Ticks, trade.Level.Quantity - marketQuantityFilled, trade.Direction));
         }
         return userQuantityFilled;
+    }
+
+    public void OnMarketByPriceByOrderDelta(ulong priorityId, int ticks, int delta)
+    {
+        foreach (ref NodeList<QueueManager>.Node node in QueueManagers.Nodes)
+        {
+            QueueManager queueManager = node.Item;
+            if (queueManager.Ticks == ticks)
+                queueManager.OnMarketByPriceByOrderDelta(priorityId, delta);
+            if (queueManager.Ghost > 0)
+                queueManager.DecayGhost(delta);
+            RemoveQueueManager(in node, false);
+        }
     }
 
     public void OnMarketByPriceDelta(int ticks, int quantity)

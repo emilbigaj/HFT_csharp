@@ -16,6 +16,18 @@ namespace Simulator;
 public class DataSimulator
 {
     public System.Collections.Generic.List<TickHistorySearch> Searches { get; } = new System.Collections.Generic.List<TickHistorySearch>();
+    public void AddSearch(TickHistorySearch search)
+    {
+        foreach(TickHistorySearch existing in Searches)
+        {
+            if (existing.DirectoryPath == search.DirectoryPath)
+            {
+                if (existing.ToString() == search.ToString())
+                    return;
+            }
+        }
+        Searches.Add(search);
+    }
     public LockedHashMap<string, int> Subscriptions { get; } = new LockedHashMap<string, int>();
     public int Capacity { get; set; } = 1024 * 1024;
 
@@ -54,13 +66,23 @@ public class DataSimulator
             }
         }
 
+        // MBO carries trades in-stream and supersedes MBP: skip MarketByPrice and Trade files for any symbol with MarketByOrder history
+        System.Collections.Generic.HashSet<string> marketByOrderSymbols = new System.Collections.Generic.HashSet<string>();
+        foreach (System.Collections.Generic.KeyValuePair<string, TickHistory> match in matched)
+            if (match.Value.TickType == TickType.MarketByOrder)
+                marketByOrderSymbols.Add(match.Value.Symbology.Symbol);
+
         foreach (System.Collections.Generic.KeyValuePair<string, TickHistory> match in matched)
         {
             TickHistory history = match.Value;
+            if ((history.TickType == TickType.MarketByPrice || history.TickType == TickType.Trade) && marketByOrderSymbols.Contains(history.Symbology.Symbol))
+                continue;
+
             if (Subscriptions.TryGetValue(history.Symbology.Symbol, out int instrumentId))
             {
+                int capacity = history.TickType == TickType.MarketByOrder ? 64 * Capacity : Capacity;   // MBO midnight snapshots are MBs
                 TickHistoryReader reader = new TickHistoryReader(history, begin: Clock.Begin, Clock.End);
-                TickHistoryTickQueue tickQueue = new TickHistoryTickQueue(reader, instrumentId, Capacity);
+                TickHistoryTickQueue tickQueue = new TickHistoryTickQueue(reader, instrumentId, capacity);
                 _tickQueueManager.Add(tickQueue);
                 _priorityTickQueue.Enqueue(tickQueue); // blocks
             }
@@ -118,6 +140,11 @@ public class DataSimulator
             {
                 ref readonly MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(src);
                 _exchangeSimulator.OnMarketByPrice(in mbp, src);
+            }
+            else if (tickHeader.TickType == TickType.MarketByOrderUpdate || tickHeader.TickType == TickType.MarketByOrderSnapshot)
+            {
+                ref readonly MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(src);
+                _exchangeSimulator.OnMarketByOrder(in mbo, src);
             }
             else
             {

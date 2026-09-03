@@ -75,9 +75,9 @@ public struct TickHeader(TickType tickType, int instrumentId, Timestamp exchange
     public TickType TickType = tickType;
     private unsafe fixed byte _reserved[3];
     public int InstrumentId = instrumentId;
-    public Timestamp ExchangeTimestamp = exchangeTimestamp;
-    public Timestamp SendingTimestamp = sendingTimestamp;
-    public Timestamp NicTimestamp = nicTimestamp;
+    public Timestamp ExchangeTimestamp = exchangeTimestamp; // message was received by the Market Segment Gateway and had FIFO order handling applied
+    public Timestamp SendingTimestamp = sendingTimestamp; // timestamp from the exchange - when did the exchange put the packet on the wire
+    public Timestamp NicTimestamp = nicTimestamp; // when did the packet arrive at the useres network card
 
     public override string ToString() => Json.Serialize(this);
 }
@@ -178,27 +178,38 @@ public struct Trade
 
 }
 
-public enum OrderAction : byte
+public enum MarketByOrderAction : byte
 {
-    New = 0,
-    Cancel = 1,
-    Trade = 2,
+    Add = 0, // order added to this level
+    Reduce = 1, // order quantity reduced in place, keeps queue position; Level.Quantity = quantity reduced by. increases and price changes are treated as a cancel + add
+    Cancel = 2, // order removed from this level
+    Trade = 3
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[RegisterJson]
 public struct Order
 {
+    // byte 0 = side, byte 1 = action, bytes 2-7 = priority id (48 bits)
     private ulong _packedPriorityIdAndAction;
-    public ulong PriorityId => _packedPriorityIdAndAction >> 8;
-    public OrderAction OrderAction => (OrderAction)(_packedPriorityIdAndAction & 0xFF);
+    public ulong PriorityId => _packedPriorityIdAndAction >> 16;
+    public MarketByOrderAction OrderAction => (MarketByOrderAction)((_packedPriorityIdAndAction >> 8) & 0xFF);
+    //Side of aggresor if Trade, side of maker if Add/Modify/Cancel
+    public Side Side => (Side)(sbyte)(_packedPriorityIdAndAction & 0xFF); 
 
     public Level Level;
-    public Order(ulong priorityId, OrderAction orderAction, int ticks, int quantity)
+    public Order(ulong priorityId, MarketByOrderAction mboAction, Side sideOfMaker, int ticks, int quantity)
     {
-        _packedPriorityIdAndAction = (priorityId << 8) | (ulong)orderAction;
+        _packedPriorityIdAndAction = (priorityId << 16) | ((ulong)mboAction << 8) | (byte)sideOfMaker;
         Level = new Level{Ticks = ticks, Quantity = quantity};
     }
 }
 
+/// <summary>
+/// Market-by-Order wire message: header + counts + trailing Order arrays (bids then asks).
+/// Layout:
+/// [ TickHeader | BidsCount:int | AsksCount:int | bidOrders[0..BidsCount-1] | askOrders[0..AsksCount-1] ]
+/// </summary>
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
 public struct MarketByOrder
@@ -206,11 +217,62 @@ public struct MarketByOrder
     public TickHeader TickHeader;
     public int BidsCount;
     public int AsksCount;
-    public MarketByOrder(TickType mboType, int instrumentId, Timestamp exchangeTimestamp, Timestamp sendingTimestamp, Timestamp nicTimestamp)
+    public MarketByOrder(TickType mboType, int instrumentId, Timestamp exchangeTimestamp, Timestamp sendingTimestamp, Timestamp nicTimestamp, int bidsCount, int asksCount)
     {
         if (!(mboType == TickType.MarketByOrderSnapshot || mboType == TickType.MarketByOrderUpdate || mboType == TickType.MarketByOrderPartialUpdate || mboType == TickType.MarketByOrderDelta))
             throw new ArgumentException($"Invalid mboType: {mboType}");
         TickHeader = new TickHeader(mboType, instrumentId, exchangeTimestamp, sendingTimestamp, nicTimestamp);
+        BidsCount = bidsCount;
+        AsksCount = asksCount;
+    }
+
+    // ----- Size helpers -----
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int SizeOf() => SizeOf(BidsCount, AsksCount);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int SizeOfOrders() => (BidsCount + AsksCount) * Unsafe.SizeOf<Order>();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int SizeOf(int bidsCount, int asksCount)
+        => Unsafe.SizeOf<MarketByOrder>() + (bidsCount + asksCount) * Unsafe.SizeOf<Order>();
+
+    // ===== Instance Span-based accessors (no unsafe/pinning) =====
+
+    /// <summary>Span over bid orders stored immediately after the header.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public Span<Order> BidsAsSpan(Span<byte> src)
+    {
+        int headerBytes = Unsafe.SizeOf<MarketByOrder>();
+        int orderBytes = Unsafe.SizeOf<Order>();
+        return MemoryMarshal.Cast<byte, Order>(src.Slice(headerBytes, BidsCount * orderBytes));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ReadOnlySpan<Order> BidsAsSpan(ReadOnlySpan<byte> src)
+    {
+        int headerBytes = Unsafe.SizeOf<MarketByOrder>();
+        int orderBytes = Unsafe.SizeOf<Order>();
+        return MemoryMarshal.Cast<byte, Order>(src.Slice(headerBytes, BidsCount * orderBytes));
+    }
+
+    /// <summary>Span over ask orders stored after the bids block.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public Span<Order> AsksAsSpan(Span<byte> src)
+    {
+        int headerBytes = Unsafe.SizeOf<MarketByOrder>();
+        int orderBytes = Unsafe.SizeOf<Order>();
+        int bidsBytes = BidsCount * orderBytes;
+        return MemoryMarshal.Cast<byte, Order>(src.Slice(headerBytes + bidsBytes, AsksCount * orderBytes));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ReadOnlySpan<Order> AsksAsSpan(ReadOnlySpan<byte> src)
+    {
+        int headerBytes = Unsafe.SizeOf<MarketByOrder>();
+        int orderBytes = Unsafe.SizeOf<Order>();
+        int bidsBytes = BidsCount * orderBytes;
+        return MemoryMarshal.Cast<byte, Order>(src.Slice(headerBytes + bidsBytes, AsksCount * orderBytes));
     }
 }
 

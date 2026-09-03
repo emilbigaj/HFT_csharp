@@ -1,6 +1,7 @@
 ﻿using Data;
 using Execution;
 using Provider;
+using Socket;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
@@ -66,9 +67,19 @@ public unsafe abstract class Algo
 
     protected int GetPositionQuantity()
     {
-        SnapshotActives();
-        int quantity = Position.Header.Quantity;
-        return quantity;
+        while(true)
+        {
+            ref readonly SharedArrayEntry<PositionHeader> positionHeaderEntry = ref Position.PositionHeader;
+            ulong seq0 = positionHeaderEntry.GetSeq();
+            // Odd = fill transaction in progress: without this, a pass that runs entirely inside the
+            // write window sees seq0 == seq1 (both odd) and validates the mid-transaction pair.
+            if (Protocol.IsWriteInProgress(seq0)) { X86BaseWrapper.Pause(); continue; }
+            SnapshotActives();
+            int quantity = positionHeaderEntry.GetReadonlyRef().Quantity;
+            ulong seq1 = positionHeaderEntry.GetSeq();
+            if (seq0 == seq1)
+                return quantity;
+        }
     }
 
     private struct SortKeyComparer : IComparer<SortKey>

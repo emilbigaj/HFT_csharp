@@ -69,6 +69,16 @@ namespace Tools
             return new FileSystemPath(System.IO.Path.Combine(left.Path, right.Path));
         }
 
+        public static bool operator ==(FileSystemPath left, FileSystemPath right)
+        {
+            return left.Path == right.Path;
+        }
+
+        public static bool operator !=(FileSystemPath left, FileSystemPath right)
+        {
+            return left.Path != right.Path;
+        }
+
         public static implicit operator FileSystemPath(string path)
         {
             return new FileSystemPath(path);

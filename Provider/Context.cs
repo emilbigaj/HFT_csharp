@@ -218,6 +218,9 @@ public abstract class Context
 
         EnsureConnected();
 
+        // Legged headers resolve their legs through this context's shared header array.
+        LeggedHeader.GetLegHeader = instrumentHeaderId => GetInstrumentHeader(instrumentHeaderId).Read();
+
         ref readonly ServerHeader serverHeader = ref ServerHeader.GetReadonlyRef();
 
         _clientSocketHeaders = NewSharedArray<SocketHeader>(serverName / "ClientHeaders", serverHeader.ClientIds.Length, ServerAccess);
@@ -470,12 +473,19 @@ public abstract class Context
         }
         else if (instrHeader.InstrumentType == InstrumentType.Spread)
         {
-            ref SpreadHeader sh = ref header128Entry.GetRef().AsSpread();
+            ref LeggedHeader leggedHeader = ref header128Entry.GetRef().AsLegged();
 
-            Future longLeg = (GetInstrument(sh.LongInstrumentId) as Future)!;
-            Future shortLeg = (GetInstrument(sh.ShortInstrumentId) as Future)!;
+            // Legs reference sibling headers; long = the positive-weight leg (2-leg spreads for now).
+            Future longLeg = null!;
+            Future shortLeg = null!;
+            foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
+            {
+                Future legFuture = (GetInstrument(GetInstrumentId(legHeader.InstrumentHeaderId)) as Future)!;
+                if (legHeader.Weight > 0) longLeg = legFuture;
+                else shortLeg = legFuture;
+            }
 
-            instrument = new Spread(header128Entry.Cast<SpreadHeader>(), mbpEntry, longLeg, shortLeg);
+            instrument = new Spread(header128Entry.Cast<LeggedHeader>(), mbpEntry, longLeg, shortLeg);
         }
         else if (instrHeader.InstrumentType == InstrumentType.Forex)
         {
@@ -600,6 +610,10 @@ public sealed class ClientContext : Context
                     string messageEfficiencyFilePath = GetMessageEfficiencyFilePath(ServerName, productGroup.ToString()).ToString();
                     string? messageEfficiencyLine = Tools.Tools.ReadLastLine(messageEfficiencyFilePath);
                     MessageEfficiency loadedMessageEfficiency = messageEfficiencyLine != null ? Json.Deserialize<MessageEfficiency>(messageEfficiencyLine) : Clock.Mode == ClockMode.Simulation ? MessageEfficiency.GetMaxLimits(productGroup) : MessageEfficiency.GetMinLimits(productGroup);
+                    if (Clock.Mode == ClockMode.Simulation)
+                    {
+                        loadedMessageEfficiency.TradeDate = DateTime.MinValue;
+                    }
                     loadedMessageEfficiency.ProductGroup = productGroup;
                     loadedMessageEfficiency.ProductGroupId = productGroupId;
                     DateTime local = instrument.SessionManager.Session.ConvertToLocal(Clock.Now);

@@ -850,7 +850,7 @@ public sealed class ServerSocket : IDisposable
         // {status, epoch} in one word: readers request Open -> Closing with a CAS against the
         // snapshot they read the close under, so a reader that slept through a close+reconnect
         // cannot mark the NEW session Closing off the OLD session's evidence.
-        public AtomicTransition<ClientStatus> Status = new(ClientStatus.Disposed);
+        public AtomicEnum<ClientStatus> Status = new(ClientStatus.Disposed);
 
         private long _closedTimestamp = Timestamp.MaxValue.NanosSinceEpoch;
         public Timestamp ClosedTimestamp
@@ -1173,7 +1173,7 @@ public sealed class ServerSocket : IDisposable
 
         // The snapshot the close is read under is the snapshot the CAS must use: a fresh Load()
         // at the transition would adopt a newer epoch and let stale evidence close a new session.
-        AtomicTransition<ClientStatus>.Snapshot snapshot = client.Status.Load();
+        AtomicEnum<ClientStatus>.Snapshot snapshot = client.Status.Load();
         if (snapshot.State != ClientStatus.Open) return ReadStatus.Closed;
 
         try
@@ -1207,7 +1207,7 @@ public sealed class ServerSocket : IDisposable
 
         // Same snapshot discipline as GetReadStatus; TryTransition replaces the old
         // recheck-then-store, which two threads could interleave into a double close.
-        AtomicTransition<ClientStatus>.Snapshot snapshot = clientHeader.Status.Load();
+        AtomicEnum<ClientStatus>.Snapshot snapshot = clientHeader.Status.Load();
         if (snapshot.State != ClientStatus.Open || clientSocket == null) return ReadStatus.Closed;
 
         try

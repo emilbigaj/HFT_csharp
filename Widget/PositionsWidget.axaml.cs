@@ -28,7 +28,7 @@ public sealed class WidgetPosition : INotifyPropertyChanged
     public string ShortSymbol => _position.Instrument.ShortSymbol;
     public int InstrumentId => _position.Instrument.InstrumentId;
 
-    public int StrategyId => _position.Header.OrderHeader.OrderId.StrategyId;
+    public int StrategyId => _position.PositionHeader.GetReadonlyRef().OrderHeader.OrderId.StrategyId;
     public readonly Position _position;
     private Profit _profit;
     public AlgoStatus AlgoStatus => _position.AlgoStatus;
@@ -39,7 +39,7 @@ public sealed class WidgetPosition : INotifyPropertyChanged
     public Side Side => (Side)Math.Sign(_profit.Quantity);
     public double Realized => _profit.Realized;
     public int Quantity => _profit.Quantity;
-    public int QuantityTraded => _position.Header.QuantityTraded;
+    public int QuantityTraded => _position.PositionHeader.GetReadonlyRef().QuantityTraded;
 
     public Timestamp Timestamp => _profit.Timestamp;
 

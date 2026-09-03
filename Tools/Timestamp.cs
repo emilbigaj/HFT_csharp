@@ -500,6 +500,10 @@ public readonly struct Timestamp : IComparable<Timestamp>, IEquatable<Timestamp>
     }
 
 
+    // Tried only after the caller's own format fails, so nothing that parses today changes: a date
+    // alone means midnight, a time without seconds means :00.
+    private static readonly string[] ShortFormats = { "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd" };
+
     public static Timestamp FromString(string input, string format = "yyyy-MM-dd HH:mm:ss.fff_fff_fff")
     {
         if (input is null)
@@ -522,7 +526,13 @@ public readonly struct Timestamp : IComparable<Timestamp>, IEquatable<Timestamp>
                 dateFormat,
                 CultureInfo.InvariantCulture,
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-                out DateTime dt))
+                out DateTime dt)
+         && !DateTime.TryParseExact(
+                datePart,
+                ShortFormats,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out dt))
         {
             throw new FormatException($"Timestamp '{input}' does not match format '{format}'");
         }

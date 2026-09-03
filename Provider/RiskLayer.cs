@@ -22,13 +22,18 @@ public struct Exposure
 public class RiskLayer
 {
     private ServerContext _serverContext;
-    private ulong[] _maxClientOrderIds;
+    // CLIENT-side only: the high-water mark of this client's own allocations. Valid there because
+    // validation runs at send time on one thread, so validation order IS allocation order. The
+    // server must NOT run this check: ids come from one per-client counter but travel on per-core-
+    // group rings read by different threads, so two same-instant creates on different instruments
+    // can legitimately arrive out of allocation order — the old per-client array rejected the
+    // slower one (ClientOrderIdOutOfOrder) and paused the algo, nondeterministically.
+    private OrderId _maxClientOrderId;
     private readonly OrderRejectedSource _orderRejectedSource;
     public RiskLayer(ServerContext serverContext, OrderRejectedSource orderRejectedSource)
     {
         _serverContext = serverContext;
         _orderRejectedSource = orderRejectedSource;
-        _maxClientOrderIds = new ulong[_serverContext.ServerHeader.GetReadonlyRef().ClientIds.Length];
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -93,20 +98,25 @@ public class RiskLayer
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Bitset64 ValidateCreate(in OrderTarget orderTarget, in OrderState orderState)
     {
-        int clientId = orderTarget.OrderHeader.OrderId.ClientId;
         Bitset64 orderRejectedReasons = new Bitset64();
         if (orderTarget.OrderHeader.Seq != 1)
         {
             orderRejectedReasons.Set((int)OrderRejectedReason.SeqOutOfOrder);
         }
 
-        if (orderTarget.OrderHeader.OrderId <= _maxClientOrderIds[clientId])
+        // Client side only — see _maxClientOrderId. The server keeps OrderIndexIsBusy and the
+        // amend/cancel header checks; a duplicate create cannot reach it anyway (the ring is
+        // read-once, Recover() skips the backlog, a restarted client seeds higher generations).
+        if (_orderRejectedSource == OrderRejectedSource.Client)
         {
-            orderRejectedReasons.Set((int)OrderRejectedReason.ClientOrderIdOutOfOrder);
-        }
-        else
-        {
-            _maxClientOrderIds[clientId] = orderTarget.OrderHeader.OrderId;
+            if (orderTarget.OrderHeader.OrderId <= _maxClientOrderId)
+            {
+                orderRejectedReasons.Set((int)OrderRejectedReason.ClientOrderIdOutOfOrder);
+            }
+            else
+            {
+                _maxClientOrderId = orderTarget.OrderHeader.OrderId;
+            }
         }
         if (orderState.OrderStateStatus == OrderStateStatus.Active)
         {
@@ -294,17 +304,18 @@ public class RiskLayer
                             orderRejectedReasons.Set((int)OrderRejectedReason.StateIsDone);
                         if (isAmend && existingTarget.OrderTargetStatus == OrderStateStatus.Done && orderState.OrderProfile == orderTarget.OrderProfile)
                             orderRejectedReasons.Set((int)OrderRejectedReason.TargetIsActive);
-                    }
-                        
+                    }   
 
                     if (existingTarget.OrderHeader.Seq >= orderTarget.OrderHeader.Seq)
                         orderRejectedReasons.Set((int)OrderRejectedReason.SeqOutOfOrder);
 
-                    if (existingTarget.OrderTargetStatus == OrderStateStatus.Active) // lastTarget = newTarget ??
+                    if (existingTarget.OrderTargetStatus == OrderStateStatus.Active) // existingTarget == newTarget ??
                     {
                         if (isAmend && existingTarget.OrderProfile == orderTarget.OrderProfile)
                             orderRejectedReasons.Set((int)OrderRejectedReason.TargetIsActive);
-                        if (existingTarget.OrderTargetAction == OrderTargetAction.Cancel)
+                        
+                        bool existingTargetWillCancel = existingTarget.OrderHeader.OrderId == orderState.OrderHeader.OrderId && existingTarget.OrderProfile.Sign * (existingTarget.OrderProfile.Quantity - orderState.QuantityFilled) <= 0;
+                        if (existingTarget.OrderTargetAction == OrderTargetAction.Cancel || existingTargetWillCancel)
                             orderRejectedReasons.Set((int)OrderRejectedReason.CancelIsActive);
                     }
 
@@ -377,7 +388,7 @@ public class RiskLayer
 
 
                 Position serverPosition = _serverContext.GetPosition(instrumentId);
-                int quantity = serverPosition.Header.Quantity;
+                int quantity = serverPosition.PositionHeader.GetReadonlyRef().Quantity;
                 int worstLongQuantity = quantity + worstLongWorkingQuantity;
                 int worstShortQuantity = quantity + worstShortWorkingQuantity;
                 

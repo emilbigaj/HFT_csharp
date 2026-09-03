@@ -162,7 +162,7 @@ public class Strategy
         {
             double lastValue = series.Value.Value;
             double value = getValue();
-            if (!double.IsNaN(value) && value != lastValue)
+            if (double.IsFinite(value) && value != lastValue)
                 series.Append(new Point(timestamp, value));
         };
         return series;

@@ -138,8 +138,10 @@ public static class WorkspaceRunner
         builder = builder.LogToTrace();
 
         // Prevent hardware acceleration GPU drivers from initiating cross-CPU interrupts
-        // that stall on the isolated RT core.
-        builder = builder.With(new X11PlatformOptions { RenderingMode = new[] { X11RenderingMode.Software } }).With(new Win32PlatformOptions { RenderingMode = new[] { Win32RenderingMode.Software } });
+        // that stall on the isolated RT core. UseDBusMenu/UseDBusFilePicker off: the trading boxes
+        // run a bare X session with no menu registrar or desktop portal, so the startup probes fail
+        // as async DBusExceptions ("The name is not activatable") that pollute the alert files.
+        builder = builder.With(new X11PlatformOptions { RenderingMode = new[] { X11RenderingMode.Software }, UseDBusMenu = false, UseDBusFilePicker = false }).With(new Win32PlatformOptions { RenderingMode = new[] { Win32RenderingMode.Software } });
 
         // Bypass native OS DBus/GTK file dialogs which can trigger compositor/DRM kernel hangs.
         // Instead, use Avalonia's own software-rendered managed dialogs.

@@ -132,6 +132,11 @@ namespace Data
                         ref readonly MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(src);
                         src.Slice(0, Unsafe.SizeOf<MarketByPrice>()).CopyTo(dst);
                     }
+                    else if (tickType == TickType.MarketByOrderSnapshot || tickType == TickType.MarketByOrderUpdate)
+                    {
+                        ref readonly MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(src);
+                        src.Slice(0, Unsafe.SizeOf<MarketByOrder>()).CopyTo(dst);
+                    }
                     return src.Length;
                 }
             }
@@ -147,6 +152,12 @@ namespace Data
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         protected override void ReadMarketByPrice(Span<byte> dst)
+        {
+            PopAndPush(dst);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        protected override void ReadMarketByOrder(Span<byte> dst)
         {
             PopAndPush(dst);
         }
@@ -172,6 +183,19 @@ namespace Data
                 ReadOnlySpan<byte> levelBytes = src.Slice(headerSize, levelsSize);
 
                 levelBytes.CopyTo(dst.Slice(headerSize));
+            }
+            else if (tickType == TickType.MarketByOrderSnapshot || tickType == TickType.MarketByOrderUpdate)
+            {
+                ref readonly MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(src);
+
+                int headerSize = Unsafe.SizeOf<MarketByOrder>();
+                int ordersSize = mbo.SizeOfOrders();
+
+                // dst already has the header at [0..headerSize)
+                // copy just the orders right after the header:
+                ReadOnlySpan<byte> orderBytes = src.Slice(headerSize, ordersSize);
+
+                orderBytes.CopyTo(dst.Slice(headerSize));
             }
             tickQueue.TryDequeue();
             if (tickQueue.TryPeek(out src))
@@ -214,6 +238,12 @@ namespace Data
         protected override void ReadMarketByPrice(Span<byte> dst)
         {
             _tickHistoryReader.ReadMarketByPrice(dst);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        protected override void ReadMarketByOrder(Span<byte> dst)
+        {
+            _tickHistoryReader.ReadMarketByOrder(dst);
         }
 
         public override void Dispose()
@@ -482,6 +512,11 @@ namespace Data
                         _header.AsSpan().Slice(0, Unsafe.SizeOf<MarketByPrice>()).CopyTo(dst);
                         ReadMarketByPrice(dst);
                     }
+                    else if (tickHeader.TickType == TickType.MarketByOrderUpdate || tickHeader.TickType == TickType.MarketByOrderSnapshot)
+                    {
+                        _header.AsSpan().Slice(0, Unsafe.SizeOf<MarketByOrder>()).CopyTo(dst);
+                        ReadMarketByOrder(dst);
+                    }
                     else
                         throw new NotImplementedException($"Unsupported TickType: {tickHeader.TickType}");
 
@@ -494,6 +529,7 @@ namespace Data
         protected abstract int MoveNext(Span<byte> dst, out TickType tickType);
         protected abstract void ReadTick(Span<byte> dst);
         protected abstract void ReadMarketByPrice(Span<byte> dst);
+        protected abstract void ReadMarketByOrder(Span<byte> dst);
 
     }
 }

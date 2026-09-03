@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using Tools;
 
@@ -76,8 +77,8 @@ public class Symbology
             (InstrumentType)Enum.Parse(typeof(InstrumentType), instrumentTypeText, true);
 
         // Ticker formats emitted:
-        // Future: "<Root> <E><Date>"        e.g., "ES M20251215"
-        // Spread: "<Root> <E><Date> - <E><Date>"
+        // Future: "<Root> <E><Date>"                e.g., "ES M2025-12-15"
+        // Spread: "<Root> +<E><Date> -<E><Date>"    signed leg tokens, weight folded into the sign
         int spaceAfterRoot = ticker.IndexOf(' ');
         if (spaceAfterRoot < 0)
             throw new FormatException("Ticker must contain root and a maturity part.");
@@ -94,27 +95,30 @@ public class Symbology
         }
         else if (instrumentType == InstrumentType.Spread)
         {
-            string[] legs = remainder.Split(" - ", StringSplitOptions.TrimEntries);
-            if (legs.Length != 2)
-                throw new FormatException("Spread ticker must be in the form \"<E><Date> - <E><Date>\".");
-
-            // Long leg
-            MaturityType longMaturityType;
-            Timestamp longMaturityDate;
-            ParseMaturityTokenUsingFromDateString(legs[0], out longMaturityType, out longMaturityDate);
-
-            // Short leg
-            MaturityType shortMaturityType;
-            Timestamp shortMaturityDate;
-            ParseMaturityTokenUsingFromDateString(legs[1], out shortMaturityType, out shortMaturityDate);
-
-            return new SpreadSymbology(exchange, root, longMaturityType, longMaturityDate, shortMaturityType, shortMaturityDate);
+            // Signed leg tokens "±[n]<E><Date>": root appears once, legs maturity-ascending.
+            List<Symbology> symbologies = new List<Symbology>();
+            List<int> weights = new List<int>();
+            foreach (string legToken in remainder.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                int sign = legToken[0] == '+' ? 1 : legToken[0] == '-' ? -1 : throw new FormatException($"Spread leg \"{legToken}\" must start with '+' or '-'.");
+                int index = 1;
+                int magnitude = 0;
+                while (index < legToken.Length && char.IsAsciiDigit(legToken[index]))
+                {
+                    magnitude = magnitude * 10 + (legToken[index] - '0');
+                    index++;
+                }
+                ParseMaturityTokenUsingFromDateString(legToken.Substring(index), out MaturityType maturityType, out Timestamp maturityDate);
+                symbologies.Add(new FutureSymbology(exchange, root, maturityType, maturityDate));
+                weights.Add(sign * Math.Max(magnitude, 1));
+            }
+            return new SpreadSymbology(exchange, root, symbologies, weights);
         }
 
         throw new NotSupportedException($"FromString does not yet support InstrumentType {instrumentType}.");
     }
 
-    // Helper: token is like "M20251215" where 'M' is the MaturityType code char.
+    // Helper: token is like "M2025-12-15" where 'M' is the MaturityType code char.
     private static void ParseMaturityTokenUsingFromDateString(string token,
                                                             out MaturityType maturityType,
                                                             out Timestamp maturityDate)
@@ -165,23 +169,65 @@ public class FutureSymbology : Symbology
         MaturityType = maturityType;
         MaturityDate = maturityDate;
         string shortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(maturityDate.Month);
-        ShortSymbol = $"{root} {shortMonthName} {maturityDate.Year}";
+        ShortSymbol = $"{root} {shortMonthName}{maturityDate.Year%100}";
     }
 }
 
-[RegisterJson]
-public class SpreadSymbology : FutureSymbology
+public record struct SymbolLeg(string Symbol, int Weight);
+
+public class LeggedSymbology : Symbology
 {
-    public FutureSymbology LongSymbology { get; }
-    public FutureSymbology ShortSymbology { get; }
+    public List<Symbology> Symbologies { get; }
+    public List<int> Weights { get; }
+
     public override string ShortSymbol { get; }
-    public SpreadSymbology(string exchange, string root, MaturityType longMaturityType, Timestamp longMaturityDate, MaturityType shortMaturityType, Timestamp shortMaturityDate)
-        : base(InstrumentType.Spread, exchange, root, $"{root} {(char)longMaturityType}{longMaturityDate.ToDateString()} - {(char)shortMaturityType}{shortMaturityDate.ToDateString()}", (longMaturityDate <= shortMaturityDate) ? longMaturityType : shortMaturityType, (longMaturityDate <= shortMaturityDate) ? longMaturityDate : shortMaturityDate)
+
+    // The root appears once, up front; leg tokens carry only sign+maturity ("+M2025-12-19").
+    public LeggedSymbology(InstrumentType instrumentType, string exchange, string root, List<Symbology> symbologies, List<int> weights)
+        : base(instrumentType, exchange, root, GetLegsTicker(root, symbologies.Select((l, i) => new SymbolLeg(l.Ticker.Replace(l.Root + " ", ""), weights[i])).ToList()))
     {
-        LongSymbology = new FutureSymbology(exchange, root, longMaturityType, longMaturityDate);
-        ShortSymbology = new FutureSymbology(exchange, root, shortMaturityType, shortMaturityDate);
-        string longShortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(longMaturityDate.Month);
-        string shortShortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(shortMaturityDate.Month);
-        ShortSymbol = $"{root} {longShortMonthName} {longMaturityDate.Year} - {shortShortMonthName} {shortMaturityDate.Year}";
+        Symbologies = symbologies;
+        Weights = weights;
+        ShortSymbol = GetLegsTicker(root, symbologies.Select((l, i) => new SymbolLeg(l.ShortSymbol.Replace(l.Root + " ", ""), weights[i])).ToList());
+    }
+
+    // Weight rendered as the leg-token sign: "+", "-", "+2"; negative weights carry their own '-'.
+    public static string GetSignedWeight(int weight) => weight switch
+    {
+        1 => "+",
+        -1 => "-",
+        > 1 => $"+{weight}",
+        _ => weight.ToString(),   // 0 renders as "0"
+    };
+
+    public static string GetLegsTicker(string root, List<SymbolLeg> legs)
+    {
+        StringBuilder stringBuilder = new StringBuilder();
+        stringBuilder.Append(root + " ");
+        int i = 0;
+        while (i < legs.Count)
+        {
+            string symbol = legs[i].Symbol;
+            int weight = legs[i].Weight;
+            stringBuilder.Append(GetSignedWeight(weight) + symbol);
+            i++;
+            if (i < legs.Count)
+            {
+                stringBuilder.Append(" ");
+            }
+        }
+        return stringBuilder.ToString();
+    }
+}
+
+
+
+
+[RegisterJson]
+public class SpreadSymbology : LeggedSymbology
+{
+    public SpreadSymbology(string exchange, string root, List<Symbology> symbologies, List<int> weights)
+        : base(InstrumentType.Spread, exchange, root, symbologies, weights)
+    {
     }
 }

@@ -526,18 +526,18 @@ public abstract class Client
         NicTimestamp = orderState.OrderHeader.NicTimestamp;
         ExchangeTimestamp = orderState.OrderHeader.ExchangeTimestamp;
         int localOrderIndex = orderState.OrderHeader.OrderId.LocalIndex;
-        ref OrderTarget orderTarget = ref Context.GetOrderTarget(orderState.OrderHeader.OrderId).GetRef();
-        if (orderState.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId)
+        ref OrderTarget existingOrderTarget = ref Context.GetOrderTarget(orderState.OrderHeader.OrderId).GetRef();
+        if (orderState.OrderHeader.OrderId == existingOrderTarget.OrderHeader.OrderId)
         {
             if (orderState.OrderStateStatus == OrderStateStatus.Done)
             {
-                orderTarget.OrderTargetStatus = OrderStateStatus.Done;
+                existingOrderTarget.OrderTargetStatus = OrderStateStatus.Done;
                 Context.GetPosition(orderState.OrderHeader.OrderId.InstrumentId).OnOrderDone(localOrderIndex);
                 OrderIdAllocator.Free(ref _isOrderActive, orderState.OrderHeader.OrderId);
             }
-            else if (orderState.OrderHeader.Seq >= orderTarget.OrderHeader.Seq)
+            else if (orderState.OrderHeader.Seq >= existingOrderTarget.OrderHeader.Seq)
             {
-                orderTarget.OrderTargetStatus = OrderStateStatus.Done;
+                existingOrderTarget.OrderTargetStatus = OrderStateStatus.Done;
             }
         }
         OrderState?.Invoke(in orderState);
@@ -647,7 +647,20 @@ public abstract class Client
         bool isTargetDone = orderRejected.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId && orderTarget.OrderHeader.Seq == orderRejected.OrderHeader.Seq;
         if (isTargetDone)
             orderTarget.OrderTargetStatus = OrderStateStatus.Done;
+
+        // Non-discarded rejections raise the event regardless of source, so exchange/server
+        // rejections severe enough to pause the algo reach the AlertManager too.
+        if (IsDiscarded(in orderRejected))
+            return;
+
+        OrderRejected?.Invoke(in orderRejected);
     }
+
+    // Benign rejections are absorbed silently — no alert, no pause, no escalation. The sim-only
+    // session-limit carve-out layers on top of the struct's own reason check.
+    public static bool IsDiscarded(in OrderRejected orderRejected) =>
+        orderRejected.IsDiscarded
+        || (Clock.Mode == ClockMode.Simulation && orderRejected.OrderRejectedReasons.Raw == 1UL << (int)OrderRejectedReason.TooManyOrdersPerSession);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     protected void Reject(in OrderTarget orderTarget, Bitset64 orderRejectedReasons, OrderRejectedSource orderRejectedSource)
@@ -661,13 +674,8 @@ public abstract class Client
             OrderRejectedSource = orderRejectedSource
         };
 
-        if (!orderRejectedReasons.IsEmpty && orderRejectedReasons.IsSubsetOf(Execution.OrderRejected.OrderDiscarded))
+        if (IsDiscarded(in orderRejected))
             return;
-
-        if (Clock.Mode == ClockMode.Simulation && orderRejectedReasons.Raw == 1UL << (int)OrderRejectedReason.TooManyOrdersPerSession)
-            return;
-
-        
 
         _socket.Write(Context.GetInstrument(orderRejected.OrderHeader.OrderId.InstrumentId).Header.CoreGroupId, in orderRejected);
         OrderRejected?.Invoke(in orderRejected);

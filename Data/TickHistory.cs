@@ -37,7 +37,7 @@ public struct TickHistoryHeader
     public long Length => Math.Max(0, PositionOfTomorrow - Position - Unsafe.SizeOf<TickHistoryHeader>());
 
     public Timestamp ExchangeTimestamp;
-    public long Version;
+    public ulong PriorityId;
     public int Ticks;
     public int Quantity;
 
@@ -59,6 +59,11 @@ public class TickHistorySearch
     public TickType? TickType { get; set; }
 
     public FileSystemPath DirectoryPath { get; set; } = @"Z:\TickHistory";
+
+    public override string ToString()
+    {
+        return Json.Serialize(this);
+    }
 
 
     public static ArrayList<TickHistory> Search(TickHistorySearch search)
@@ -157,8 +162,8 @@ public class TickHistorySearch
 public class TickHistoryWriter : IDisposable
 {
     private readonly FastArrayPool<byte> _byteArrayPool = new FastArrayPool<byte>();
-
     private MarketByPrice64 _mpb64 = new MarketByPrice64();
+    private MarketByOrderBook _mbob = new MarketByOrderBook();
 
     private bool _isDisposed = false;
     public override string ToString() => $"TickHistoryWriter {TickHistory.FilePath}";
@@ -201,12 +206,34 @@ public class TickHistoryWriter : IDisposable
                 limitedStream.Dispose();
                 decompressionStream.Dispose();
             }
+            else if (TickHistory.TickType == TickType.MarketByOrder)
+            {
+                LimitedStream limitedStream = new LimitedStream(_fileStream, _fileStream.Length - _fileStream.Position);
+                DecompressionStream decompressionStream = new DecompressionStream(limitedStream, TickHistory.Decompressor);
+                Span<byte> header = stackalloc byte[64];
+                int bytesNeeded = TickHistory.MoveNext(_fileStream, ref limitedStream, ref decompressionStream, ref _tomorrow, header, out TickType tickType);
+                byte[] rented = _byteArrayPool.Rent(bytesNeeded);   // MBO snapshots are MBs: rent, not stackalloc
+                Span<byte> dst = rented.AsSpan(0, bytesNeeded);
+                header[..Math.Min(header.Length, dst.Length)].CopyTo(dst);
+                ref MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(dst);
+                TickHistory.ReadExact(decompressionStream, dst.Slice(Unsafe.SizeOf<MarketByOrder>(), mbo.SizeOfOrders()));
+                TickHistoryHeader tomorrowCopy = _tomorrow;
+                TickHistory.RestoreMarketByOrder(ref tomorrowCopy, dst);
+                _mbob.Apply(dst);
+                _byteArrayPool.Return(rented);
+                limitedStream.Dispose();
+                decompressionStream.Dispose();
+            }
             _fileStream.Position = _tomorrow.PositionOfYesterday;
             _today = TickHistory.ReadHeader(_fileStream);
             _fileStream.Position = _tomorrow.Position;
-            _compressionStream = new CompressionStream(_fileStream, TickHistory.Compressor);
+            // no compression stream yet: a never-written stream would emit an empty frame on dispose, shifting the rollover rewrite off its committed bytes
         }
     }
+
+    
+
+
     // Remember we always write the current Timestamp to Tomorrow not Today! so that when tomorrow is written it has the lastTimestmap
     public void WriteTick(in Tick tick)
     {
@@ -245,21 +272,51 @@ public class TickHistoryWriter : IDisposable
         Count++;
     }
 
+    // [ MarketByOrder | bidOrders[] | askOrders[] ] must be in this format
+    public void WriteMarketByOrder(Span<byte> bytes)
+    {
+        ref MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(bytes);
+
+        byte[] rented = _byteArrayPool.Rent(mbo.SizeOf());   // snapshots are MBs: rent, not stackalloc
+        Span<byte> copy = rented.AsSpan(0, mbo.SizeOf());
+        bytes.Slice(0, copy.Length).CopyTo(copy);
+
+        EnsureHeader(mbo.TickHeader.ExchangeTimestamp);
+
+        _mbob.Apply(copy);
+
+        TickHistory.DeltaMarketByOrder(ref _tomorrow, copy);
+        _compressionStream.Write(copy);
+        _byteArrayPool.Return(rented);
+        Count++;
+    }
+
     private void WriteSnapshot(Timestamp timestamp)
     {
-        if (TickHistory.TickType != TickType.MarketByPrice)
-            return;
+        if (TickHistory.TickType == TickType.MarketByPrice)
+        {
+            byte[] bytes = _byteArrayPool.Rent(MarketByPrice.SizeOf(_mpb64.BidsCount, _mpb64.AsksCount));
+            ref MarketByPrice mbp = ref _mpb64.CopyToSnapshot(0, bytes);
 
-        byte[] bytes = _byteArrayPool.Rent(MarketByPrice.SizeOf(_mpb64.BidsCount, _mpb64.AsksCount));
-        _mpb64.CopyToSnapshot(0, bytes);
-        ref MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(bytes.AsSpan());
-
-        Span<byte> src = bytes.AsSpan(0, mbp.SizeOf());
-        mbp.TickHeader.ExchangeTimestamp = timestamp;
-        mbp.TickHeader.SendingTimestamp = timestamp;
-        mbp.TickHeader.NicTimestamp = timestamp;
-        WriteMarketByPrice(src);
-        _byteArrayPool.Return(bytes);
+            Span<byte> src = bytes.AsSpan(0, mbp.SizeOf());
+            mbp.TickHeader.ExchangeTimestamp = timestamp;
+            mbp.TickHeader.SendingTimestamp = timestamp;
+            mbp.TickHeader.NicTimestamp = timestamp;
+            WriteMarketByPrice(src);
+            _byteArrayPool.Return(bytes);
+        }
+        else if (TickHistory.TickType == TickType.MarketByOrder)
+        {
+            byte[] bytes = _byteArrayPool.Rent(MarketByOrder.SizeOf(_mbob.BidsCount, _mbob.AsksCount));
+            ref MarketByOrder mbo = ref _mbob.CopyToSnapshot(0, bytes);
+            
+            Span<byte> src = bytes.AsSpan(0, mbo.SizeOf());
+            mbo.TickHeader.ExchangeTimestamp = timestamp;
+            mbo.TickHeader.SendingTimestamp = timestamp;
+            mbo.TickHeader.NicTimestamp = timestamp;
+            WriteMarketByOrder(src);
+            _byteArrayPool.Return(bytes);
+        }
     }
 
     private void EnsureHeader(Timestamp timestamp)
@@ -273,26 +330,26 @@ public class TickHistoryWriter : IDisposable
                 Ticks = 0,
                 Quantity = 0,
                 ExchangeTimestamp = timestamp.Date,
-                Version = 1,
+                PriorityId = 0,
                 PositionOfTomorrow = -1,
             };
             TickHistory.WriteHeader(_fileStream, _today);
             _tomorrow = _today;
             _tomorrow.PositionOfYesterday = _today.Position;
             _tomorrow.Position = -1;
-            _compressionStream = new CompressionStream(_fileStream, TickHistory.Compressor);
         }
         else if (timestamp.Date > _tomorrow.ExchangeTimestamp.Date)
         {
             WriteTomorrowHeader(timestamp.Date);
         }
+        _compressionStream ??= new CompressionStream(_fileStream, TickHistory.Compressor);
     }
 
     private void WriteTomorrowHeader(Timestamp date)
     {
-        // finalize yesterday block
-        _compressionStream.Flush();
-        _compressionStream.Dispose();
+        // finalize yesterday block (null after a resume: nothing was written, nothing to finalize)
+        _compressionStream?.Flush();
+        _compressionStream?.Dispose();
 
         _today.PositionOfTomorrow = _fileStream.Position;
         long fsPosition = _fileStream.Position;
@@ -309,6 +366,7 @@ public class TickHistoryWriter : IDisposable
 
         _compressionStream = new CompressionStream(_fileStream, TickHistory.Compressor);
         WriteSnapshot(date);
+        _compressionStream.Flush(); // load-bearing: closes the snapshot block at the same boundary Dispose does, so a resume rollover overwrites it byte-identically (Spec.md, TickHistoryWriter crash safety)
     }
 
     private object _lock = new object();
@@ -326,9 +384,11 @@ public class TickHistoryWriter : IDisposable
 
                 _compressionStream?.Flush();
                 _compressionStream?.Dispose();
+                if (Count > 0)
+                    _fileStream.SetLength(_fileStream.Position);   // drop the stale tail when a resumed session shrank the trailing block
                 _fileStream?.Flush();
                 _fileStream?.Dispose();
-
+                _mbob.Dispose();
                 if (deleteFile)
                     File.Delete(TickHistory.FilePath);
                 else
@@ -404,6 +464,7 @@ public class TickHistoryReader : IDisposable
 
     public ref Tick ReadTick(Span<byte> dst) => ref TickHistory.ReadTick(ref _today, dst);
     public ref MarketByPrice ReadMarketByPrice(Span<byte> dst) => ref TickHistory.ReadMarketByPrice(_decompressionStream, ref _today, dst);
+    public ref MarketByOrder ReadMarketByOrder(Span<byte> dst) => ref TickHistory.ReadMarketByOrder(_decompressionStream, ref _today, dst);
 
 
 }
@@ -566,6 +627,26 @@ public class TickHistory
         DeltaHeader(ref tickHistoryHeader, ref settlement.TickHeader);
     }
 
+    // 48 bits: PriorityId occupies bytes 2-7 of Order's packed word (byte 0 side, byte 1 action)
+    private const ulong PriorityId48Mask = (1UL << 48) - 1;
+
+    internal static void RestorePriorityId(ref TickHistoryHeader tickHistoryHeader, ref Order order)
+    {
+        ref ulong packed = ref Unsafe.As<Order, ulong>(ref order);
+        ulong priorityId = (tickHistoryHeader.PriorityId + (packed >> 16)) & PriorityId48Mask;
+        tickHistoryHeader.PriorityId = priorityId;
+        packed = (priorityId << 16) | (packed & 0xFFFF);
+    }
+
+    internal static void DeltaPriorityId(ref TickHistoryHeader tickHistoryHeader, ref Order order)
+    {
+        ref ulong packed = ref Unsafe.As<Order, ulong>(ref order);
+        ulong priorityId = packed >> 16;
+        ulong delta = (priorityId - tickHistoryHeader.PriorityId) & PriorityId48Mask;
+        tickHistoryHeader.PriorityId = priorityId;
+        packed = (delta << 16) | (packed & 0xFFFF);
+    }
+
     internal static void DeltaMarketByPrice(ref TickHistoryHeader tickHistoryHeader, Span<byte> bytes)
     {
         ref MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(bytes);
@@ -588,6 +669,34 @@ public class TickHistory
             for (int i = 0; i < asks.Length; i++)
             {
                 DeltaLevel(ref tickHistoryHeader, ref asks[i]);
+            }
+        }
+    }
+
+    internal static void DeltaMarketByOrder(ref TickHistoryHeader tickHistoryHeader, Span<byte> bytes)
+    {
+        ref MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(bytes);
+
+        // First, write the header deltas
+        DeltaHeader(ref tickHistoryHeader, ref mbo.TickHeader);
+
+        {
+            // Bids
+            Span<Order> bids = mbo.BidsAsSpan(bytes);
+            for (int i = 0; i < bids.Length; i++)
+            {
+                DeltaPriorityId(ref tickHistoryHeader, ref bids[i]);
+                DeltaLevel(ref tickHistoryHeader, ref bids[i].Level);
+            }
+        }
+
+        {
+            // Asks come after all bids
+            Span<Order> asks = mbo.AsksAsSpan(bytes);
+            for (int i = 0; i < asks.Length; i++)
+            {
+                DeltaPriorityId(ref tickHistoryHeader, ref asks[i]);
+                DeltaLevel(ref tickHistoryHeader, ref asks[i].Level);
             }
         }
     }
@@ -619,6 +728,14 @@ public class TickHistory
         return ref mbp;
     }
 
+    internal ref MarketByOrder ReadMarketByOrder(DecompressionStream decompressionStream, ref TickHistoryHeader dayHeader, Span<byte> dst)
+    {
+        ref MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(dst);
+        TickHistory.ReadExact(decompressionStream, dst.Slice(Unsafe.SizeOf<MarketByOrder>(), mbo.SizeOfOrders()));
+        TickHistory.RestoreMarketByOrder(ref dayHeader, dst);
+        return ref mbo;
+    }
+
     internal static void RestoreMarketByPrice(ref TickHistoryHeader tickHistoryHeader, Span<byte> bytes)
     {
         ref MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(bytes);
@@ -636,6 +753,28 @@ public class TickHistory
         for (int i = 0; i < asksSpan.Length; i++)
         {
             RestoreLevel(ref tickHistoryHeader, ref asksSpan[i]);
+        }
+    }
+
+    internal static void RestoreMarketByOrder(ref TickHistoryHeader tickHistoryHeader, Span<byte> bytes)
+    {
+        ref MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(bytes);
+
+        // First, expand the header deltas back to absolute timestamps
+        RestoreTickHeader(ref tickHistoryHeader, ref mbo.TickHeader);
+
+        Span<Order> bidsSpan = mbo.BidsAsSpan(bytes);
+        for (int i = 0; i < bidsSpan.Length; i++)
+        {
+            RestorePriorityId(ref tickHistoryHeader, ref bidsSpan[i]);
+            RestoreLevel(ref tickHistoryHeader, ref bidsSpan[i].Level);
+        }
+
+        Span<Order> asksSpan = mbo.AsksAsSpan(bytes);
+        for (int i = 0; i < asksSpan.Length; i++)
+        {
+            RestorePriorityId(ref tickHistoryHeader, ref asksSpan[i]);
+            RestoreLevel(ref tickHistoryHeader, ref asksSpan[i].Level);
         }
     }
 
@@ -696,6 +835,13 @@ public class TickHistory
             bytesRead = ReadExact(decompressionStream, dst.Slice(sizeOfTickHeader, sizeOfMarketByPrice - sizeOfTickHeader));
             ref MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(dst);
             return mbp.SizeOf();
+        }
+        else if (tickHeader.TickType == TickType.MarketByOrderUpdate || tickHeader.TickType == TickType.MarketByOrderSnapshot)
+        {
+            int sizeOfMarketByOrder = Unsafe.SizeOf<MarketByOrder>();
+            bytesRead = ReadExact(decompressionStream, dst.Slice(sizeOfTickHeader, sizeOfMarketByOrder - sizeOfTickHeader));
+            ref MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(dst);
+            return mbo.SizeOf();
         }
         else
         {

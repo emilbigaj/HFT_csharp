@@ -30,8 +30,19 @@ public class InstrumentSimulator
     public int _bidMask = 0;
     public int _askMask = 0;
     private MarketByPrice64 _marketByPrice64 = new MarketByPrice64();
-
+    private readonly MarketByPriceByOrder _marketByPriceByOrder = new MarketByPriceByOrder();
+    private readonly ArrayList<Level> _marketByPriceByOrderBidsChanged = new ArrayList<Level>(64);
+    private readonly ArrayList<Level> _marketByPriceByOrderAsksChanged = new ArrayList<Level>(64);
     public ref MarketByPrice64 MarketByPrice64 => ref _marketByPrice64;
+
+    // Ahead-blob seeding: full-depth totals when MBO data drives this instrument (aggregation non-empty), the windowed book otherwise
+    internal int GetMarketQuantity(Side side, int ticks)
+    {
+        SideByPriceByOrder sideByPriceByOrder = _marketByPriceByOrder.GetSide(side);
+        if (sideByPriceByOrder.OrdersCount > 0)
+            return sideByPriceByOrder.GetQuantity(ticks);
+        return side == Side.Buy ? _marketByPrice64.GetBidQuantity(ticks) : _marketByPrice64.GetAskQuantity(ticks);
+    }
 
     public int InstrumentId { get; }
 
@@ -44,6 +55,9 @@ public class InstrumentSimulator
         _minClientOrderId = new ulong[ExchangeSimulator.ServerSimulator.ServerHeader.ClientIds.Length];
         Buys = new OrderManager(this, Side.Buy);
         Sells = new OrderManager(this, Side.Sell);
+
+        _marketByPriceByOrder.Bids.Changed += OnBidChanged;
+        _marketByPriceByOrder.Asks.Changed += OnAskChanged;
 
         if (instrumentDetails.Sessions.Length > 0)
         {
@@ -66,12 +80,38 @@ public class InstrumentSimulator
 
     }
 
+    private void OnBidChanged(Level level)
+    {
+        for (int i = 0; i < _marketByPriceByOrderBidsChanged.Count; i++)
+        {
+            if (_marketByPriceByOrderBidsChanged[i].Ticks == level.Ticks)
+            {
+                _marketByPriceByOrderBidsChanged[i] = level;   // aggregate: last total per level wins
+                return;
+            }
+        }
+        _marketByPriceByOrderBidsChanged.Add(level);
+    }
+    private void OnAskChanged(Level level)
+    {
+        for (int i = 0; i < _marketByPriceByOrderAsksChanged.Count; i++)
+        {
+            if (_marketByPriceByOrderAsksChanged[i].Ticks == level.Ticks)
+            {
+                _marketByPriceByOrderAsksChanged[i] = level;   // aggregate: last total per level wins
+                return;
+            }
+        }
+        _marketByPriceByOrderAsksChanged.Add(level);
+    }
     protected ulong _fillId { get; set; } = 0;
 
     private int _minMaskBid = int.MaxValue;
     private int _maxMaskAsk = int.MinValue;
 
     private bool _inOnMarketByPrice = false;
+    private bool _inOnMarketByOrder = false;
+
     public void OnMarketByPrice(in MarketByPrice mbp, ReadOnlySpan<byte> src)
     {
         _inOnMarketByPrice = true;
@@ -93,6 +133,73 @@ public class InstrumentSimulator
             OnMarketByPriceUpdate(in mbp, src);
         }
         _inOnMarketByPrice = false;
+    }
+
+    public void OnMarketByOrder(in MarketByOrder mbo, ReadOnlySpan<byte> src)
+    {
+        _inOnMarketByOrder = true;
+        if (mbo.TickHeader.TickType == TickType.MarketByOrderSnapshot)
+        {
+            // hooks stay silent (Clear does not report removals); the derived snapshot diffs through the MBP path instead
+            _marketByPriceByOrder.ApplySnapshot(src);
+
+            int size = _marketByPriceByOrder.MarketByPriceSizeOf(SideByPrice64.Capacity);
+            byte[] rented = ExchangeSimulator.ByteArrayPool.Rent(size);
+            ref MarketByPrice snapshot = ref _marketByPriceByOrder.CopyToMarketByPriceSnapshot(InstrumentId, rented.AsSpan(0, size), SideByPrice64.Capacity);
+            OnMarketByPrice(in snapshot, rented.AsSpan(0, size));
+            ExchangeSimulator.ByteArrayPool.Return(rented);
+        }
+        else
+        {
+            // events first: marker -> trades -> exact queue deltas; the level update publishes last so AddGhost reads pre-trade totals
+            OnMarketByOrder(in mbo, mbo.BidsAsSpan(src), Buys);
+            OnMarketByOrder(in mbo, mbo.AsksAsSpan(src), Sells);
+
+            _marketByPriceByOrderBidsChanged.Clear();
+            _marketByPriceByOrderAsksChanged.Clear();
+            _marketByPriceByOrder.Apply(src);
+            OnMarketByPriceByOrderChangedLevels(in mbo.TickHeader);
+        }
+        _inOnMarketByOrder = false;
+    }
+
+    // Synthesizes the historical level update and feeds it to OnMarketByPrice, so the changed levels run
+    // the full MBP pipeline: TrySet deltas, crossing, mask overlay, TicksRemoved restore, user overlay, publish.
+    private void OnMarketByPriceByOrderChangedLevels(in TickHeader header)
+    {
+        Span<byte> span = stackalloc byte[MarketByPrice.SizeOf(_marketByPriceByOrderBidsChanged.Count, _marketByPriceByOrderAsksChanged.Count)];
+        ref MarketByPrice update = ref MemoryMarshal.AsRef<MarketByPrice>(span);
+        update = new MarketByPrice(TickType.MarketByPriceUpdate, InstrumentId, header.ExchangeTimestamp, header.SendingTimestamp, header.NicTimestamp, _marketByPriceByOrderBidsChanged.Count, _marketByPriceByOrderAsksChanged.Count);
+        Span<Level> bids = update.BidsAsSpan(span);
+        for (int i = 0; i < _marketByPriceByOrderBidsChanged.Count; i++) bids[i] = _marketByPriceByOrderBidsChanged[i];
+        Span<Level> asks = update.AsksAsSpan(span);
+        for (int i = 0; i < _marketByPriceByOrderAsksChanged.Count; i++) asks[i] = _marketByPriceByOrderAsksChanged[i];
+        OnMarketByPrice(in update, span);
+    }
+
+    private void OnMarketByOrder(in MarketByOrder mbo, ReadOnlySpan<Order> orders, OrderManager orderManager)
+    {
+        for (int i = 0; i < orders.Length; i++)
+        {
+            ref readonly Order order = ref orders[i];
+            Buys.OnPriorityId(order.PriorityId);
+            Sells.OnPriorityId(order.PriorityId);
+
+            switch (order.OrderAction)
+            {
+                case MarketByOrderAction.Add:
+                    orderManager.OnMarketByPriceByOrderDelta(order.PriorityId, order.Level.Ticks, +order.Level.Quantity);
+                    break;
+                case MarketByOrderAction.Reduce:
+                case MarketByOrderAction.Cancel:
+                    orderManager.OnMarketByPriceByOrderDelta(order.PriorityId, order.Level.Ticks, -order.Level.Quantity);
+                    break;
+                case MarketByOrderAction.Trade:
+                    Trade trade = new Trade(InstrumentId, mbo.TickHeader.ExchangeTimestamp, mbo.TickHeader.SendingTimestamp, mbo.TickHeader.NicTimestamp, order.Level.Ticks, order.Level.Quantity, (sbyte)order.Side);
+                    OnTrade(ref trade);   // masks + opposite-side queue fills + trade prints to clients, unchanged
+                    break;
+            }
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -146,7 +253,8 @@ public class InstrumentSimulator
             _asks.Add(ask);
             if (_marketByPrice64.TrySetAskQuantity(ask.Ticks, ask.Quantity, out int delta))
             {
-                Sells.OnMarketByPriceDelta(ask.Ticks, delta);
+                if (!_inOnMarketByOrder)   // MBO queues were fed exact per-event deltas; level deltas would double-count
+                    Sells.OnMarketByPriceDelta(ask.Ticks, delta);
             }
         }
         ReadOnlySpan<Level> marketBids = update.BidsAsSpan(src);
@@ -155,7 +263,8 @@ public class InstrumentSimulator
             _bids.Add(bid);
             if (_marketByPrice64.TrySetBidQuantity(bid.Ticks, bid.Quantity, out int delta))
             {
-                Buys.OnMarketByPriceDelta(bid.Ticks, delta);
+                if (!_inOnMarketByOrder)   // MBO queues were fed exact per-event deltas; level deltas would double-count
+                    Buys.OnMarketByPriceDelta(bid.Ticks, delta);
             }
         }
 
@@ -385,7 +494,7 @@ public class InstrumentSimulator
 
     protected void UpdateMarketByPrice()
     {
-        if (_inOnMarketByPrice)
+        if (_inOnMarketByPrice || _inOnMarketByOrder)   // the end-of-message synthetic update republishes; a mid-walk republish can remove a queue node the trade path still holds a ref to
             return;
 
         Span<byte> src = stackalloc byte[MarketByPrice.SizeOf(0, 0)];
@@ -439,7 +548,7 @@ public class InstrumentSimulator
                     Console.WriteLine($"        ExecutionSimulator.Take.Fill({orderState.OrderHeader.OrderId}, {signedFillQuantity}, {level.Ticks})");
                 }
 
-                Update(ref orderState, orderProfile, signedFillQuantity, OrderStateReason.PartialFill);
+                Update(ref orderState, orderProfile, signedFillQuantity, OrderStateReason.Fill);
                 ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, level.Ticks, signedFillQuantity, FillType.Taker);
                 workingQuantity -= signedFillQuantity;
                 if (ExchangeSimulator.MaskTaken)
@@ -460,7 +569,7 @@ public class InstrumentSimulator
         if (!found)
             throw new InvalidOperationException($"ExecutionSimulator({InstrumentDetails.Symbol}) can not Make Fill for ClientOrderId {clientOrderId}. GlobalOrderIndex is occupied by ClientOrderId {orderState.OrderHeader.OrderId}.");
 
-        Update(ref orderState, orderState.OrderProfile, quantityFilled, OrderStateReason.PartialFill);
+        Update(ref orderState, orderState.OrderProfile, quantityFilled, OrderStateReason.Fill);
         ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, ticks, quantityFilled, FillType.Maker);
     }
 
@@ -543,36 +652,26 @@ public class InstrumentSimulator
         orderState.OrderProfile = orderProfile;
         orderState.QuantityFilled += quantityFilled;
         orderState.OrderHeader.ExchangeTimestamp = Clock.Now;
+        // Keep what the caller said: the reason is WHY this state is being published — a fill stays
+        // Fill whether or not it completes the order (Done/Active carries that), a rest/amend stays
+        // Acked, so RiskLayer's ack path never runs on fills.
+        orderState.OrderStateReason = orderStateReason;
 
         // A cancel is terminal regardless of how much filled. Everything else is terminal only once
         // CumQty reaches OrderQty — which, now that a cancel no longer rewrites OrderQty, can only
         // mean a genuine complete fill.
         bool isDone = orderStateReason >= OrderStateReason.Canceled || orderState.OrderProfile.Quantity == orderState.QuantityFilled;
+        orderState.OrderStateStatus = isDone ? OrderStateStatus.Done : OrderStateStatus.Active;
 
-        if (isDone)
+        if (orderState.OrderHeader.OrderId == Debug.OrderId)
         {
-            orderState.OrderStateStatus = OrderStateStatus.Done;
-            orderState.OrderStateReason = orderStateReason == OrderStateReason.PartialFill ? OrderStateReason.Filled : orderStateReason;
-            if (orderState.OrderHeader.OrderId == Debug.OrderId)
-            {
-                Console.WriteLine($"        ExecutionSimulator.Update.Done({orderStateReason})");
-            }
+            Console.WriteLine($"        ExecutionSimulator.Update.{(isDone ? "Done" : "Active")}({orderStateReason})");
         }
-        else
-        {
-            if (orderState.OrderHeader.OrderId == Debug.OrderId)
-            {
-                Console.WriteLine($"        ExecutionSimulator.Update.Active");
-            }
-            orderState.OrderStateStatus = OrderStateStatus.Active;
-            // Keep what the caller said: the reason is WHY this state is being published, so a fill
-            // that leaves quantity working stays PartialFill and a rest/amend stays Acked.
-            // Hardcoding Acked here made PartialFill unreachable, and made RiskLayer run its ack
-            // path on every partial fill — releasing the order's reservation a second time on top
-            // of OnFill.
-            orderState.OrderStateReason = orderStateReason;
-        }
-        ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_OrderState(in orderState);
+
+        // A fill's state rides inside its Fill entry (see FromExchangeToNicToClient_Fill) so the
+        // server applies the pair atomically; every other state change still travels alone.
+        if (orderStateReason != OrderStateReason.Fill)
+            ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_OrderState(in orderState);
         UpdateMarketByPrice();
     }
 
@@ -650,8 +749,11 @@ public class InstrumentSimulator
             OrderManager orderManager = orderState.OrderProfile.Side == Side.Sell ? Sells : Buys;
             OrderProfile stateProfile = orderState.OrderProfile;
 
-            // Just cancel and skip other checks
-            if (orderTarget.OrderTargetAction == OrderTargetAction.Cancel || targetProfile.Quantity == orderState.QuantityFilled)
+            // Just cancel and skip other checks. An amend downsizing total quantity to at or below
+            // the filled quantity is a cancel of the remainder, never a reject — Globex in-flight
+            // mitigation. The amend's quantity is never applied: the terminal state keeps the order's
+            // own profile (see the FIX-shape comment in Delete), exactly as CME reports it.
+            if (orderTarget.OrderTargetAction == OrderTargetAction.Cancel || targetProfile.Sign * (targetProfile.Quantity - orderState.QuantityFilled) <= 0)
             {
                 if (orderState.OrderHeader.OrderId == Debug.OrderId)
                 {
@@ -681,17 +783,6 @@ public class InstrumentSimulator
                 }
                 orderRejectedReasons.Set((int)OrderRejectedReason.SideNotValid);
             }
-
-            if (targetProfile.Sign * (targetProfile.Quantity - orderState.QuantityFilled) < 0)
-            {
-                if (orderState.OrderHeader.OrderId == Debug.OrderId)
-                {
-                    Console.WriteLine($"ExecutionSimulator.Target.Found(InvalidOrderProfile)");
-                }
-                orderRejectedReasons.Set((int)OrderRejectedReason.QuantityNotValid);
-            }
-
-
 
             if (!orderRejectedReasons.IsEmpty)
                 return orderState;
@@ -827,6 +918,11 @@ public class ExchangeSimulator
     public void OnMarketByPrice(in MarketByPrice mbp, ReadOnlySpan<byte> src)
     {
         _instrumentSimulators[mbp.TickHeader.InstrumentId].OnMarketByPrice(in mbp, src);
+    }
+
+    public void OnMarketByOrder(in MarketByOrder mbo, ReadOnlySpan<byte> src)
+    {
+        _instrumentSimulators[mbo.TickHeader.InstrumentId].OnMarketByOrder(in mbo, src);
     }
 
     public void OnTick(ref Tick tick)
@@ -1015,6 +1111,8 @@ public class ServerSimulator
         // Fires once per instrument, on first allocation, before any client is attached to it.
         _server.AllocateInstrument += OnServerAllocateInstrument;
 
+        InstrumentDetails.GetLeg = leg => _instrumentDetailsBySymbol[leg.Symbol];
+
         Clock.Interject += OnInterject;
         Clock.TickTock += OnTickTock;
 
@@ -1066,7 +1164,9 @@ public class ServerSimulator
             Console.WriteLine($"                ExecutionSimulator.FromExchangeToNic_Fill(ClientOrderId: {orderState.OrderHeader.OrderId}, FillId: {fillId}, Ticks: {ticks}, Quantity: {quantity}, FillType: {fillType})");
         }
 
-        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<Fill>() + Unsafe.SizeOf<Timestamp>());
+        // One ER, one entry: the fill and the state it produced travel together, so Server.OnFill
+        // applies the pair atomically under the position locks (no torn position/filled reads).
+        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<Fill>() + Unsafe.SizeOf<OrderState>() + Unsafe.SizeOf<Timestamp>());
         ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
         nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
         dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
@@ -1086,6 +1186,10 @@ public class ServerSimulator
             FillType = fillType,
             OrderProfile = new(ticks, quantity),
         };
+
+        ref OrderState pairedOrderState = ref MemoryMarshal.AsRef<OrderState>(dst.Slice(Unsafe.SizeOf<Fill>()));
+        pairedOrderState = orderState;
+        pairedOrderState.OrderHeader.NicTimestamp = nicTimestamp;
     }
     public void FromExchangeToNicToClient_OrderState(in OrderState orderState)
     {
@@ -1164,6 +1268,7 @@ public class ServerSimulator
 
     private readonly HashMap<string, InstrumentDetails> _instrumentDetailsBySymbol = new HashMap<string, InstrumentDetails>();
     private readonly HashMap<int, InstrumentDetails> _instrumentDetailsByInstrumentHeaderId = new HashMap<int, InstrumentDetails>();
+    private readonly HashMap<string, int> _instrumentHeaderIdBySymbol = new HashMap<string, int>();
 
 
     public void OnInstrumentDetails(InstrumentDetails instrumentDetails)
@@ -1172,6 +1277,7 @@ public class ServerSimulator
         {
             int instrumentHeaderId = _instrumentDetailsByInstrumentHeaderId.Count;
             _instrumentDetailsByInstrumentHeaderId.TryAdd(instrumentHeaderId, instrumentDetails);
+            _instrumentHeaderIdBySymbol.TryAdd(instrumentDetails.Symbology.Symbol, instrumentHeaderId);
 
             InstrumentHeader128 header128 = default;
             ref InstrumentHeader header = ref Unsafe.As<InstrumentHeader128, InstrumentHeader>(ref header128);
@@ -1196,17 +1302,24 @@ public class ServerSimulator
             }
             else if (instrumentDetails.InstrumentType == InstrumentType.Spread)
             {
-                // Legs are the source of truth; InstrumentDetails.SpreadHeader resolves them to the
-                // header's fixed long/short pair so that interpretation lives in exactly one place.
-                SpreadHeader fromDetails = instrumentDetails.SpreadHeader;
-                ref SpreadHeader spread = ref Unsafe.As<InstrumentHeader128, SpreadHeader>(ref header128);
-                spread.Multiplier = instrumentDetails.Multiplier;
-                spread.ShortMaturityDate = fromDetails.ShortMaturityDate;
-                spread.ShortMaturityType = fromDetails.ShortMaturityType;
-                spread.LongMaturityDate = fromDetails.LongMaturityDate;
-                spread.LongMaturityType = fromDetails.LongMaturityType;
-                spread.ShortInstrumentId = -1;
-                spread.LongInstrumentId = -1;
+                // Legs are the source of truth. They registered before this spread (the Symbology
+                // build above already resolved them via GetLeg), so reference them by header id.
+                ref LeggedHeader leggedHeader = ref Unsafe.As<InstrumentHeader128, LeggedHeader>(ref header128);
+                leggedHeader.Multiplier = instrumentDetails.Multiplier;
+
+                System.Collections.Generic.List<(Leg Leg, InstrumentDetails Details)> legDetailsList = instrumentDetails.GetLegDetails();
+                if (legDetailsList.Count > 6)
+                    throw new NotSupportedException($"{instrumentDetails.Symbol}: {legDetailsList.Count} legs exceeds LeggedHeader capacity of 6.");
+
+                leggedHeader.LegCount = legDetailsList.Count;
+                for (int legIndex = 0; legIndex < legDetailsList.Count; legIndex++)
+                {
+                    leggedHeader.Legs[legIndex] = new LegHeader
+                    {
+                        InstrumentHeaderId = _instrumentHeaderIdBySymbol[legDetailsList[legIndex].Details.Symbology.Symbol],
+                        Weight = legDetailsList[legIndex].Leg.Weight,
+                    };
+                }
             }
             _server.OnInstrumentHeader(in header128);
             foreach(InstrumentDetail instrumentDetail in instrumentDetails.Schedule)
@@ -1302,7 +1415,8 @@ public class ServerSimulator
                     break;
                 case (byte)OrderType.Fill:
                     Fill fill = MemoryMarshal.Read<Fill>(src);
-                    _server.OnFill(ref fill);
+                    OrderState fillOrderState = MemoryMarshal.Read<OrderState>(src.Slice(Unsafe.SizeOf<Fill>()));
+                    _server.OnFill(ref fillOrderState, ref fill);
                     break;
                 case (byte)OrderType.AheadOfOrder:
                     ref readonly AheadOfOrder aheadOfOrder = ref MemoryMarshal.AsRef<AheadOfOrder>(src);
