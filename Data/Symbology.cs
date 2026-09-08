@@ -75,44 +75,31 @@ public class Symbology
 
         if (instrumentType == InstrumentType.Future)
         {
-            return new FutureSymbology(exchange, root, ParseMaturityToken(remainder));
+            return new FutureSymbology(exchange, root, Timestamp.FromString(remainder, "yyyy-MM-dd"));
         }
         else if (instrumentType == InstrumentType.Spread)
         {
-            // Signed leg tokens "±[n]<Date>": root appears once, legs maturity-ascending.
+            // Signed leg tokens "±[n]<Date>": root appears once, legs maturity-ascending. Parsed
+            // blindly assuming the format is correct — the ISO date is the fixed-width (10) END of
+            // the token, the digits between the sign and the date are the optional weight
+            // magnitude ("+22026-07-31" = weight 2); anything malformed throws on its own.
             List<Symbology> symbologies = new List<Symbology>();
             List<int> weights = new List<int>();
             foreach (string legToken in remainder.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
-                int sign = legToken[0] == '+' ? 1 : legToken[0] == '-' ? -1 : throw new FormatException($"Spread leg \"{legToken}\" must start with '+' or '-'.");
-
-                // The ISO date is fixed-width (10) at the token's END; the digits between the sign
-                // and the date are the optional weight magnitude ("+22026-07-31" = weight 2).
-                // Fixed-width is what keeps the grammar unambiguous with no maturity letter
-                // separating magnitude from date.
-                if (legToken.Length < 11)
-                    throw new FormatException($"Spread leg \"{legToken}\" must end with a yyyy-MM-dd date.");
-                string dateText = legToken[^10..];
+                int sign = legToken[0] == '-' ? -1 : 1;
                 int magnitude = 0;
                 for (int index = 1; index < legToken.Length - 10; index++)
                 {
-                    if (char.IsAsciiDigit(legToken[index]))
-                        magnitude = magnitude * 10 + (legToken[index] - '0');
+                    magnitude = magnitude * 10 + (legToken[index] - '0');
                 }
-                symbologies.Add(new FutureSymbology(exchange, root, ParseMaturityToken(dateText)));
+                symbologies.Add(new FutureSymbology(exchange, root, Timestamp.FromString(legToken[^10..], "yyyy-MM-dd")));
                 weights.Add(sign * Math.Max(magnitude, 1));
             }
             return new SpreadSymbology(exchange, root, symbologies, weights);
         }
 
         throw new NotSupportedException($"FromString does not yet support InstrumentType {instrumentType}.");
-    }
-
-    // Token is a bare ISO date, "2025-12-15". Anything else (legacy maturity-type letters
-    // included) fails loudly in Timestamp.FromString — catalogs get migrated, not tolerated.
-    private static Timestamp ParseMaturityToken(string token)
-    {
-        return Timestamp.FromString(token, "yyyy-MM-dd");
     }
 
     public override string ToString() => Symbol;
