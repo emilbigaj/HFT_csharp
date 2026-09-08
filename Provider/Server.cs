@@ -484,6 +484,27 @@ public class Server : IDisposable
         if (clientId >= serverHeader.ClientIds.Length)
             throw new ArgumentOutOfRangeException(nameof(clientId), "Server.OnInstrumentAllocated: clientId out of range");
 
+        // Spread ⇒ legs: a spread's legs must exist BEFORE the spread — CreateInstrument resolves
+        // them and throws otherwise. Each leg is fully client-allocated too (the client tracks leg
+        // positions and fills), but only the SPREAD — the instrument the client asked for — echoes
+        // an admin reply: the client's GetInstrument handshake reads exactly one. See Spec.md.
+        ref InstrumentHeader128 header128 = ref _serverContext.GetInstrumentHeader(allocateInstrument.InstrumentHeaderId).GetRef();
+        if (header128.AsInstrumentHeader().InstrumentType == InstrumentType.Spread)
+        {
+            AllocateInstrument allocateLegInstrument = allocateInstrument;
+            ref LeggedHeader leggedHeader = ref header128.AsLegged();
+            foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
+            {
+                allocateLegInstrument.InstrumentHeaderId = legHeader.InstrumentHeaderId;
+                OnAllocateInstrument(clientId, ref allocateLegInstrument, writeAdminReply: false);
+            }
+        }
+
+        OnAllocateInstrument(clientId, ref allocateInstrument, writeAdminReply: true);
+    }
+
+    private void OnAllocateInstrument(int clientId, ref AllocateInstrument allocateInstrument, bool writeAdminReply)
+    {
         int instrumentId = OnAllocateInstrument(ref allocateInstrument);
 
         _serverContext.AllocateInstrument(clientId, instrumentId);
@@ -496,7 +517,8 @@ public class Server : IDisposable
         int coreGroupId = _serverContext.GetInstrument(instrumentId).Header.CoreGroupId;
         _clientIdsByCoreGroupId[coreGroupId].AtomicSet(clientId);
 
-        WriteToAdmin(clientId, in allocateInstrument);
+        if (writeAdminReply)
+            WriteToAdmin(clientId, in allocateInstrument);
 
         // After the work, not before: on entry InstrumentId is still -1 and Symbol is empty.
         Console.WriteLine($"{ServerName}::OnAllocateInstrument()\n{allocateInstrument}");
@@ -504,57 +526,85 @@ public class Server : IDisposable
         AllocateInstrument?.Invoke(allocateInstrument);
     }
 
-    public Fill OnFill(ref OrderState orderState, ref Fill fill)
+    // One fill event: the order's resulting state plus its fills — a single fill whose instrument
+    // matches the order's for an outright, one per leg (OrderId.InstrumentId rewritten to the leg)
+    // for a spread. The fills' position rows take the fills; the RISK release stays on the ORDER's
+    // instrument in order units — that is where ValidateOrder reserved — sized by the state-merge
+    // delta, so a state that fails to apply releases nothing. Requires an order's legs to share the
+    // order's CoreGroup owner thread.
+    public void OnFill(ref OrderState orderState, Span<Fill> fills)
     {
-        ref readonly OrderState existingOrderState = ref _serverContext.GetOrderState(fill.OrderHeader.OrderId).GetReadonlyRef();
+        ref readonly OrderState existingOrderState = ref _serverContext.GetOrderState(orderState.OrderHeader.OrderId).GetReadonlyRef();
 
-        if (existingOrderState.OrderHeader.OrderId != fill.OrderHeader.OrderId)
-            throw new ArgumentOutOfRangeException(nameof(fill), "Server.OnFill: unknown clientOrderId");
+        if (existingOrderState.OrderHeader.OrderId != orderState.OrderHeader.OrderId)
+            throw new ArgumentOutOfRangeException(nameof(orderState), "Server.OnFill: unknown clientOrderId");
 
-        // Identity (ClientId/StrategyId/InstrumentId) is packed inside ClientOrderId, and the equality
-        // check above guarantees it matches the state's - no re-stamping needed.
-        fill.OrderHeader.NicTimestamp = Clock.Now;
+        Timestamp now = Clock.Now;
+        foreach (ref Fill fill in fills)
+        {
+            // Leg ids differ from the order's only in the InstrumentId bits, so GlobalIndex (client +
+            // local slot) is the belongs-to-this-order check plain id equality can no longer be.
+            if (fill.OrderHeader.OrderId.GlobalIndex != orderState.OrderHeader.OrderId.GlobalIndex)
+                throw new ArgumentOutOfRangeException(nameof(fills), "Server.OnFill: fill does not belong to the order");
+            fill.OrderHeader.NicTimestamp = now;
+        }
 
-        int strategyId = fill.OrderHeader.OrderId.StrategyId;
-        int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
+        int strategyId = orderState.OrderHeader.OrderId.StrategyId;
 
-        Instrument instrument = _serverContext.GetInstrument(instrumentId);
-
-        double multiplier = instrument.Multiplier;
-        double tickSize = instrument.TickSize;
-
-        // Global Update
-        ref SharedArrayEntry<PositionHeader> serverPositionHeaderEntry = ref _serverContext.GetPositionHeader(instrumentId);
-        ref PositionHeader serverPosition = ref serverPositionHeaderEntry.GetRef();
-
-        ref SharedArrayEntry<PositionHeader> localPositionHeaderEntry = ref _serverContext.GetPositionHeader(strategyId, instrumentId);
-        ref PositionHeader localPosition = ref localPositionHeaderEntry.GetRef();
-
-        // Fill is now atomic - no torn orderstate, position reads by client. WriteOrderState, not
-        // OnOrderState: row write + ledger only — the forward and callback run after release below.
-        serverPositionHeaderEntry.AcquireLock();
-        localPositionHeaderEntry.AcquireLock();
+        // Fill is atomic - no torn orderstate/position reads by clients. Acquire in fills order,
+        // server row before local row per instrument: single-writer makes this a mirror convention,
+        // not deadlock avoidance. WriteOrderState, not OnOrderState: row write + ledger only — the
+        // forwards and callbacks run after release below.
+        foreach (ref readonly Fill fill in fills)
+        {
+            int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
+            _serverContext.GetPositionHeader(instrumentId).AcquireLock();
+            _serverContext.GetPositionHeader(strategyId, instrumentId).AcquireLock();
+        }
 
         WriteOrderState(ref orderState);
-        serverPosition.OnFill(in fill, tickSize, multiplier);
-        localPosition.OnFill(in fill, tickSize, multiplier);
-        _riskLayer.OnFill(in fill);
 
-        localPositionHeaderEntry.ReleaseLock();
-        serverPositionHeaderEntry.ReleaseLock();
+        // A leg fill IS an outright fill: its instrument, quantity (spread qty × weight) and sign are
+        // the leg's, so RiskLayer.OnFill releases the leg's own reservation directly — same as an
+        // outright. Raw fill quantity, not a state delta: per-fill releases + the Done remainder
+        // telescope to exactly the reserved worst, per leg.
+        foreach (ref readonly Fill fill in fills)
+        {
+            int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
+            Instrument instrument = _serverContext.GetInstrument(instrumentId);
+            _serverContext.GetPositionHeader(instrumentId).GetRef().OnFill(in fill, instrument.Multiplier);
+            _serverContext.GetPositionHeader(strategyId, instrumentId).GetRef().OnFill(in fill, instrument.Multiplier);
+            // A legged instrument's own fill is accounting only (volume/position view on the spread
+            // row); risk lives on the legs, so releasing it here would double-release the legs the
+            // leg fills already covered. Risk is an outright concept.
+            if (!instrument.IsLegged)
+                _riskLayer.OnFill(in fill);
+        }
 
+        for (int i = fills.Length - 1; i >= 0; i--)
+        {
+            int instrumentId = fills[i].OrderHeader.OrderId.InstrumentId;
+            _serverContext.GetPositionHeader(strategyId, instrumentId).ReleaseLock();
+            _serverContext.GetPositionHeader(instrumentId).ReleaseLock();
+        }
 
-
-        int coreGroupId = instrument.Header.CoreGroupId;
+        int coreGroupId = _serverContext.GetInstrument(orderState.OrderHeader.OrderId.InstrumentId).Header.CoreGroupId;
         WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
-        WriteToExecution(strategyId, coreGroupId, in fill);
-        WriteToExecution(strategyId, coreGroupId, in localPosition);
+        foreach (ref readonly Fill fill in fills)
+        {
+            WriteToExecution(strategyId, coreGroupId, in fill);
+            WriteToExecution(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, fill.OrderHeader.OrderId.InstrumentId).GetRef());
+        }
 
-        WriteToAudit(coreGroupId, in fill);
-        WriteToAudit(coreGroupId, in serverPosition);
+        foreach (ref readonly Fill fill in fills)
+        {
+            WriteToAudit(coreGroupId, in fill);
+            WriteToAudit(coreGroupId, in _serverContext.GetPositionHeader(fill.OrderHeader.OrderId.InstrumentId).GetRef());
+        }
+
         OrderState?.Invoke(in existingOrderState);
-        Fill?.Invoke(in fill);
-        return fill;
+        foreach (ref readonly Fill fill in fills)
+            Fill?.Invoke(in fill);
     }
 
     public void OnTrade(in Trade trade)

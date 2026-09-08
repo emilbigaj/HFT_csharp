@@ -455,12 +455,22 @@ public abstract class Context
     private bool _lock;
     private void CreateInstrument(int instrumentId)
     {
+        // Materialize a spread's legs BEFORE taking the non-reentrant lock: the Spread branch below
+        // resolves them via GetInstrument, which must hit the cache, not re-enter CreateInstrument.
+        int instrumentHeaderId = GetInstrumentHeaderIdByInstrumentId(instrumentId).Read();
+        if (GetInstrumentHeader(instrumentHeaderId).GetReadonlyRef().AsInstrumentHeader().InstrumentType == InstrumentType.Spread)
+        {
+            // Value copy via GetReadonlyRef: clients open headers read-only, GetRef would throw.
+            LeggedHeader leggedHeader = GetInstrumentHeader(instrumentHeaderId).GetReadonlyRef().AsLegged();
+            foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
+                GetInstrument(GetInstrumentId(legHeader.InstrumentHeaderId));
+        }
+
         using RAIISpinLock spinLock = new(ref _lock);
         if (_instruments[instrumentId] != null)
         {
             return;
         }
-        int instrumentHeaderId = GetInstrumentHeaderIdByInstrumentId(instrumentId).Read();
         ref SharedArrayEntry<InstrumentHeader128> header128Entry = ref GetInstrumentHeader(instrumentHeaderId);
         InstrumentHeader instrHeader = header128Entry.GetReadonlyRef().AsInstrumentHeader();
 
@@ -473,7 +483,7 @@ public abstract class Context
         }
         else if (instrHeader.InstrumentType == InstrumentType.Spread)
         {
-            ref LeggedHeader leggedHeader = ref header128Entry.GetRef().AsLegged();
+            ref readonly LeggedHeader leggedHeader = ref header128Entry.GetReadonlyRef().AsLegged();
 
             // Legs reference sibling headers; long = the positive-weight leg (2-leg spreads for now).
             Future longLeg = null!;
@@ -481,8 +491,10 @@ public abstract class Context
             foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
             {
                 Future legFuture = (GetInstrument(GetInstrumentId(legHeader.InstrumentHeaderId)) as Future)!;
-                if (legHeader.Weight > 0) longLeg = legFuture;
-                else shortLeg = legFuture;
+                if (legHeader.Weight > 0)
+                    longLeg = legFuture;
+                else if (legHeader.Weight < 0)
+                    shortLeg = legFuture;
             }
 
             instrument = new Spread(header128Entry.Cast<LeggedHeader>(), mbpEntry, longLeg, shortLeg);

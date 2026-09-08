@@ -148,6 +148,26 @@ public class RiskLayer
         return orderRejectedReasons;
     }
 
+    // Aggregates are per LEG (an outright is its own single leg, weight +1). Applies an ORDER-unit
+    // magnitude delta (negative = release) to each leg's side of exposure. legSide = orderSide ×
+    // sign(weight) — the sign is applied exactly ONCE, here; signing anywhere else squares it away
+    // and drives the short aggregate positive (see Spec.md).
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ApplyWorstWorkingQuantityDelta(OrderId orderId, int orderSideSign, int magnitudeDelta)
+    {
+        if (magnitudeDelta == 0)
+            return;
+
+        foreach (InstrumentLeg leg in _serverContext.GetInstrument(orderId.InstrumentId).Legs)
+        {
+            int legSide = orderSideSign * Math.Sign(leg.Weight);
+            int legMagnitudeDelta = magnitudeDelta * Math.Abs(leg.Weight);
+            ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(leg.InstrumentId).GetRef();
+            riskLimit.WorstLongWorkingQuantity += legSide > 0 ? legMagnitudeDelta : 0;
+            riskLimit.WorstShortWorkingQuantity -= legSide < 0 ? legMagnitudeDelta : 0;
+        }
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void OnOrderState(in OrderState orderState, int beforeAckedOrderQuantity)
     {
@@ -163,13 +183,8 @@ public class RiskLayer
             orderRisk.Ack(orderState.OrderProfile.Quantity);
             int worstOrderQuantityAfter = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
             int worstOrderQuantityDelta = (worstOrderQuantityAfter - worstOrderQuantityBefore);
-            
-            if (worstOrderQuantityDelta == 0)
-                return;   
 
-            ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(orderState.OrderHeader.OrderId.InstrumentId).GetRef();
-            riskLimit.WorstLongWorkingQuantity += worstOrderQuantityDelta * (side == Side.Buy ? 1 : 0);
-            riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? -1 : 0);
+            ApplyWorstWorkingQuantityDelta(orderState.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, worstOrderQuantityDelta);
         }
         else if (orderState.OrderStateStatus == OrderStateStatus.Done)
         {
@@ -181,12 +196,7 @@ public class RiskLayer
 
             orderRisk = default;
 
-            if (released == 0)
-                return;
-
-            ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(orderState.OrderHeader.OrderId.InstrumentId).GetRef();
-            riskLimit.WorstLongWorkingQuantity -= released * (side == Side.Buy ? 1 : 0);
-            riskLimit.WorstShortWorkingQuantity -= released * (side == Side.Sell ? -1 : 0);
+            ApplyWorstWorkingQuantityDelta(orderState.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, -released);
         }
     }
 
@@ -197,10 +207,7 @@ public class RiskLayer
         if (_orderRejectedSource != OrderRejectedSource.Server)
             return;
 
-        Side side = fill.OrderProfile.Side;
-        ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(fill.OrderHeader.OrderId.InstrumentId).GetRef();
-        riskLimit.WorstLongWorkingQuantity -= fill.OrderProfile.Quantity * (side == Side.Buy ? 1 : 0);
-        riskLimit.WorstShortWorkingQuantity -= fill.OrderProfile.Quantity * (side == Side.Sell ? 1 : 0);
+        ApplyWorstWorkingQuantityDelta(fill.OrderHeader.OrderId, fill.Sign, -Math.Abs(fill.Quantity));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -221,12 +228,7 @@ public class RiskLayer
         int worstOrderQuantityAfter = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
         int worstOrderQuantityDelta = worstOrderQuantityAfter - worstOrderQuantityBefore;
 
-        if (worstOrderQuantityDelta == 0)
-            return;   
-
-        ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(orderRejected.OrderHeader.OrderId.InstrumentId).GetRef();
-        riskLimit.WorstLongWorkingQuantity += worstOrderQuantityDelta * (side == Side.Buy ? 1 : 0);
-        riskLimit.WorstShortWorkingQuantity += worstOrderQuantityDelta * (side == Side.Sell ? -1 : 0);
+        ApplyWorstWorkingQuantityDelta(orderRejected.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, worstOrderQuantityDelta);
     }
 
 
@@ -239,6 +241,7 @@ public class RiskLayer
 
             // 1. Basic Bounds Check
             int instrumentId = orderTarget.OrderHeader.OrderId.InstrumentId;
+            Instrument instrument = _serverContext.GetInstrument(instrumentId);
             int strategyId = orderTarget.OrderHeader.OrderId.StrategyId;
             int clientId = orderTarget.OrderHeader.OrderId.ClientId;
 
@@ -347,30 +350,27 @@ public class RiskLayer
             // Only check risk on New or Amend (increasing size)
             if (!isCancel)
             {
-                ref RiskLimit riskLimit = ref _serverContext.GetRiskLimit(instrumentId).GetRef();
-
-
                 int quantityFilled = orderState.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId ? orderState.QuantityFilled : 0;
-
                 int workingQuantity = orderTarget.OrderProfile.Quantity - quantityFilled;
-                int absWorkingQuantity = Math.Abs(workingQuantity);
 
-                // Max Order Quantity
-                if (absWorkingQuantity > riskLimit.MaxOrderQuantity)
+                // Max order quantity per leg, in LEG units — before TryAdd, so rejects need no back-out.
+                foreach (InstrumentLeg leg in instrument.Legs)
                 {
-                    orderRejectedReasons.Set((int)OrderRejectedReason.QuantityExceedsRiskLimit);
-                    return false;                   
+                    if (Math.Abs(workingQuantity * leg.Weight) > _serverContext.GetRiskLimit(leg.InstrumentId).GetReadonlyRef().MaxOrderQuantity)
+                    {
+                        orderRejectedReasons.Set((int)OrderRejectedReason.QuantityExceedsRiskLimit);
+                        return false;
+                    }
                 }
 
-
-
                 int ackedOrderQuantity = orderTarget.OrderTargetAction == OrderTargetAction.Create ? 0 : orderState.OrderProfile.Quantity;
-                
+
                 ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderTarget.OrderHeader.OrderId).GetRef();
 
                 if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
                     orderRisk = new OrderRisk();
 
+                // The ONE pre-verdict mutation, with its first-class inverse (Reject) on any breach.
                 int sign = orderTarget.OrderProfile.Sign;
                 int worstQuantityFilledBefore = orderRisk.GetAbsWorstOrderQuantity(ackedOrderQuantity);
                 if (!orderRisk.TryAdd(orderTarget.OrderProfile.Quantity, out OrderRejectedReason reason))
@@ -378,31 +378,32 @@ public class RiskLayer
                     orderRejectedReasons.Set((int)reason);
                     return false;
                 }
+                int worstMagnitudeDelta = orderRisk.GetAbsWorstOrderQuantity(ackedOrderQuantity) - worstQuantityFilledBefore;
 
-                int worstQuantityFilledAfter = orderRisk.GetAbsWorstOrderQuantity(ackedOrderQuantity);
-                int worstWorkingQuantityDelta = (worstQuantityFilledAfter - worstQuantityFilledBefore) * sign;
-
-                //branchless
-                int worstLongWorkingQuantity = riskLimit.WorstLongWorkingQuantity + worstWorkingQuantityDelta * (sign == 1 ? 1 : 0);
-                int worstShortWorkingQuantity = riskLimit.WorstShortWorkingQuantity + worstWorkingQuantityDelta * (sign == -1 ? 1 : 0);
-
-
-                Position serverPosition = _serverContext.GetPosition(instrumentId);
-                int quantity = serverPosition.PositionHeader.GetReadonlyRef().Quantity;
-                int worstLongQuantity = quantity + worstLongWorkingQuantity;
-                int worstShortQuantity = quantity + worstShortWorkingQuantity;
-                
-                bool isRiskLimitExceeded = sign > 0 ? worstLongQuantity > riskLimit.MaxPositionQuantity : worstShortQuantity < -riskLimit.MaxPositionQuantity;
-                if (isRiskLimitExceeded)
+                // Phase 1 — pure: check every leg, write nothing. The magnitude delta is >= 0, so
+                // legDelta's sign IS the leg's side — routing by the ORDER's sign corrupts every
+                // negative-weight leg (buy calendar reserves the back leg SHORT, not long).
+                foreach (InstrumentLeg leg in instrument.Legs)
                 {
-                    orderRisk.Reject(orderTarget.OrderProfile.Quantity);
-                    orderRejectedReasons.Set((int)OrderRejectedReason.PositionExceedsRiskLimit);
+                    int legDelta = worstMagnitudeDelta * sign * leg.Weight;
+                    ref readonly RiskLimit riskLimit = ref _serverContext.GetRiskLimit(leg.InstrumentId).GetReadonlyRef();
+                    int quantity = _serverContext.GetPosition(leg.InstrumentId).PositionHeader.GetReadonlyRef().Quantity;
+
+                    bool isRiskLimitExceeded = legDelta >= 0
+                        ? quantity + riskLimit.WorstLongWorkingQuantity + legDelta > riskLimit.MaxPositionQuantity
+                        : quantity + riskLimit.WorstShortWorkingQuantity + legDelta < -riskLimit.MaxPositionQuantity;
+
+                    if (isRiskLimitExceeded)
+                    {
+                        orderRisk.Reject(orderTarget.OrderProfile.Quantity);
+                        orderRejectedReasons.Set((int)OrderRejectedReason.PositionExceedsRiskLimit);
+                        return false;
+                    }
                 }
-                else
-                {
-                    riskLimit.WorstLongWorkingQuantity = worstLongWorkingQuantity;
-                    riskLimit.WorstShortWorkingQuantity = worstShortWorkingQuantity;
-                }
+
+                // Phase 2 — commit through the same arithmetic the release hooks use. Single-writer:
+                // nothing can change between the phases, so check-then-apply is atomic by ownership.
+                ApplyWorstWorkingQuantityDelta(orderTarget.OrderHeader.OrderId, sign, worstMagnitudeDelta);
             }
         }
         catch(Exception ex)

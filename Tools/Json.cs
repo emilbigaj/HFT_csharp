@@ -89,6 +89,9 @@ public static class Json
 
             // Output format
             WriteIndented = true,                // flat (no pretty-print)
+            // Default encoder escapes HTML/URL-sensitive ASCII ('+' becomes the u002B escape); our
+            // JSON goes to consoles and data files, never web pages. Old escaped files parse fine.
+            Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
 
             // Include/exclude behavior
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, // omit nulls on write

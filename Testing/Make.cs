@@ -10,19 +10,19 @@ using Tools;
 
 namespace Testing;
 
-public sealed class TestingAlgo : Algo
+public sealed class Make : Algo
 {
     public Future Lead { get; }
     public Future Friend { get; }
 
-    public TestingAlgo(Position position, Client client, Future lead, Future friend) : base(client, position)
+    public Make(Position position, Client client, Future lead, Future friend) : base(client, position)
     {
         Lead = lead;
         Friend = friend;
     }
 
     public static bool s_exit = false;
-    static TestingAlgo()
+    static Make()
     {
         Console.CancelKeyPress += (sender, e) =>
         {
@@ -53,7 +53,7 @@ public sealed class TestingAlgo : Algo
         StackList<Target> targets = new StackList<Target>(stackalloc Target[64]);
         int pos = GetPositionQuantity();
 
-        if (Instrument.TryGetQuote(out Quote inst))
+        if (Position.TryGetQuote(out Quote inst))
         {
             double pc = inst.MidPrice * 0.00;
             int spread = Instrument.RoundToTicks(pc);

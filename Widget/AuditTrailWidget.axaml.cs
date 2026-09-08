@@ -382,7 +382,7 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
                     return true;
                 case OrderType.Fill:
                     var fill = Json.Deserialize<Fill>(json);
-                    widgetAudit = new WidgetOrderAudit(instrument!, fill.OrderHeader, (int)OrderType.Fill, (int)fill.FillType, fill.OrderProfile.Quantity, ticks: fill.OrderProfile.Ticks);
+                    widgetAudit = new WidgetOrderAudit(instrument!, fill.OrderHeader, (int)OrderType.Fill, (int)fill.FillType, fill.Quantity, price: fill.Price);
                     return true;
                 case OrderType.Position:
                     var pos = Json.Deserialize<PositionHeader>(json);

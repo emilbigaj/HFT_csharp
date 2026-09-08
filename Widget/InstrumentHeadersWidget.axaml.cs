@@ -278,13 +278,15 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         DataContext = this;
 
         LoadAllHeaders();
+
+        // Before the view: setting Filter refreshes synchronously, which runs FilterRow.
+        _columnRegexFilters = new ColumnRegexFilters<WidgetInstrumentHeader>(HeadersGrid, s_columnText, () => _view?.Refresh());
+
         _view = new DataGridCollectionView(_allHeaders)
         {
             Filter = FilterRow
         };
         HeadersGrid.ItemsSource = _view;
-
-        _columnRegexFilters = new ColumnRegexFilters<WidgetInstrumentHeader>(HeadersGrid, s_columnText, () => _view?.Refresh());
 
         HeadersGrid.PointerMoved += (s, e) => _lastPointerPos = e.GetPosition(HeadersGrid);
 

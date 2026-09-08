@@ -612,7 +612,7 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
             try
             {
                 Fill fill = Tools.Json.Deserialize<Fill>(line);
-                filld = new Filld(fill.OrderHeader.ExchangeTimestamp, fill.OrderProfile.Ticks, fill.OrderProfile.Quantity, fill.FillType);
+                filld = new Filld(fill.OrderHeader.ExchangeTimestamp, fill.Price, fill.Quantity, fill.FillType);
                 return true;
             }
             catch

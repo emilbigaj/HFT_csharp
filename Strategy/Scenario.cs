@@ -4,6 +4,7 @@ using Provider;
 using System.Threading;
 using Strategy;
 using System;
+using System.Linq;
 using System.Runtime.Versioning;
 using Execution;
 using Simulator;
@@ -63,6 +64,42 @@ public class Scenario
         riskLimit.MaxPositionQuantity = maxPositionQuantity;
         riskLimit.Timestamp = Clock.Now;
         ServerSimulator!.ServerContext.GetRiskLimit(instrument.InstrumentId).Write(in riskLimit);
+    }
+
+    public Spread GetSpread(string exchange, string root, Timestamp longMaturity, Timestamp shortMaturity)
+    {
+        AddProductSearch(exchange, root);
+
+        Context context = ContextManager.ServerContext;
+
+        String8 _exchange = new String8(exchange);
+        String8 _root = new String8(root);
+        foreach (var header128 in context.EnumerateInstrumentHeaders())
+        {
+            Console.WriteLine(header128.AsInstrumentHeader().InstrumentType);
+            if (header128.AsInstrumentHeader().InstrumentType != InstrumentType.Spread)
+                continue;
+            ref LeggedHeader leggedHeader = ref header128.AsLegged();
+            if (leggedHeader.InstrumentHeader.Exchange == _exchange && leggedHeader.InstrumentHeader.Root == _root)
+            {
+                LegHeader longLeg = default, shortLeg = default;
+                foreach (LegHeader leg in leggedHeader.Legs)
+                {
+                    if (leg.Weight > 0)
+                        longLeg = leg;
+                    else if (leg.Weight < 0)
+                        shortLeg = leg;
+                }
+
+                ref readonly FutureHeader @longLegHeader = ref context.GetInstrumentHeader(longLeg.InstrumentHeaderId).GetReadonlyRef().AsFuture();
+                ref readonly FutureHeader @shortLegHeader = ref context.GetInstrumentHeader(shortLeg.InstrumentHeaderId).GetReadonlyRef().AsFuture();
+                if (longLegHeader.MaturityDate >= longMaturity && shortLegHeader.MaturityDate >= shortMaturity)
+                {
+                    return (Client.GetInstrument(leggedHeader.InstrumentHeader.InstrumentHeaderId) as Spread)!;
+                }
+            }
+        }
+        return default!;
     }
 
     public Future GetFuture(string exchange, string root, Timestamp maturity, int[]? months = null)

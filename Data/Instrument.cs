@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text.Json.Serialization;
 using System.Threading;
 using Socket;
 using Tools;
@@ -158,6 +159,10 @@ public struct LegHeader
     public int Weight;
 }
 
+// A resolved leg for risk decomposition: instrument id + signed weight. 8 bytes, so a full 6-leg
+// view fits in one cache line; ids not Instrument refs — the risk loops only need the id.
+public readonly record struct InstrumentLeg(int InstrumentId, int Weight);
+
 
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -185,6 +190,7 @@ public struct LeggedHeader
     // Live legs, maturity-ascending — same invariant as the ticker. Clamped: LegCount comes from
     // shared memory, and CreateSpan does no validation.
     [UnscopedRef]
+    [JsonIgnore]   // derived view over Leg0..Leg5 — the leg fields are the serialized payload
     public Span<LegHeader> Legs => MemoryMarshal.CreateSpan(ref Leg0, Math.Clamp(LegCount, 0, 6));
 
     // Legs reference sibling headers by id; the context hooks this, like InstrumentDetails.GetLeg.
@@ -348,6 +354,13 @@ public abstract class Instrument
     public int TicKDecimals { get; }
     public double Multiplier { get; protected set; } = 1.0;
 
+    // Legs view for risk decomposition: an outright is its own single leg (weight +1); a Spread
+    // overwrites with its resolved legs. Frozen at construction — header identity is immutable.
+    protected InstrumentLeg[] _legs;
+    public ReadOnlySpan<InstrumentLeg> Legs => _legs;
+    // > 1: every instrument is its own single leg (base ctor); legged means legs BEYOND itself.
+    public bool IsLegged => _legs.Length > 1;
+
     protected Instrument(SharedArrayEntry<InstrumentHeader128> headerEntry, SharedArrayEntry<MarketByPrice64> mbpEntry)
     {
         _mbpEntry = mbpEntry;
@@ -355,6 +368,7 @@ public abstract class Instrument
         _quote = new Quote() { TickSize = TickSize };
         TicKDecimals = Tools.Tools.GetNumberOfDecimalPlaces(TickSize);
         Symbology = headerEntry.GetReadonlyRef().Symbology;
+        _legs = [new InstrumentLeg(InstrumentId, 1)];
     }
 
     // --- Core HFT Helpers ---
@@ -441,8 +455,8 @@ public sealed class Forex : Instrument
     }
 }
 
-// === SPREAD ===
-public sealed class Spread : Future
+/// === SPREAD ===
+public sealed class Spread : Instrument
 {
     public MaturityType LongMaturityType => Long.MaturityType;
     public Timestamp LongMaturityDate => Long.MaturityDate;
@@ -457,9 +471,14 @@ public sealed class Spread : Future
 
 
     public Spread(SharedArrayEntry<LeggedHeader> headerEntry, SharedArrayEntry<MarketByPrice64> mbpEntry, Future @long, Future @short)
-        : base(headerEntry.Cast<FutureHeader>(), mbpEntry)
+        : base(headerEntry.Cast<InstrumentHeader128>(), mbpEntry)
     {
         Long = @long;
         Short = @short;
+
+        // Resolve the legged header's (headerId, weight) pairs to instrument ids via the leg
+        // instruments in hand; LegCount 0 = legacy header, default calendar weights.
+        LeggedHeader leggedHeader = SpreadHeader;
+        _legs = [new InstrumentLeg(@long.InstrumentId, 1), new InstrumentLeg(@short.InstrumentId, -1)];
     }
 }

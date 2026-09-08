@@ -35,6 +35,34 @@ public class TestingStrategy : Strategy.Strategy
         TickTocker tickTocker = new TickTocker(DirectoryPath, 1_000, OnTickTock);
         TickTocker mstickTocker = new TickTocker(DirectoryPath, 1_00, OnMS100Timestamp);
 
+        TickTock += timestamp =>
+        {
+            double totalProfit = 0;
+            bool _valid = false;
+            foreach (Position position in _positions)
+            {
+                bool valid = double.IsFinite(position.Profit.Total);
+                totalProfit += valid ? position.Profit.Total : 0;
+                _valid |= valid;
+            }
+            if (_valid)
+                _profit.Append(new Point(timestamp, totalProfit));
+
+            foreach (KeyValuePair<string, List<Position>> kvp in _positionsByRoot)
+            {
+                bool valid = false;
+                double rootProfit = 0;
+                foreach (Position position in kvp.Value)
+                {
+                    bool positionValid = double.IsFinite(position.Profit.Total);
+                    rootProfit += positionValid ? position.Profit.Total : 0;
+                    valid |= positionValid;
+                }
+                if (valid)
+                    _profitByRoot[kvp.Key].Append(new Point(timestamp, rootProfit));
+            }
+
+        };
     }
     protected Action<Timestamp>? MS100;
     private void OnMS100Timestamp(Timestamp timestamp)
@@ -63,9 +91,9 @@ public class TestingStrategy : Strategy.Strategy
             return;
         Position position = GetPosition(future);
 
-        OnPosition(position);
+        OnPosition(position: position);
 
-        TestingAlgo executionAlgo = new TestingAlgo(position, Client, lead, friend);
+        Make executionAlgo = new Make(position, Client, lead, friend);
 
         
         // Hook up the flush handler. This fires automatically when ReadSocket() hits its Dispose().
@@ -107,37 +135,39 @@ public class TestingStrategy : Strategy.Strategy
 
         Series<Point> total = NewSeries(position.Instrument.Symbology + " Profit", ref TickTock!, ()=> position.Profit.Total);
 
-        TickTock += timestamp =>
-        {
-            double totalProfit = 0;
-            bool _valid = false;
-            foreach (Position position in _positions)
-            {
-                bool valid = double.IsFinite(position.Profit.Total);
-                totalProfit += valid ? position.Profit.Total : 0;
-                _valid |= valid;
-            }
-            if (_valid)
-                _profit.Append(new Point(timestamp, totalProfit));
-
-            foreach (KeyValuePair<string, List<Position>> kvp in _positionsByRoot)
-            {
-                bool valid = false;
-                double rootProfit = 0;
-                foreach (Position position in kvp.Value)
-                {
-                    bool positionValid = double.IsFinite(position.Profit.Total);
-                    rootProfit += positionValid ? position.Profit.Total : 0;
-                    valid |= positionValid;
-                }
-                if (valid)
-                    _profitByRoot[kvp.Key].Append(new Point(timestamp, rootProfit));
-            }
-
-        };
         
+           
+    }
 
 
+    public void OnSpread(Spread spread)
+    {
+        Future @long = (Future)spread.Long;
+        Future @short = (Future)spread.Short;
+
+        Position spreadPosition = GetPosition(spread);
+        OnPosition(spreadPosition);
+        Position longPosition = GetPosition(@long);
+        OnPosition(longPosition);
+        Position shortPosition = GetPosition(@short);
+        OnPosition(shortPosition);
+
+        MakeSpread make = new MakeSpread(spreadPosition, Client, @long, @short);
+        Exit exitLong = new Exit(Client, longPosition);
+        Exit exitShort = new Exit(Client, shortPosition);
+
+        spread.MarketByPriceChanged += () =>
+        {
+            make.Execute();
+        };
+        @long.QuoteChanged += () =>
+        {
+            //exitLong.Execute();
+        };
+        @short.QuoteChanged += () =>
+        {
+            //exitShort.Execute();
+        };
         
     }
 }

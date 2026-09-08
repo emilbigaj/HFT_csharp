@@ -23,13 +23,13 @@ public sealed class WidgetFill
     public string Symbol { get; }
     public string ShortSymbol { get; }
     public readonly Fill _fill;
-    public Side Side => (Side)Math.Sign(_fill.OrderProfile.Quantity);
+    public Side Side => _fill.Side;
     public ulong OrderId => _fill.OrderHeader.OrderId;
     public int InstrumentId => _fill.OrderHeader.OrderId.InstrumentId;
     public ulong FillId => _fill.FillId;
     public FillType FillType => _fill.FillType;
-    public int Ticks => _fill.OrderProfile.Ticks;
-    public int Quantity => _fill.OrderProfile.Quantity;
+    public double Price => _fill.Price;
+    public int Quantity => _fill.Quantity;
     public Timestamp ExchangeTimestamp => _fill.OrderHeader.ExchangeTimestamp;
     public Timestamp NicTimestamp => _fill.OrderHeader.NicTimestamp;
 
@@ -162,7 +162,7 @@ public sealed partial class FillsWidget : UserControl, IWidget, IDisposable
         try
         {
             Fill fill = Tools.Json.Deserialize<Fill>(line);
-            if (fill.OrderHeader.OrderId == 0 && fill.FillId == 0 && fill.OrderProfile.Quantity == 0) return false;
+            if (fill.OrderHeader.OrderId == 0 && fill.FillId == 0 && fill.Quantity == 0) return false;
 
             string symbol = "???";
             string shortSymbol = "???";

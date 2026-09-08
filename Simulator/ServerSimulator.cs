@@ -35,6 +35,14 @@ public class InstrumentSimulator
     private readonly ArrayList<Level> _marketByPriceByOrderAsksChanged = new ArrayList<Level>(64);
     public ref MarketByPrice64 MarketByPrice64 => ref _marketByPrice64;
 
+    public Quote GetQuote()
+    {
+        if (_marketByPrice64.BidsCount < 0 || _marketByPrice64.AsksCount < 0)
+            throw new InvalidOperationException("Invalid market state: negative bid or ask count.");
+        Quote quote = new(_marketByPrice64.BestBid, _marketByPrice64.BestAsk, InstrumentDetails.TickSize);
+        return quote;
+    }
+
     // Ahead-blob seeding: full-depth totals when MBO data drives this instrument (aggregation non-empty), the windowed book otherwise
     internal int GetMarketQuantity(Side side, int ticks)
     {
@@ -513,7 +521,9 @@ public class InstrumentSimulator
         {
             Console.WriteLine($"        ExecutionSimulator.Take(ClientOrderId: {orderState.OrderHeader.OrderId}, TargetTicks: {orderProfile.Ticks}, TargetQuantity: {orderProfile.Quantity}, WorkingQuantity: {workingQuantity})");
         }
-        if (!_marketByPrice64.IsCrossed)
+
+        // if market is cross its probably closed or in auction, so don't take any fills
+        if (_marketByPrice64.IsCrossed)
             return;
 
         int quantityTaken = 0;
@@ -902,6 +912,13 @@ public class ExchangeSimulator
     internal FastArrayPool<byte> ByteArrayPool = new FastArrayPool<byte>();
 
     private readonly InstrumentSimulator[] _instrumentSimulators;
+    public InstrumentSimulator GetInstrument(int instrumentId)
+    {
+        InstrumentSimulator instrumentSimulator = _instrumentSimulators[instrumentId];
+        if (instrumentSimulator == null)
+            throw new ArgumentOutOfRangeException(nameof(instrumentId));
+        return instrumentSimulator;
+    }
     private readonly ByteQueue _byExchangeTimestamp = new ByteQueue(64 * 4096);
 
     public DataSimulator DataSimulator { get; }
@@ -1164,33 +1181,80 @@ public class ServerSimulator
             Console.WriteLine($"                ExecutionSimulator.FromExchangeToNic_Fill(ClientOrderId: {orderState.OrderHeader.OrderId}, FillId: {fillId}, Ticks: {ticks}, Quantity: {quantity}, FillType: {fillType})");
         }
 
-        // One ER, one entry: the fill and the state it produced travel together, so Server.OnFill
-        // applies the pair atomically under the position locks (no torn position/filled reads).
-        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<Fill>() + Unsafe.SizeOf<OrderState>() + Unsafe.SizeOf<Timestamp>());
-        ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
-        nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
-        dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
-        ref Fill fill = ref MemoryMarshal.AsRef<Fill>(dst);
+        int instrumentId = orderState.OrderHeader.OrderId.InstrumentId;
+        Instrument instrument = ServerContext.GetInstrument(instrumentId);
 
+        // The order's own fill plus one per leg for a legged instrument. The order's own fill is the
+        // real fill for an outright, and the accounting/volume fill on the spread row for a spread.
+        int fillCount = 1 + (instrument.IsLegged ? instrument.Legs.Length : 0);
+
+        // One ER, one entry: [Timestamp][OrderState][Fill × fillCount]. OrderState leads so the
+        // release site dispatches on it; its OrderStateReason.Fill says trailing fills follow, and
+        // the entry length gives their count. Server.OnFill applies the whole set atomically.
         Timestamp exchangeTimestamp = Clock.Now;
-        fill = new Fill()
-        {
-            OrderHeader = new()
-            {
-                OrderId = orderState.OrderHeader.OrderId,
-                ExchangeTimestamp = exchangeTimestamp,
-                NicTimestamp = exchangeTimestamp.AddMicroseconds(FromExchangeToNicToClientLatency),
-                Seq = orderState.OrderHeader.Seq,
-            },
-            FillId = fillId,
-            FillType = fillType,
-            OrderProfile = new(ticks, quantity),
-        };
+        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<Timestamp>() + Unsafe.SizeOf<OrderState>() + fillCount * Unsafe.SizeOf<Fill>());
+        Timestamp nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
+        MemoryMarshal.AsRef<Timestamp>(dst) = nicTimestamp;
+        dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
 
-        ref OrderState pairedOrderState = ref MemoryMarshal.AsRef<OrderState>(dst.Slice(Unsafe.SizeOf<Fill>()));
+        ref OrderState pairedOrderState = ref MemoryMarshal.AsRef<OrderState>(dst);
         pairedOrderState = orderState;
         pairedOrderState.OrderHeader.NicTimestamp = nicTimestamp;
+
+        Span<Fill> fills = MemoryMarshal.Cast<byte, Fill>(dst.Slice(Unsafe.SizeOf<OrderState>()));
+
+        OrderId orderId = orderState.OrderHeader.OrderId;
+        int orderSeq = orderState.OrderHeader.Seq;
+        Timestamp fillNicTimestamp = nicTimestamp;
+
+        void emplaceFill(ref Fill fill, int legInstrumentId, double legPrice, int legQuantity)
+        {
+            // In-place over raw ring memory: run the field initializers or the wire type byte
+            // (Header) is recycled garbage and every downstream reader misdispatches.
+            OrderId legOrderId = orderId;
+            legOrderId.InstrumentId = legInstrumentId;
+            fill = new Fill()
+            {
+                OrderHeader = new()
+                {
+                    OrderId = legOrderId,
+                    ExchangeTimestamp = exchangeTimestamp,
+                    NicTimestamp = fillNicTimestamp,
+                    Seq = orderSeq,
+                },
+                FillId = fillId,
+                FillType = fillType,
+                Price = legPrice,
+                Quantity = legQuantity,
+            };
+        }
+
+        // fills[0]: the order's own fill (spread price/quantity for a spread — accounting only).
+        emplaceFill(ref fills[0], instrumentId, instrument.TicksToPrice(ticks), quantity);
+
+        // Leg fills — case by case, because each legged type prices its legs differently. Spread only.
+        if (instrument.IsLegged)
+        {
+            ReadOnlySpan<InstrumentLeg> legs = instrument.Legs;
+
+            // Anchor legs 1..N-1 at their own market mid (tick-aligned prices); derive leg 0 EXACTLY
+            // so Σ wᵢ·legPriceᵢ reproduces the traded spread price. The derived price is often finer
+            // than the leg's trading grid — that is why Fill carries a price, not ticks.
+            Span<double> legPrices = stackalloc double[legs.Length];
+            double residual = instrument.TicksToPrice(ticks);
+            for (int i = 1; i < legs.Length; i++)
+            {
+                Instrument anchorLeg = ServerContext.GetInstrument(legs[i].InstrumentId);
+                legPrices[i] = anchorLeg.RoundPrice(ExchangeSimulator.GetInstrument(legs[i].InstrumentId).GetQuote().MidPrice);
+                residual -= legs[i].Weight * legPrices[i];
+            }
+            legPrices[0] = residual / legs[0].Weight;
+
+            for (int i = 0; i < legs.Length; i++)
+                emplaceFill(ref fills[1 + i], legs[i].InstrumentId, legPrices[i], quantity * legs[i].Weight);
+        }
     }
+
     public void FromExchangeToNicToClient_OrderState(in OrderState orderState)
     {
         if (orderState.OrderHeader.OrderId == Debug.OrderId)
@@ -1413,18 +1477,23 @@ public class ServerSimulator
                     ref readonly Tick tick = ref MemoryMarshal.AsRef<Tick>(src);
                     _server.WriteToInstrumentData(in tick);
                     break;
-                case (byte)OrderType.Fill:
-                    Fill fill = MemoryMarshal.Read<Fill>(src);
-                    OrderState fillOrderState = MemoryMarshal.Read<OrderState>(src.Slice(Unsafe.SizeOf<Fill>()));
-                    _server.OnFill(ref fillOrderState, ref fill);
-                    break;
                 case (byte)OrderType.AheadOfOrder:
                     ref readonly AheadOfOrder aheadOfOrder = ref MemoryMarshal.AsRef<AheadOfOrder>(src);
                     _server.OnQuantityAhead(aheadOfOrder.ClientOrderId, aheadOfOrder.Quantity);
                     break;
                 case (byte)OrderType.OrderState:
                     OrderState orderState = MemoryMarshal.Read<OrderState>(src);
-                    _server.OnOrderState(ref orderState);
+                    if (orderState.OrderStateReason == OrderStateReason.Fill)
+                    {
+                        // A Fill state carries its fills in the same entry: the order's own fill plus
+                        // one per leg for a legged instrument. The entry length gives the count.
+                        Span<Fill> fills = MemoryMarshal.Cast<byte, Fill>(src.Slice(Unsafe.SizeOf<OrderState>()));
+                        _server.OnFill(ref orderState, fills);
+                    }
+                    else
+                    {
+                        _server.OnOrderState(ref orderState);
+                    }
                     break;
                 case (byte)OrderType.OrderRejected:
                     OrderRejected orderRejected = MemoryMarshal.Read<OrderRejected>(src);

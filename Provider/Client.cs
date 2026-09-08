@@ -258,12 +258,21 @@ public abstract class Client
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Instrument GetInstrument(int instrumendHeaderId)
     {
-        if (Context.TryGetInstrumentId(instrumendHeaderId, out int instrumentId))
+        if (Context.TryGetInstrumentId(instrumendHeaderId, out int instrumentId) && _instrumentData[instrumentId] != null)
+            return Context.GetInstrument(instrumentId);
+
+        // Legged header ⇒ onboard the legs first through this same entry (admin round-trip each,
+        // if needed). The early-return above makes it exactly-once: rolling with a spread whose
+        // leg is already traded onboards nothing twice. Header-based — the instrument may not
+        // exist yet — and runs on the allocated-but-not-onboarded path too.
+        if (Context.GetInstrumentHeader(instrumendHeaderId).GetReadonlyRef().AsInstrumentHeader().InstrumentType == InstrumentType.Spread)
         {
-            if (_instrumentData[instrumentId] != null)
-                return Context.GetInstrument(instrumentId);
+            LeggedHeader leggedHeader = Context.GetInstrumentHeader(instrumendHeaderId).GetReadonlyRef().AsLegged();
+            foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
+                GetInstrument(legHeader.InstrumentHeaderId);
         }
-        else
+
+        if (!Context.TryGetInstrumentId(instrumendHeaderId, out instrumentId))
         {
             ref readonly InstrumentHeader128 instrumentHeader = ref Context.GetInstrumentHeader(instrumendHeaderId).GetReadonlyRef();
             AllocateInstrument allocateInstrument = new AllocateInstrument()
@@ -504,7 +513,7 @@ public abstract class Client
         ExchangeTimestamp = fill.OrderHeader.ExchangeTimestamp;
         Position position = Context.GetPosition(fill.OrderHeader.OrderId.InstrumentId);
         int productGroupId = position.Instrument.ProductGroupId;
-        Context.GetMessageEfficiency(productGroupId).GetRef().OnFill(fill.OrderProfile.Quantity);
+        Context.GetMessageEfficiency(productGroupId).GetRef().OnFill(fill.Quantity);
         position.OnFill(fill);
         Fill?.Invoke(in fill);
     }

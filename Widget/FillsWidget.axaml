@@ -40,7 +40,7 @@
 				<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" Width="Auto" IsVisible="False"/>
 				<DataGridTextColumn Header="Side" Binding="{Binding Side}" Width="Auto"/>
 				<DataGridTextColumn Header="FillType" Binding="{Binding FillType}" Width="Auto"/>
-				<DataGridTextColumn Header="Ticks" Binding="{Binding Ticks}" Width="Auto"/>
+				<DataGridTextColumn Header="Price" Binding="{Binding Price}" Width="Auto"/>
 				<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity}" Width="Auto"/>
 				<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentId}" IsVisible="False" Width="Auto"/>
 				<DataGridTextColumn Header="OrderId" Binding="{Binding OrderId}" Width="Auto"/>

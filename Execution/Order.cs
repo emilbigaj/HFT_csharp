@@ -366,12 +366,29 @@ public struct OrderHeader
 [RegisterJson]
 public struct Fill()
 {
+    // 64 bytes; Price sits at offset 40 (4+28+8), naturally 8-aligned. Price is a PRICE, not
+    // ticks: spread leg fills are assigned at increments finer than the leg's trading grid (CME
+    // leg pricing), so a fill is a terminal price fact — never quantize it back to a grid.
     public Header<OrderType> Header = new(OrderType.Fill);
     public OrderHeader OrderHeader;
     public ulong FillId;
-    public OrderProfile OrderProfile;
+    public double Price;
+    public int Quantity;
     public FillType FillType;
-    private unsafe fixed byte _reserved[3];
+    private unsafe fixed byte _reserved[11];
+
+    public Side Side
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get { return (Side)Sign; }
+    }
+
+    public int Sign
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get { return Math.Sign(Quantity); }
+    }
+
     public override string ToString() => Json.Serialize(this);
 }
 
@@ -440,10 +457,10 @@ public struct PositionHeader()
 
     public override string ToString() => Json.Serialize(this);
 
-    public void OnFill(in Fill fill, double tickSize, double multiplier)
+    public void OnFill(in Fill fill, double multiplier)
     {
-        int quantity = fill.OrderProfile.Quantity;
-        double price = fill.OrderProfile.Ticks * tickSize;
+        int quantity = fill.Quantity;
+        double price = fill.Price;
         OrderHeader = fill.OrderHeader;
 
         int oldQty = Quantity;

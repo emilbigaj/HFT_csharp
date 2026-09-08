@@ -15,8 +15,8 @@ public class TestingScenario : Scenario
 {
     public override FileSystemPath ServerName { get; }
     public override FileSystemPath ClientName { get; }
-    public override FileSystemPath DefaultTickHistoryDirectoryPath { get; } = $"Z:\\TickHistory\\Deleted";
-    public override FileSystemPath DefaultInstrumentDetailsDirectoryPath { get; } = $"Z:\\InstrumentDetails\\Deleted";
+    public override FileSystemPath DefaultTickHistoryDirectoryPath { get; } = $"Z:\\TickHistory\\Databento";
+    public override FileSystemPath DefaultInstrumentDetailsDirectoryPath { get; } = $"Z:\\InstrumentDetails\\Databento";
 
     public TestingScenario(string name) : base(name)
     {
@@ -77,9 +77,17 @@ public class TestingScenario : Scenario
             Client.Context.AllocateProductGroupId(instrument, productGroup);
         };
 
+
+
+
         int[] months = new int[] { 3, 6, 9, 12 };
         if (CoreGroupName == CoreGroupId.SandP500)
         {
+            Spread spread = GetSpread("XCME", "MES", Clock.Now, Clock.Now);
+            strategy.OnSpread(spread);
+            return;
+
+
             FutureChain quoteChain = GetFutureChain("XCME", "MES", Clock.Now, months);
             foreach(Future quote in quoteChain.Futures)
             {
