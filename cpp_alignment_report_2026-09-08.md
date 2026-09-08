@@ -37,6 +37,30 @@ Everything in Part A/B is in service of those two facts.
 
 ---
 
+# AMENDMENT 2026-09-08 (later the same day): MaturityType is DELETED
+
+Supersedes every mention of MaturityType/ExpiryType below. C# removed the concept entirely because
+the type letter in file names broke lexical-order == maturity-order (all M-files sorted before any
+Q-file, so first-match instrument selection returned wrong contracts). MaturityDate alone
+identifies a contract.
+
+- **Delete the enum** (C++ still has `ExpiryType`) and the field from `FutureHeader` (it was the
+  tail byte after MaturityDate — removal does not shift other fields; glaze drops the key).
+  A7's rename instructions for MaturityType/ExpiryType are void; the MaturityDate rename stands.
+- **Ticker format**: `"ES 2025-12-15"` (bare ISO date, no letter). Spread legs: `"+2025-12-15"`,
+  weight magnitude between sign and date (`"+22025-12-15"` = weight 2). **Leg-token grammar: the
+  date is the fixed-width LAST 10 chars of the token; digits between sign and date are the
+  magnitude.** Do not scan digits left-to-right after the sign — the year is digits and the old
+  letter was the only delimiter (this bug shipped in C# and is fixed at Symbology.FromString).
+- **Parser tolerance**: a leading legacy letter on a maturity token is skipped and ignored
+  (unmigrated catalogs still load).
+- **InstrumentDetails**: no MaturityType property; the JSON key is gone from all migrated files.
+- **Catalogs migrated 2026-09-08**: `Z:\InstrumentDetails\Databento` (131,139 files renamed +
+  contents rewritten) and `Z:\TickHistory\Databento` (55,948 files renamed). NOT yet migrated:
+  Z:\TickHistory\Refinitiv, RefinitivNew, loose files at the InstrumentDetails root, CatalogTest —
+  and any symbol-named files on the LIVE server (positions/risklimits/fills), which the C++ side
+  must migrate the same way at its deploy.
+
 # Part A — wire structs, byte-for-byte (BLOCKING, do these first)
 
 ## A1. `Fill` — price is a double now (Execution/Order.hpp:271)

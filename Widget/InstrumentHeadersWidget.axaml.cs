@@ -109,7 +109,6 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
     public double Multiplier { get; private set; }
 
     public string MaturityDate { get; private set; } = "";
-    public string MaturityType { get; private set; } = "";
 
     // One display string per leg slot ("+ES Dec2025"); blank when the row has fewer legs.
     public string Leg0 { get; private set; } = "";
@@ -154,7 +153,7 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
         TradingStatus = header.TradingStatus.ToString();
 
         Multiplier = 1.0;
-        MaturityDate = ""; MaturityType = "";
+        MaturityDate = "";
         Leg0 = ""; Leg1 = ""; Leg2 = ""; Leg3 = ""; Leg4 = ""; Leg5 = "";
         BaseCurrency = ""; QuoteCurrency = "";
 
@@ -162,7 +161,6 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
         {
             ref readonly FutureHeader future = ref _header128.AsFuture();
             Multiplier = future.Multiplier;
-            MaturityType = future.MaturityType.ToString();
             MaturityDate = future.MaturityDate.NanosSinceEpoch > 0 ? future.MaturityDate.ToDateString() : "";
         }
         else if (instrumentType == Data.InstrumentType.Spread)
@@ -248,7 +246,6 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         ["InverseTickSize"] = r => r.InverseTickSize.ToString(),
         ["Multiplier"] = r => r.Multiplier.ToString(),
         ["MaturityDate"] = r => r.MaturityDate,
-        ["MaturityType"] = r => r.MaturityType,
         ["Leg0"] = r => r.Leg0,
         ["Leg1"] = r => r.Leg1,
         ["Leg2"] = r => r.Leg2,

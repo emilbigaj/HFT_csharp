@@ -132,7 +132,6 @@ namespace Simulator
                 Exchange = "XCME",
                 Root = "ES",
                 TickSize = 0.25,
-                MaturityType = MaturityType.Month,
                 MaturityDate = Timestamp.MaxValue
             };
 

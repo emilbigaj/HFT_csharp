@@ -122,7 +122,6 @@ public class InstrumentDetailsSearch
                 !instrumentDetails.Ticker.Equals(search.Ticker, StringComparison.OrdinalIgnoreCase))
                 return local;
 
-
             if (!string.IsNullOrWhiteSpace(search.Root) &&
                 !instrumentDetails.Root.Equals(search.Root, StringComparison.OrdinalIgnoreCase))
                 return local;
@@ -240,10 +239,6 @@ public sealed class InstrumentDetails
     //when dooes trading end? this is the date usually mislabelled "expiry"
     public Timestamp? LastTradeTimestamp { get; set; } = null;
 
-    // Does this belong to a maturity schedule (e.g. monthly, quarterly, etc.)?
-    // Some instruments have both say a monthly and daily maturity schedule and share a maturity date, so the schedule is needed to disambiguate.
-    public MaturityType? MaturityType { get; set; } = null;
-
     //when does contract mature, this is the moment spot = future
     public Timestamp? MaturityDate { get; set; } = null;
 
@@ -308,7 +303,7 @@ public sealed class InstrumentDetails
         switch (InstrumentType)
         {
             case InstrumentType.Future:
-                return new FutureSymbology(Exchange, Root, MaturityType!.Value, MaturityDate!.Value);
+                return new FutureSymbology(Exchange, Root, MaturityDate!.Value);
 
             case InstrumentType.Spread:
             {
@@ -345,7 +340,6 @@ public sealed class InstrumentDetails
             {
                 InstrumentHeader = InstrumentHeader,
                 MaturityDate = MaturityDate!.Value,
-                MaturityType = MaturityType!.Value,
                 Multiplier = Multiplier,
             };
         }

@@ -53,8 +53,8 @@ public class TestingScenario : Scenario
             ServerName = ServerContext.GetDirectoryPath("ServerSimulation");
             ClientName = ClientContext.GetDirectoryPath($"{CoreGroupName}");
         }
-        SimulationBegin = new Timestamp(2024, 9, 1);
-        SimulationEnd = new Timestamp(2026, 8, 21, 0, 0, 0);
+        SimulationBegin = new Timestamp(2025, 11, 25);
+        SimulationEnd = new Timestamp(2025, 12, 24);
     }
 
     public override void BuildStrategies()
@@ -83,17 +83,22 @@ public class TestingScenario : Scenario
         int[] months = new int[] { 3, 6, 9, 12 };
         if (CoreGroupName == CoreGroupId.SandP500)
         {
+            Future quote = GetFuture("XCME", "BTC", SimulationEnd);
+            Future hedge = GetFuture("XCME", "MBT", SimulationEnd);
+            strategy.OnFuture(quote, hedge);
+
+
             Spread spread = GetSpread("XCME", "MES", Clock.Now, Clock.Now);
             strategy.OnSpread(spread);
             return;
+/*
 
-
-            FutureChain quoteChain = GetFutureChain("XCME", "MES", Clock.Now, months);
+            FutureChain quoteChain = GetFutureChain("XCME", "MES", Clock.Now);
             foreach(Future quote in quoteChain.Futures)
             {
-                Future hedge = GetFuture("XCME", "ES", quote.MaturityDate.Date, months);
+                Future hedge = GetFuture("XCME", "ES", quote.MaturityDate.Date);
                 strategy.OnFuture(quote, hedge);
-            }
+            }*/
         }
         else if (CoreGroupName == CoreGroupId.Equity)
         {

@@ -50,7 +50,6 @@
 
 			<DataGridTextColumn Header="Multiplier" Binding="{Binding Multiplier}" SortMemberPath="Multiplier" IsVisible="True" />
 			<DataGridTextColumn Header="MaturityDate" Binding="{Binding MaturityDate}" SortMemberPath="MaturityDate" IsVisible="False" />
-			<DataGridTextColumn Header="MaturityType" Binding="{Binding MaturityType}" SortMemberPath="MaturityType" IsVisible="False" />
 
 			<DataGridTextColumn Header="Leg0" Binding="{Binding Leg0}" SortMemberPath="Leg0" IsVisible="False" />
 			<DataGridTextColumn Header="Leg1" Binding="{Binding Leg1}" SortMemberPath="Leg1" IsVisible="False" />

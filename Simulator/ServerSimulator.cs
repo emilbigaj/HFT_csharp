@@ -1362,7 +1362,6 @@ public class ServerSimulator
                 ref FutureHeader future = ref Unsafe.As<InstrumentHeader128, FutureHeader>(ref header128);
                 future.Multiplier = instrumentDetails.Multiplier;
                 future.MaturityDate = instrumentDetails.MaturityDate!.Value;
-                future.MaturityType = instrumentDetails.MaturityType!.Value;
             }
             else if (instrumentDetails.InstrumentType == InstrumentType.Spread)
             {

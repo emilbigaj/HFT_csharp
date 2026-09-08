@@ -140,14 +140,12 @@ public struct FutureHeader
 {
     public InstrumentHeader InstrumentHeader;
     public double Multiplier;
-    public Timestamp MaturityDate; 
-    public MaturityType MaturityType;
+    public Timestamp MaturityDate;
 
     public FutureSymbology Symbology =>
         new FutureSymbology(
             InstrumentHeader.Exchange.ToString(),
             InstrumentHeader.Root.ToString(),
-            MaturityType,
             MaturityDate);
 }
 
@@ -408,7 +406,6 @@ public abstract class Instrument
 // === FUTURE ===
 public class Future : Instrument
 {
-    public MaturityType MaturityType => _headerEntry.GetReadonlyRef().AsFuture().MaturityType;
     public Timestamp MaturityDate => _headerEntry.GetReadonlyRef().AsFuture().MaturityDate;
     public ref readonly FutureHeader FutureHeader => ref _headerEntry.GetReadonlyRef().AsFuture();
 
@@ -458,10 +455,7 @@ public sealed class Forex : Instrument
 /// === SPREAD ===
 public sealed class Spread : Instrument
 {
-    public MaturityType LongMaturityType => Long.MaturityType;
     public Timestamp LongMaturityDate => Long.MaturityDate;
-
-    public MaturityType ShortMaturityType => Short.MaturityType;
     public Timestamp ShortMaturityDate => Short.MaturityDate;
 
     public Future Long { get; }

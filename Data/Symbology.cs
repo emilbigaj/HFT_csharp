@@ -7,19 +7,6 @@ using Tools;
 
 namespace Data;
 
-// The C++ side still declares this type under its old ExpiryType name -- rename it there before
-// relying on the two lining up. Layout is unaffected either way: 1 byte, values are positive ASCII
-// so a (char) cast still yields the code letter.
-[RegisterJson]
-public enum MaturityType : byte
-{
-    Day = (byte)'D',
-    Week = (byte)'W',
-    Month = (byte)'M',
-    Quarter = (byte)'Q',
-    Year = (byte)'Y'
-}
-
 [RegisterJson]
 public enum InstrumentType : byte
 {
@@ -77,8 +64,8 @@ public class Symbology
             (InstrumentType)Enum.Parse(typeof(InstrumentType), instrumentTypeText, true);
 
         // Ticker formats emitted:
-        // Future: "<Root> <E><Date>"                e.g., "ES M2025-12-15"
-        // Spread: "<Root> +<E><Date> -<E><Date>"    signed leg tokens, weight folded into the sign
+        // Future: "<Root> <Date>"                e.g., "ES 2025-12-15"
+        // Spread: "<Root> +<Date> -<Date>"       signed leg tokens, weight folded into the sign
         int spaceAfterRoot = ticker.IndexOf(' ');
         if (spaceAfterRoot < 0)
             throw new FormatException("Ticker must contain root and a maturity part.");
@@ -88,28 +75,31 @@ public class Symbology
 
         if (instrumentType == InstrumentType.Future)
         {
-            MaturityType maturityType;
-            Timestamp maturityDate;
-            ParseMaturityTokenUsingFromDateString(remainder, out maturityType, out maturityDate);
-            return new FutureSymbology(exchange, root, maturityType, maturityDate);
+            return new FutureSymbology(exchange, root, ParseMaturityToken(remainder));
         }
         else if (instrumentType == InstrumentType.Spread)
         {
-            // Signed leg tokens "±[n]<E><Date>": root appears once, legs maturity-ascending.
+            // Signed leg tokens "±[n]<Date>": root appears once, legs maturity-ascending.
             List<Symbology> symbologies = new List<Symbology>();
             List<int> weights = new List<int>();
             foreach (string legToken in remainder.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
                 int sign = legToken[0] == '+' ? 1 : legToken[0] == '-' ? -1 : throw new FormatException($"Spread leg \"{legToken}\" must start with '+' or '-'.");
-                int index = 1;
+
+                // The ISO date is fixed-width (10) at the token's END; the digits between the sign
+                // and the date are the optional weight magnitude ("+22026-07-31" = weight 2).
+                // Fixed-width is what keeps the grammar unambiguous with no maturity letter
+                // separating magnitude from date.
+                if (legToken.Length < 11)
+                    throw new FormatException($"Spread leg \"{legToken}\" must end with a yyyy-MM-dd date.");
+                string dateText = legToken[^10..];
                 int magnitude = 0;
-                while (index < legToken.Length && char.IsAsciiDigit(legToken[index]))
+                for (int index = 1; index < legToken.Length - 10; index++)
                 {
-                    magnitude = magnitude * 10 + (legToken[index] - '0');
-                    index++;
+                    if (char.IsAsciiDigit(legToken[index]))
+                        magnitude = magnitude * 10 + (legToken[index] - '0');
                 }
-                ParseMaturityTokenUsingFromDateString(legToken.Substring(index), out MaturityType maturityType, out Timestamp maturityDate);
-                symbologies.Add(new FutureSymbology(exchange, root, maturityType, maturityDate));
+                symbologies.Add(new FutureSymbology(exchange, root, ParseMaturityToken(dateText)));
                 weights.Add(sign * Math.Max(magnitude, 1));
             }
             return new SpreadSymbology(exchange, root, symbologies, weights);
@@ -118,24 +108,18 @@ public class Symbology
         throw new NotSupportedException($"FromString does not yet support InstrumentType {instrumentType}.");
     }
 
-    // Helper: token is like "M2025-12-15" where 'M' is the MaturityType code char.
-    private static void ParseMaturityTokenUsingFromDateString(string token,
-                                                            out MaturityType maturityType,
-                                                            out Timestamp maturityDate)
+    // Token is a bare date, "2025-12-15". A leading legacy maturity-type letter ("M2025-12-15")
+    // is tolerated and ignored until every catalog is migrated to letterless names.
+    private static Timestamp ParseMaturityToken(string token)
     {
-        if (string.IsNullOrWhiteSpace(token) || token.Length < 2)
-            throw new FormatException("Maturity token must start with a letter and include a date, e.g., M20251215.");
+        if (string.IsNullOrWhiteSpace(token))
+            throw new FormatException("Maturity token must be a date, e.g., 2025-12-15.");
 
-        char typeChar = token[0];
-        maturityType = (MaturityType)typeChar; // enum values defined as 'D','W','M','Q','Y'
-
-        string dateText = token.Substring(1);
+        string dateText = char.IsAsciiDigit(token[0]) ? token : token.Substring(1);
 
         try
         {
-            // Your requested form:
-            // Timestamp longMaturityDate = Timestamp.FromDateString(longMaturityDateToken);
-            maturityDate = Timestamp.FromString(dateText, "yyyy-MM-dd");
+            return Timestamp.FromString(dateText, "yyyy-MM-dd");
         }
         catch (Exception ex)
         {
@@ -150,23 +134,22 @@ public class Symbology
 [RegisterJson]
 public class FutureSymbology : Symbology
 {
-    public MaturityType MaturityType { get; protected set; }
     public Timestamp MaturityDate { get; protected set; }
     public override string ShortSymbol { get; }
 
 
     // Normal ctor for outright futures: fixes InstrumentType.Future and auto-builds ticker.
-    public FutureSymbology(string exchange, string root, MaturityType maturityType, Timestamp maturityDate)
-        : this(InstrumentType.Future, exchange, root, $"{root} {(char)maturityType}{maturityDate.ToDateString()}", maturityType, maturityDate)
+    // The ticker leads with the bare ISO date so names sort lexically == chronologically.
+    public FutureSymbology(string exchange, string root, Timestamp maturityDate)
+        : this(InstrumentType.Future, exchange, root, $"{root} {maturityDate.ToDateString()}", maturityDate)
     {
 
     }
 
     // Protected flex ctor for subclasses (e.g., Spread) to set InstrumentType and custom ticker.
-    protected FutureSymbology(InstrumentType instrumentType, string exchange, string root, string ticker, MaturityType maturityType, Timestamp maturityDate)
+    protected FutureSymbology(InstrumentType instrumentType, string exchange, string root, string ticker, Timestamp maturityDate)
         : base(instrumentType, exchange, root, ticker)
     {
-        MaturityType = maturityType;
         MaturityDate = maturityDate;
         string shortMonthName = CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(maturityDate.Month);
         ShortSymbol = $"{root} {shortMonthName}{maturityDate.Year%100}";
