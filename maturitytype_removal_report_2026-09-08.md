@@ -50,9 +50,10 @@ weight magnitude (absent = 1). Do NOT scan digits left-to-right after the sign �
 digits, and with the letter gone there is no delimiter: a left-to-right scan eats "2026" as the
 weight and hands "-07-31" to the date parser. This shipped and was caught; parse by fixed width.
 
-**Legacy tolerance:** the HFT lib's parser skips-and-ignores a leading letter on a maturity token
-(`M2026-07-31` still parses as 2026-07-31), so not-yet-migrated catalogs load. Downstream parsers
-should do the same during their transition.
+**No legacy tolerance — loud fail:** a leading letter on a maturity token throws
+(`Invalid maturity date: "M2026-07-31" (legacy maturity-type letters are not accepted — migrate
+the catalog)`). Unmigrated catalogs crash on load, by design. Migrate before pointing anything at
+them; do not add tolerance downstream either.
 
 ## 4. Exactly what was removed from the HFT lib code
 
@@ -95,10 +96,11 @@ abort on any duplicate; (2) rewrite JSON contents; (3) `File.Move` renames (thro
 overwrites). The migration tool source is a ~70-line C# console (scratchpad `migrate/Program.cs`);
 copy it rather than reinventing.
 
-**NOT yet migrated** (parser tolerance keeps them loadable): `Z:\TickHistory\Refinitiv`,
+**NOT yet migrated — these now FAIL LOUDLY if loaded**: `Z:\TickHistory\Refinitiv`,
 `Z:\TickHistory\RefinitivNew`, loose `Future XCBT HRS *.json` files at the `Z:\InstrumentDetails`
 root, `Z:\InstrumentDetails\CatalogTest`, and any symbol-named server state (positions/risklimits/
-fills) on live machines.
+fills) on live machines. `S:\Servers\Simulation` and `S:\Strategies\Simulation` were migrated
+(57 files renamed 2026-09-08).
 
 ## 6. What a downstream program must change
 

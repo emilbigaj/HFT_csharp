@@ -108,22 +108,20 @@ public class Symbology
         throw new NotSupportedException($"FromString does not yet support InstrumentType {instrumentType}.");
     }
 
-    // Token is a bare date, "2025-12-15". A leading legacy maturity-type letter ("M2025-12-15")
-    // is tolerated and ignored until every catalog is migrated to letterless names.
+    // Token is a bare ISO date, "2025-12-15". A legacy maturity-type letter prefix fails LOUDLY —
+    // catalogs get migrated, not tolerated (see maturitytype_removal_report_2026-09-08.md).
     private static Timestamp ParseMaturityToken(string token)
     {
         if (string.IsNullOrWhiteSpace(token))
             throw new FormatException("Maturity token must be a date, e.g., 2025-12-15.");
 
-        string dateText = char.IsAsciiDigit(token[0]) ? token : token.Substring(1);
-
         try
         {
-            return Timestamp.FromString(dateText, "yyyy-MM-dd");
+            return Timestamp.FromString(token, "yyyy-MM-dd");
         }
         catch (Exception ex)
         {
-            throw new FormatException($"Invalid maturity date: \"{dateText}\".", ex);
+            throw new FormatException($"Invalid maturity date: \"{token}\" (legacy maturity-type letters are not accepted — migrate the catalog).", ex);
         }
     }
 

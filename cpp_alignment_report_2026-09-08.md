@@ -52,8 +52,9 @@ identifies a contract.
   date is the fixed-width LAST 10 chars of the token; digits between sign and date are the
   magnitude.** Do not scan digits left-to-right after the sign — the year is digits and the old
   letter was the only delimiter (this bug shipped in C# and is fixed at Symbology.FromString).
-- **Parser tolerance**: a leading legacy letter on a maturity token is skipped and ignored
-  (unmigrated catalogs still load).
+- **No parser tolerance — loud fail**: a leading legacy letter on a maturity token throws a
+  FormatException naming the token. Unmigrated catalogs crash on load, by design; migrate them,
+  mirror the same strictness in C++.
 - **InstrumentDetails**: no MaturityType property; the JSON key is gone from all migrated files.
 - **Catalogs migrated 2026-09-08**: `Z:\InstrumentDetails\Databento` (131,139 files renamed +
   contents rewritten) and `Z:\TickHistory\Databento` (55,948 files renamed). NOT yet migrated:
