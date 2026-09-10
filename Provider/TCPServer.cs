@@ -498,7 +498,14 @@ public class LocalContextProxy
                         _manualClients[controlAlgoStatus.ClientId]!.OnControlAlgoStatus(in controlAlgoStatus);
                         break;
                     }
-                
+                case (byte)ControlType.RiskLimit:
+                    {
+                        ref readonly ControlRiskLimit controlRiskLimit = ref MemoryMarshal.AsRef<ControlRiskLimit>(rsrc);
+                        Console.WriteLine(controlRiskLimit);
+                        _manualClients[controlRiskLimit.ClientId]!.OnControlRiskLimit(in controlRiskLimit);
+                        break;
+                    }
+
             }
         }
     }

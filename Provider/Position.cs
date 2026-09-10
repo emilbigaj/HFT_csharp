@@ -258,6 +258,9 @@ public sealed class Position
         private Context _context;
         private ActiveTarget _current;
         private Position _position;
+        // Set when an order was skipped because its cancel is sent but the exchange has not confirmed Done (see Spec.md).
+        public bool IsPendingBuyCancel { get; private set; }
+        public bool IsPendingSellCancel { get; private set; }
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ActiveTargetsEnumerator(Position position)
         {
@@ -266,6 +269,8 @@ public sealed class Position
             _context = position._context;
             _isOrderActive = position._isOrderActive;
             _current = default;
+            IsPendingBuyCancel = false;
+            IsPendingSellCancel = false;
         }
 
         public readonly ActiveTarget Current
@@ -316,9 +321,14 @@ public sealed class Position
 
                     if (isOrderDone)
                     {
+                        bool isCancelPending = state.OrderStateStatus != OrderStateStatus.Done;
+                        int sign = state.OrderProfile.Sign;
                         seq1 = stateEntry.GetSeq();
                         if (seq0 != seq1)
                             continue; // Retry inner loop if torn read
+                        // Still resting at the exchange and still reserved by the server: not free capacity (see Spec.md).
+                        IsPendingBuyCancel |= isCancelPending && sign > 0;
+                        IsPendingSellCancel |= isCancelPending && sign < 0;
                         goto NextOrder;
                     }
 

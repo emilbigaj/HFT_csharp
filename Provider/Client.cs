@@ -61,19 +61,19 @@ public sealed class ManualClient : Client
         return true;
     }
 
+    // On the instrument's execution channel so the CoreGroup thread that owns the position row applies it.
     public void OnControlAlgoStatus(in ControlAlgoStatus controlAlgoStatus)
     {
         ControlAlgoStatus copy = controlAlgoStatus;
-        _writeQueue.Enqueue(() => _socket.Write(SocketChannel.Admin, in copy));
+        _writeQueue.Enqueue(() => _socket.Write(Context.GetInstrument(copy.InstrumentId).Header.CoreGroupId, in copy));
     }
 
-    // Send an edited RiskLimit for the server to apply. The GUI reads the current one, overwrites
-    // the fields it edits and sends the whole struct back — the server owns _riskLimits (created
-    // with ServerAccess), so a read-access ContextManager.ServerContext cannot write it directly.
-    public void OnRiskLimit(in RiskLimit riskLimit)
+    // Request a risk-limit edit: config fields only, on the instrument's execution channel so the
+    // CoreGroup thread that owns the row applies it. The server posts the row back.
+    public void OnControlRiskLimit(in ControlRiskLimit controlRiskLimit)
     {
-        RiskLimit copy = riskLimit;
-        _writeQueue.Enqueue(() => _socket.Write(SocketChannel.Admin, in copy));
+        ControlRiskLimit copy = controlRiskLimit;
+        _writeQueue.Enqueue(() => _socket.Write(Context.GetInstrument(copy.InstrumentId).Header.CoreGroupId, in copy));
     }
 
     // Any-thread API: allocate an instrument to this GUI client. The first allocation of an
@@ -559,7 +559,8 @@ public abstract class Client
 
     public virtual bool OnOrderTarget(ref OrderTarget orderTarget)
     {
-        orderTarget.OrderHeader.NicTimestamp = NicTimestamp;
+        orderTarget.TriggerTimestamp = NicTimestamp;
+        orderTarget.OrderHeader.NicTimestamp = Clock.Now;
         orderTarget.OrderHeader.ExchangeTimestamp = ExchangeTimestamp;
 
         bool sent = false;

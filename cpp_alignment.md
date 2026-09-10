@@ -191,9 +191,30 @@ accounting. Port from C# `Provider/RiskLayer.cs` + `OrderRisk` in `Execution/Ord
 - **Type-guard before `AsFuture()`** everywhere instrument headers are enumerated
   (Strategy/Scenario.hpp:40 is blind today). A realtime context contains spreads and empty slots;
   the blind cast is a startup crash. Pattern: `if (header128.InstrumentType != Future) continue;`.
-- **`Server::OnRiskLimit`**: an operator edit sends the whole struct — copy the *live*
-  `WorstLong/ShortWorkingQuantity` from the existing row over the incoming one before storing, or
-  an edit zeroes the reservations.
+- **Risk limits are SERVER-WIDE; `StrategyId` is REMOVED from `RiskLimit` (2026-09-10).** The
+  struct is now 32 bytes: `Header` 0, `InstrumentId` 4, `Timestamp` 8, `MaxOrderQuantity` 16,
+  `MaxPositionQuantity` 20, `WorstLongWorkingQuantity` 24, `WorstShortWorkingQuantity` 28 —
+  `static_assert(sizeof(RiskLimit) == 32)` (A5 of the 2026-09-08 report said 36 with `StrategyId`
+  at 16; superseded). One row per instrument, applied to every strategy; a per-strategy limit is a
+  future feature. Old `.risklimit` lines that still carry `"StrategyId"` parse fine (unknown
+  property, skipped).
+- **Risk-limit edits are requests on the execution channel (amended 2026-09-10; replaces the
+  earlier "copy the live `Worst*` across" workaround).** A client sends `ControlRiskLimit`
+  (`ControlType::RiskLimit = 201`; `int32 ClientId, InstrumentId, MaxOrderQuantity,
+  MaxPositionQuantity` after the 4-byte header — 20 bytes, pack 1) on the instrument's CoreGroup
+  channel, never a `RiskLimit` row, and `ReadExecution` applies it on the CoreGroup thread:
+  `MaxOrderQuantity`, `MaxPositionQuantity`, `Timestamp = now` written in place under the row's seq
+  bump, the working quantities untouched; then post the row to the server's own audit socket
+  (CoreGroup channel). No echo to any client (nothing consumed it) and do NOT audit the request:
+  the logging server taps every client socket in both directions, so the request is already logged
+  under the client — only the server's audit socket feeds the server-level file.
+  `OrderType::RiskLimit` is no longer accepted from a client on any channel. The server does NOT
+  write `.risklimit` files any more — the logging server appends the posted row (same
+  `GetRiskLimitsFilePath`); a C++ server that appends too gives the file two writers.
+- **`ControlAlgoStatus` moves the same way (2026-09-10):** the client sends it on the instrument's
+  CoreGroup channel and `ReadExecution` calls `OnControlAlgoStatus` (no audit write — the client
+  tap logs it); `ReadAdmin` no longer accepts it. With fills, states and targets already on that
+  thread, the local position row has exactly one writer — no queue, no CAS.
 - **Unknown message types**: `default: break` in ReadAdmin/ReadExecution swallowed a real bug in
   C# (a zeroed `Header::Type` made risk-limit edits silently no-op). At minimum count and expose
   them.

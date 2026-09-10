@@ -116,19 +116,27 @@ public class ClientSocketReader : IReader
     }
 
 
-    protected static Timestamp GetCreationTimestamp(ReadOnlySpan<byte> rsrc, Timestamp @default)
+    // Sort key: the NicTimestamp every order record carries; RiskLimit has no OrderHeader, so its own Timestamp; control requests carry none, so the high-water mark.
+    protected static Timestamp GetNicTimestamp(ReadOnlySpan<byte> rsrc, Timestamp @default)
     {
-        rsrc = rsrc.Slice(Unsafe.SizeOf<Header<OrderType>>());
-        ref readonly OrderHeader orderHeader = ref MemoryMarshal.AsRef<OrderHeader>(rsrc);
-        Timestamp exchangeTimestamp = orderHeader.ExchangeTimestamp == Timestamp.MinValue ? orderHeader.NicTimestamp : orderHeader.ExchangeTimestamp;
-        Timestamp nicTimestamp = orderHeader.NicTimestamp == Timestamp.MinValue ? orderHeader.ExchangeTimestamp : orderHeader.NicTimestamp;
-        Timestamp creationTimestamp = exchangeTimestamp.Min(nicTimestamp);
-        creationTimestamp = creationTimestamp == Timestamp.MinValue ? @default : creationTimestamp;
-        return creationTimestamp;
+        Timestamp nicTimestamp;
+        switch (rsrc[0])
+        {
+            case (byte)OrderType.RiskLimit:
+                nicTimestamp = MemoryMarshal.AsRef<RiskLimit>(rsrc).Timestamp;
+                break;
+            case (byte)ControlType.AlgoStatus:
+            case (byte)ControlType.RiskLimit:
+                return @default; // requests carry no timestamp: sort at the high-water mark, arrival order kept
+            default:
+                nicTimestamp = MemoryMarshal.AsRef<OrderHeader>(rsrc.Slice(Unsafe.SizeOf<Header<OrderType>>())).NicTimestamp;
+                break;
+        }
+        return nicTimestamp == Timestamp.MinValue || nicTimestamp.NanosSinceEpoch == 0 ? @default : nicTimestamp;
     }
 
     List<PooledBuffer> _waterMarkBuffer = new List<PooledBuffer>();
-    Timestamp _maxSeen = Timestamp.MinValue;   // event-time high-water mark, persisted across passes
+    Timestamp _maxSeen = Timestamp.MinValue;   // NIC-time high-water mark, persisted across passes
     Timestamp _lastDataTime = Timestamp.UtcNow; // wall-clock of the last real read; drives the idle-flush of the held tail
 
     // Order is guaranteed only while no active channel's reads lag the leading edge by more than this.
@@ -157,7 +165,7 @@ public class ClientSocketReader : IReader
             List<PooledBuffer> dst = isExec ? executions : serverToClientAdmin;
             while ((readStatus = _socketListener.TryReadServerToClient(channel, out rsrc)) == ReadStatus.New)
             {
-                if (isExec) _maxSeen = Timestamp.Max(GetCreationTimestamp(rsrc, @default), _maxSeen);
+                if (isExec) _maxSeen = Timestamp.Max(GetNicTimestamp(rsrc, @default), _maxSeen);
                 byte[] buffer = ThreadArrayPool<byte>.Rent(rsrc.Length);
                 rsrc.CopyTo(buffer);
                 dst.Add(new PooledBuffer(buffer, rsrc.Length));
@@ -171,7 +179,7 @@ public class ClientSocketReader : IReader
             List<PooledBuffer> dst = isExec ? executions : clientToServerAdmin;
             while ((readStatus = _socketListener.TryReadClientToServer(channel, out rsrc)) == ReadStatus.New)
             {
-                if (isExec) _maxSeen = Timestamp.Max(GetCreationTimestamp(rsrc, @default), _maxSeen);
+                if (isExec) _maxSeen = Timestamp.Max(GetNicTimestamp(rsrc, @default), _maxSeen);
                 byte[] buffer = ThreadArrayPool<byte>.Rent(rsrc.Length);
                 rsrc.CopyTo(buffer);
                 dst.Add(new PooledBuffer(buffer, rsrc.Length));
@@ -183,9 +191,10 @@ public class ClientSocketReader : IReader
         // Release everything older than (maxSeen - margin) in timestamp order; hold the newer records for
         // next pass (a lagging channel could still emit something earlier). Sorted -> the split is one index.
         Timestamp watermark = _maxSeen - WatermarkMargin;
-        // OrderBy, not List.Sort: stability is the point — fill/state/position clusters share one
-        // timestamp and must keep arrival order.
-        executions = executions.OrderBy(pb => GetCreationTimestamp(pb.Span, @default)).ToList();        int hold = executions.FindIndex(pb => GetCreationTimestamp(pb.Span, @default) > watermark);
+        // OrderBy, not List.Sort: stability is the point — a target and the message that triggered it
+        // share one NicTimestamp and must keep arrival order (server-to-client is drained first).
+        executions = executions.OrderBy(pb => GetNicTimestamp(pb.Span, @default)).ToList();
+        int hold = executions.FindIndex(pb => GetNicTimestamp(pb.Span, @default) > watermark);
         if (hold < 0) hold = executions.Count;
 
         results.AddRange(clientToServerAdmin);
@@ -929,28 +938,7 @@ public class AlertWriter : ObjectWriter
         _telegram = telegram;
     }
 
-    public override string SerializeToLine(ReadOnlySpan<byte> rsrc)
-    {
-        AlertType type = (AlertType)rsrc[0];
-        ReadOnlySpan<byte> rsrcObj = rsrc[Unsafe.SizeOf<Header<AlertType>>()..];
-
-        switch (type)
-        {
-            case AlertType.Exception:
-            {
-                string message = Encoding.ASCII.GetString(rsrcObj);
-                return $"{type}{Environment.NewLine}{message}";
-            }
-            case AlertType.OrderRejected:
-            {
-                OrderRejected orderRejected = MemoryMarshal.Read<OrderRejected>(rsrcObj);
-                string message = Encoding.ASCII.GetString(rsrcObj[Unsafe.SizeOf<OrderRejected>()..]);
-                return new Alert(AlertType.OrderRejected, orderRejected, message).ToString();
-            }
-            default:
-                return "";
-        }
-    }
+    public override string SerializeToLine(ReadOnlySpan<byte> rsrc) => Alert.FromBytes(rsrc).ToString();
 
     protected override void SetFileStream(string directoryPath)
     {
@@ -986,6 +974,7 @@ public class AuditWriter : ObjectWriter
     private DateTime _lastDate;
     private readonly Dictionary<string, ObjectWriter> _fillWriters = new Dictionary<string, ObjectWriter>();
     private readonly Dictionary<string, ObjectWriter> _positionWriters = new Dictionary<string, ObjectWriter>();
+    private readonly Dictionary<string, ObjectWriter> _riskLimitWriters = new Dictionary<string, ObjectWriter>();
 
     private readonly Dictionary<int, string> _symbols = new Dictionary<int, string>();
 
@@ -1044,6 +1033,13 @@ public class AuditWriter : ObjectWriter
                     string json = Json.SerializeToLine(controlAlgoStatus);
                     return json.Insert(1, $"\"Symbol\":\"{symbol}\",");
                 }
+            case (byte)ControlType.RiskLimit:
+                {
+                    ref readonly ControlRiskLimit controlRiskLimit = ref MemoryMarshal.AsRef<ControlRiskLimit>(rsrc);
+                    string symbol = GetSymbol(controlRiskLimit.InstrumentId);
+                    string json = Json.SerializeToLine(controlRiskLimit);
+                    return json.Insert(1, $"\"Symbol\":\"{symbol}\",");
+                }
             case (byte)OrderType.RiskLimit:
                 {
                     ref readonly RiskLimit riskLimit = ref MemoryMarshal.AsRef<RiskLimit>(rsrc);
@@ -1051,8 +1047,18 @@ public class AuditWriter : ObjectWriter
                     // (Header + OrderHeader) off the front, and RiskLimit has no OrderHeader — it
                     // would decode InstrumentId out of MaxOrderQuantity and friends.
                     string symbol = GetSymbol(riskLimit.InstrumentId);
-                    string json = Json.SerializeToLine(riskLimit);
-                    return json.Insert(1, $"\"Symbol\":\"{symbol}\",");
+                    // The server posts the row here instead of writing the .risklimit file itself; the
+                    // server reads this file back at allocation, so the path must match Context's.
+                    if (!_riskLimitWriters.TryGetValue(symbol, out ObjectWriter? writer))
+                    {
+                        string filePath = Context.GetRiskLimitsFilePath(_filePath, symbol);
+                        writer = new ObjectWriter<RiskLimit>(filePath);
+                        _riskLimitWriters[symbol] = writer;
+                    }
+                    string line = Json.SerializeToLine(riskLimit);
+                    line = line.Insert(1, $"\"Symbol\":\"{symbol}\",");
+                    writer.Write(line);
+                    return line;
                 }
             case (byte)OrderType.OrderState:
                 {
@@ -1147,6 +1153,7 @@ public class AuditWriter : ObjectWriter
         base.Flush();
         foreach (ObjectWriter writer in _fillWriters.Values) writer.Flush();
         foreach (ObjectWriter writer in _positionWriters.Values) writer.Flush();
+        foreach (ObjectWriter writer in _riskLimitWriters.Values) writer.Flush();
     }
 
     public override void Dispose()
@@ -1154,6 +1161,7 @@ public class AuditWriter : ObjectWriter
         base.Dispose();
         foreach (ObjectWriter writer in _fillWriters.Values) writer.Dispose();
         foreach (ObjectWriter writer in _positionWriters.Values) writer.Dispose();
+        foreach (ObjectWriter writer in _riskLimitWriters.Values) writer.Dispose();
     }
 }
 

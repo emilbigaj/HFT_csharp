@@ -185,7 +185,6 @@ public struct RiskLimit(int instrumentId)
     public Header<OrderType> Header = new(OrderType.RiskLimit);
     public int InstrumentId = instrumentId;
     public Timestamp Timestamp = Timestamp.MinValue;
-    public int StrategyId = -1;
     public int MaxOrderQuantity = 0;
     public int MaxPositionQuantity = 0;
     public int WorstLongWorkingQuantity = 0;
@@ -445,12 +444,13 @@ public struct AheadOfOrder(ulong clientOrderid, int quantity)
 }
 
 
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[StructLayout(LayoutKind.Sequential, Pack = 1)] // 52 bytes
 [RegisterJson]
 public struct OrderTarget()
 {
     public Header<OrderType> Header = new(OrderType.OrderTarget);
     public OrderHeader OrderHeader;
+    public Timestamp TriggerTimestamp; // NIC arrival of the message this target reacted to; OrderHeader.NicTimestamp is the send time
     public OrderProfile OrderProfile; // 8
     public TimeInForce TimeInForce;  // 1
     public OrderTargetAction OrderTargetAction;  // 1

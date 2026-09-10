@@ -2,19 +2,19 @@ using System;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Execution;
+using Provider;
 using Tools;
 
 namespace Widget;
 
 /// <summary>
-/// Edits the quantity limits of a single RiskLimit. Seeded with a copy of the live limit and
-/// returns that same copy with only the edited fields overwritten, so the rate limits and every
-/// other field survive the round trip untouched — the server applies whatever it is handed.
-/// Closes with the edited RiskLimit on confirm, or null on cancel.
+/// Edits the quantity limits of a single RiskLimit. Seeded with the live limit for display and
+/// closes with a ControlRiskLimit request (config fields only) on confirm, or null on cancel. The
+/// server owns the row: it applies the request in place and stamps the timestamp.
 /// </summary>
 public partial class RiskLimitEditDialog : Window
 {
-    private RiskLimit _riskLimit;
+    private ControlRiskLimit _controlRiskLimit;
 
     public RiskLimitEditDialog()
     {
@@ -23,7 +23,12 @@ public partial class RiskLimitEditDialog : Window
 
     public RiskLimitEditDialog(string symbol, RiskLimit riskLimit) : this()
     {
-        _riskLimit = riskLimit;
+        _controlRiskLimit = new ControlRiskLimit
+        {
+            InstrumentId = riskLimit.InstrumentId,
+            MaxOrderQuantity = riskLimit.MaxOrderQuantity,
+            MaxPositionQuantity = riskLimit.MaxPositionQuantity,
+        };
         SymbolText.Text = symbol;
         MaxOrderQuantityInput.Text = riskLimit.MaxOrderQuantity.ToString();
         MaxPositionQuantityInput.Text = riskLimit.MaxPositionQuantity.ToString();
@@ -48,11 +53,10 @@ public partial class RiskLimitEditDialog : Window
             return;
         }
 
-        _riskLimit.MaxOrderQuantity = maxOrderQuantity;
-        _riskLimit.MaxPositionQuantity = maxPositionQuantity;
-        _riskLimit.Timestamp = Clock.Now;
+        _controlRiskLimit.MaxOrderQuantity = maxOrderQuantity;
+        _controlRiskLimit.MaxPositionQuantity = maxPositionQuantity;
 
-        Close(_riskLimit);
+        Close(_controlRiskLimit);
     }
 
     private void ShowError(string message)

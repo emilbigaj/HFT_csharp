@@ -270,6 +270,8 @@ public class RiskLayer
             else
             {
 
+                bool isAmend = orderTarget.OrderTargetAction == OrderTargetAction.Amend;
+
                 if (_orderRejectedSource == OrderRejectedSource.Server)
                 {
                     if (!(orderRejectedReasons = ValidateOrderHeader(in orderState.OrderHeader, in orderTarget.OrderHeader)).IsEmpty)
@@ -280,7 +282,7 @@ public class RiskLayer
                     if (orderState.OrderStateStatus == OrderStateStatus.Done)
                         orderRejectedReasons.Set((int)OrderRejectedReason.StateIsDone);
 
-                    if (orderState.OrderHeader.Seq + 1 == orderTarget.OrderHeader.Seq && orderState.OrderProfile == orderTarget.OrderProfile)
+                    if (isAmend && orderState.OrderHeader.Seq + 1 == orderTarget.OrderHeader.Seq && orderState.OrderProfile == orderTarget.OrderProfile)
                         orderRejectedReasons.Set((int)OrderRejectedReason.TargetIsActive);
 
                     if (existingTarget.OrderHeader.Seq > orderTarget.OrderHeader.Seq)
@@ -297,9 +299,6 @@ public class RiskLayer
                     {
                         return false;
                     }
-
-                    bool isAmend = orderTarget.OrderTargetAction == OrderTargetAction.Amend;
-
 
                     if (orderState.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId) //state == target ??
                     {

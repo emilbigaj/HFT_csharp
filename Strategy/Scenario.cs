@@ -104,7 +104,8 @@ public class Scenario
 
     public Future GetFuture(string exchange, string root, Timestamp maturity, int[]? months = null)
     {
-        AddProductSearch(exchange, root);
+        if (Clock.Mode == ClockMode.Simulation)
+            AddProductSearch(exchange, root);
 
         Context context = ContextManager.ServerContext;
 

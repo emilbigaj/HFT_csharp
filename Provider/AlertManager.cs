@@ -27,6 +27,7 @@ public enum AlertType : byte
 public struct Alert
 {
     public Header<AlertType> Header;
+    public string? Symbol; // OrderRejected only; resolved by AlertManager, carried on the wire as String64
     public object? Object;
     public string? Message;
 
@@ -38,6 +39,49 @@ public struct Alert
     }
 
     public override string ToString() => Json.Serialize(this);
+
+    // Wire: Header | [OrderRejected | String64 Symbol] | ASCII Message; ToBytes returns the bytes written, Message truncated to fit.
+    public static Alert FromBytes(ReadOnlySpan<byte> rsrc)
+    {
+        Alert alert = new Alert();
+        alert.Header = MemoryMarshal.Read<Header<AlertType>>(rsrc);
+        rsrc = rsrc[Unsafe.SizeOf<Header<AlertType>>()..];
+        switch (alert.Header.Type)
+        {
+            case AlertType.OrderRejected:
+                alert.Object = MemoryMarshal.Read<OrderRejected>(rsrc);
+                rsrc = rsrc[Unsafe.SizeOf<OrderRejected>()..];
+                alert.Symbol = MemoryMarshal.Read<String64>(rsrc).ToString();
+                rsrc = rsrc[Unsafe.SizeOf<String64>()..];
+                break;
+        }
+        alert.Message = Encoding.ASCII.GetString(rsrc);
+        return alert;
+    }
+
+    public readonly int ToBytes(Span<byte> dst)
+    {
+        int capacity = dst.Length;
+        MemoryMarshal.Write(dst, in Header);
+        dst = dst[Unsafe.SizeOf<Header<AlertType>>()..];
+        string? message = Message;
+        switch (Header.Type)
+        {
+            case AlertType.OrderRejected when Object is OrderRejected orderRejected:
+                MemoryMarshal.Write(dst, in orderRejected);
+                dst = dst[Unsafe.SizeOf<OrderRejected>()..];
+                String64 symbol = new String64(Symbol ?? string.Empty);
+                MemoryMarshal.Write(dst, in symbol);
+                dst = dst[Unsafe.SizeOf<String64>()..];
+                break;
+            case AlertType.Exception when Object is Exception exception:
+                message = exception.ToString(); // rendered here, on the alert thread, not at OnException on the caller's
+                break;
+        }
+        if (!string.IsNullOrEmpty(message))
+            dst = dst[Encoding.ASCII.GetBytes(message.AsSpan(0, Math.Min(message.Length, dst.Length)), dst)..];
+        return capacity - dst.Length;
+    }
 }
 
 public sealed class AlertManager : IDisposable
@@ -109,7 +153,7 @@ public sealed class AlertManager : IDisposable
             {
                 try
                 {
-                    WriteToSocket(in alert);
+                    WriteToSocket(alert);
                 }
                 catch (Exception ex)
                 {
@@ -123,35 +167,26 @@ public sealed class AlertManager : IDisposable
         }
     }
 
-    private void WriteToSocket(in Alert alert)
+    private void WriteToSocket(Alert alert)
     {
-        Span<byte> buffer = _buffer;
-        int pos = 0;
+        if (alert.Object is OrderRejected orderRejected)
+            alert.Symbol = GetSymbol(orderRejected.OrderHeader.OrderId.InstrumentId);
+        int length = alert.ToBytes(_buffer);
+        _logger.Write(_buffer.AsSpan(0, length));
+    }
 
-        MemoryMarshal.Write(buffer[pos..], in alert.Header);
-        pos += Unsafe.SizeOf<Header<AlertType>>();
-
-        switch (alert.Header.Type)
+    // Header path, not GetInstrument: no lazy Instrument creation from this thread; a rejection may name an instrument this client never allocated.
+    private string GetSymbol(int instrumentId)
+    {
+        try
         {
-            case AlertType.OrderRejected when alert.Object is OrderRejected orderRejected:
-                MemoryMarshal.Write(buffer[pos..], in orderRejected);
-                pos += Unsafe.SizeOf<OrderRejected>();
-                break;
+            int instrumentHeaderId = Context.GetInstrumentHeaderIdByInstrumentId(instrumentId).Read();
+            return Context.GetInstrumentHeader(instrumentHeaderId).GetReadonlyRef().Symbology.Symbol;
         }
-
-        string? message = alert.Message;
-        if (message == null && alert.Object is not null && alert.Object is not ValueType)
+        catch
         {
-            message = alert.Object.ToString();
+            return $"UnknownSymbol_{instrumentId}";
         }
-
-        if (!string.IsNullOrEmpty(message))
-        {
-            int truncatedLength = Math.Min(message.Length, buffer.Length - pos);
-            pos += Encoding.ASCII.GetBytes(message.AsSpan(0, truncatedLength), buffer[pos..]);
-        }
-
-        _logger.Write(buffer[..pos]);
     }
 
     public void Dispose()

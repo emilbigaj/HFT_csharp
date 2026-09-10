@@ -43,7 +43,6 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
     public int WorstLongWorkingQuantity => _riskLimit.WorstLongWorkingQuantity;
     public int WorstShortWorkingQuantity => _riskLimit.WorstShortWorkingQuantity;
 
-    public string StrategyId => _riskLimit.StrategyId < 0 ? "Server" : _riskLimit.StrategyId.ToString();
     public string Timestamp => _riskLimit.Timestamp == Tools.Timestamp.MinValue ? "—" : _riskLimit.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
 
     public WidgetRiskLimit(Instrument instrument, int positionQuantity, RiskLimit riskLimit)
@@ -79,7 +78,6 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
     {
         return a.MaxOrderQuantity == b.MaxOrderQuantity
             && a.MaxPositionQuantity == b.MaxPositionQuantity
-            && a.StrategyId == b.StrategyId
             && a.Timestamp == b.Timestamp
             && a.WorstLongWorkingQuantity == b.WorstLongWorkingQuantity
             && a.WorstShortWorkingQuantity == b.WorstShortWorkingQuantity;
@@ -327,18 +325,25 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
             if (window == null) return;
 
             // Read a fresh copy rather than using the row's cached value, which can be up to one
-            // refresh tick stale. The whole struct goes back to the server, so every field we are
-            // not editing has to be current or we would silently revert it.
+            // refresh tick stale, so the dialog shows the current limits.
             RiskLimit current = GetRiskLimit(row.InstrumentId);
 
             RiskLimitEditDialog dialog = new RiskLimitEditDialog(row.ShortSymbol, current);
-            RiskLimit? edited = await dialog.ShowDialog<RiskLimit?>(window);
+            ControlRiskLimit? edited = await dialog.ShowDialog<ControlRiskLimit?>(window);
             if (edited == null) return;
 
-            // The server owns _riskLimits and the .risklimit file; it stamps the timestamp, writes
-            // shared memory and appends the line. The grid picks the change up on its next refresh.
-            RiskLimit riskLimit = edited.Value;
-            _context.Manual.OnRiskLimit(in riskLimit);
+            // The request travels on the instrument's execution channel, which the server polls only
+            // for clients allocated in that CoreGroup: allocate first if this GUI client is not yet
+            // (queued ahead of the request on the manual client's owner thread, blocks on the echo).
+            if (!_context.Manual.Context.InstrumentIds[row.InstrumentId])
+                _context.Manual.OnAllocateInstrument(_context.Primary.GetInstrument(row.InstrumentId).Header.InstrumentHeaderId);
+
+            // A request, not a row: the server's CoreGroup thread applies it in place and stamps the
+            // timestamp, the logging server appends the .risklimit line. The grid picks the change up
+            // on its next refresh.
+            ControlRiskLimit controlRiskLimit = edited.Value;
+            controlRiskLimit.ClientId = _context.Manual.ClientId();
+            _context.Manual.OnControlRiskLimit(in controlRiskLimit);
         }
         catch (Exception ex)
         {

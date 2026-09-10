@@ -102,15 +102,8 @@ public sealed class WidgetOrderAudit
             _ => Action.ToString()
         };
 
-        Timestamp = (Execution.OrderType)OrderType switch
-        {
-            Execution.OrderType.OrderState => OrderHeader.ExchangeTimestamp,
-            Execution.OrderType.OrderTarget => OrderHeader.NicTimestamp,
-            Execution.OrderType.Fill => OrderHeader.ExchangeTimestamp,
-            Execution.OrderType.OrderRejected => OrderHeader.ExchangeTimestamp.NanosSinceEpoch == 0 ? OrderHeader.NicTimestamp : OrderHeader.ExchangeTimestamp,
-            Execution.OrderType.Position => OrderHeader.ExchangeTimestamp,
-            _ => OrderHeader.ExchangeTimestamp
-        };
+        // One clock for every row: the NicTimestamp, which is also the logging server's sort key.
+        Timestamp = OrderHeader.NicTimestamp;
     }
 }
 
@@ -315,7 +308,10 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
 
     private void OnLiveLines(List<string> lines)
     {
-        List<WidgetOrderAudit> audits = ParseLines(lines);
+        // The tail delivers oldest first, history pages newest first: reverse so ties sort the same way in both.
+        List<string> newestFirstLines = new List<string>(lines);
+        newestFirstLines.Reverse();
+        List<WidgetOrderAudit> audits = ParseLines(newestFirstLines);
         Dispatcher.UIThread.Post(() =>
         {
             // Insert at top of master list (assuming new lines are newer)
@@ -334,7 +330,8 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
         {
             if (TryCreateAudit(line, out WidgetOrderAudit wa)) audits.Add(wa);
         }
-        audits.Sort((a, b) => b.Timestamp.CompareTo(a.Timestamp));
+        // Stable: rows sharing a NicTimestamp (a target and its trigger, a fill and its position) keep file order.
+        audits = audits.OrderByDescending(audit => audit.Timestamp).ToList();
 
         return audits;
     }

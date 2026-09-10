@@ -227,6 +227,12 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
 
     private void PerformChangeAlgoStatus(WidgetPosition pos, AlgoStatus targetAlgoStatus)
     {
+        // The control travels on the instrument's execution channel, which the server polls only
+        // for clients allocated in that CoreGroup: allocate first if this GUI client is not yet
+        // (queued ahead of the control on the manual client's owner thread, blocks on the echo).
+        if (!_context.Manual.Context.InstrumentIds[pos.InstrumentId])
+            _context.Manual.OnAllocateInstrument(_context.Primary.GetInstrument(pos.InstrumentId).Header.InstrumentHeaderId);
+
         ControlAlgoStatus controlAlgoStatus = new ControlAlgoStatus()
         {
             AlgoStatus = targetAlgoStatus,
@@ -241,6 +247,9 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
     {
         foreach (var pos in _positions.Values)
         {
+            if (!_context.Manual.Context.InstrumentIds[pos.InstrumentId])
+                _context.Manual.OnAllocateInstrument(_context.Primary.GetInstrument(pos.InstrumentId).Header.InstrumentHeaderId);
+
             ControlAlgoStatus controlAlgoStatus = new ControlAlgoStatus()
             {
                 AlgoStatus = targetAlgoStatus,

@@ -4,7 +4,36 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
-## Unreleased (working tree, 2026-09-09)
+## 2026-09-10 — single-writer server rows, server-wide RiskLimit, audit-trail fixes
+
+### Audit-trail fixes from the 2026-09-08 live run (see Spec.md "Cancel-pending orders")
+
+- `Provider/Position.cs`, `Strategy/Algo.cs` — a side with an unconfirmed cancel takes no new
+  orders: the actives enumerator reports `IsPendingBuyCancel` / `IsPendingSellCancel`,
+  `SnapshotActives()` captures them under the era rule, Phase 5's per-tick lock is seeded from
+  them. RTY, NQ and NKD each hit `PositionExceedsRiskLimit` ~400 µs after a cancel-all on
+  2026-09-08 because the replacement was counted alongside the still-reserved cancel.
+- `Provider/RiskLayer.cs` — the server's `TargetIsActive` no-op check is Amend-only. A Cancel
+  always equals the acked profile, so with the check applied every first cancel was refused (69 of
+  69 on 2026-09-08) and only the Seq+2 retry got through a round trip later.
+- `Execution/Order.cs`, `Provider/Client.cs`, `Provider/Server.cs` — one clock for the audit:
+  `OrderTarget` gains `TriggerTimestamp` (NIC arrival of the message the target reacted to; 44 →
+  52 bytes, wire), `OrderHeader.NicTimestamp` on a target is the client's send time, the server
+  stamps `NicTimestamp = now` on every state it applies (fills share their state's stamp) and on
+  its own rejects (so a reject sorts after the target it copies).
+- `Logging/LoggingServer.cs`, `Widget/AuditTrailWidget.axaml.cs` — the logging server orders
+  execution records by `NicTimestamp` (`RiskLimit` by its own `Timestamp`, control requests at the
+  watermark); the audit widget uses the same key, stable-sorted, and reverses the live tail so ties
+  sort as in history.
+- `Provider/AlertManager.cs` — alert wire is `Header | [OrderRejected | String64 Symbol] | ASCII
+  message`; the symbol is resolved and an exception rendered on the alert thread, never the
+  caller's. `AlertWriter` decodes through the same `Alert.FromBytes`.
+- `Strategy/Scenario.cs`, `Testing/*` — `GetFuture` only registers a product search in
+  simulation; the Testing scenario pairs micro/full contracts (MYM/YM, M2K/RTY, MNQ/NQ, MNK/NKD);
+  profit series per root/total via before/after tick hooks.
+- `cpp_alignment_report_2026-09-10.md` (new) — amends the 2026-09-08 report for everything in this
+  entry: `OrderTarget` 52 B, `RiskLimit` 32 B, `ControlRiskLimit`, `OrderRisk` layout, threading
+  model, `NicTimestamp` stamping, verification checklist.
 
 ### `OrderRisk` quantity ceiling 55 → 65535 (see Spec.md)
 
@@ -16,6 +45,46 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 - `cpp_alignment_report_2026-09-10_orderrisk.md` — port note for the C++ side (layout, semantics,
   reference implementation, and the differential test that validated the C# struct — 400k random
   ops against a plain list; the C# test itself is not in the repo).
+
+### Risk-limit edits are requests: `ControlRiskLimit` on the execution channel (see Spec.md)
+
+- `Provider/Allocate.cs` — `ControlRiskLimit` (`ControlType.RiskLimit = 201`): config fields only.
+- `Provider/Server.cs` — `ReadExecution` applies it on the CoreGroup thread (`OnControlRiskLimit`:
+  fields in place under the row's seq bump, aggregates untouched, the row posted to the server's
+  audit socket — the request itself is not audited, the client tap already logs it). `OnRiskLimit`
+  and `SaveRiskLimit` deleted: the server no longer accepts a `RiskLimit` row from a client and no
+  longer writes `.risklimit` files.
+- `Logging/LoggingServer.cs` — the `AuditWriter` appends a posted `RiskLimit` row to
+  `RiskLimits/<symbol>.risklimit` (`_riskLimitWriters`, same path helper the server reads back at
+  allocation; the reader flushes every writer per batch, like fills and positions). Only the
+  server's audit socket ever carries a row now. `ControlRiskLimit` gets a serializer case so the
+  tapped request appears in the client's audit.
+- `Provider/Client.cs`, `Provider/TCPServer.cs`, `Widget/RiskLimitEditDialog.axaml.cs`,
+  `Widget/RiskLimitsWidget.axaml.cs` — send the request on the instrument's execution channel
+  instead of the row on the admin channel.
+- `ControlAlgoStatus` moved the same way: `Client.OnControlAlgoStatus` writes it on the instrument's
+  execution channel, `ReadExecution` audits and applies it, `ReadAdmin` no longer accepts it. The
+  admin thread now touches no instrument row after allocation.
+- `Widget/RiskLimitsWidget.axaml.cs`, `Widget/PositionsWidget.axaml.cs` — the server polls a
+  client's execution channel only for CoreGroups it has allocated in, so the GUI allocates the
+  instrument to its manual client first when it has not (queued ahead of the control).
+- `cpp_alignment.md` §5 and the 2026-09-08 report C3/C4 — the copy-the-live-`Worst*` item replaced;
+  the queue-routing prescription amended to channel routing.
+- `Provider/Context.cs` — client-level `AllocateInstrument(clientId, instrumentId)` returns early
+  when the client's bit is already set. It used to rewrite the live local position row from file
+  (forcing Paused) and RMW the bitsets on every call from the admin thread — the strategy-0 union
+  rule re-ran it on every other client's allocation of the same instrument, against a row the
+  CoreGroup thread may be filling. Rows are now initialised exactly once, like the instrument-level
+  half; the admin thread no longer writes any row a client is trading.
+- `Provider/Server.cs` — threading comments rewritten: there is no RX thread. One CoreGroup thread
+  per segment runs `ReadFromIlink()` then `ReadFromClients()`, so exchange events and client
+  targets/controls apply on one thread; the injection queue's only producers are off-thread cancels
+  (client close on the listen thread, hub); the return-channel spinlock is uncontended insurance.
+- **`StrategyId` removed from `RiskLimit` and `ControlRiskLimit`** — risk limits are server-wide,
+  one row per instrument; the field was never enforced or restored per strategy and only decided
+  where an echo went. `RiskLimit` is 32 bytes (was 36; `sizeof` assert amended in the C++ note),
+  `ControlRiskLimit` 20. The strategy echo is gone (no client consumed it); the row is posted to
+  the server audit only. RiskLimits widget drops its StrategyId column.
 - `cpp_alignment.md` §3 and the 2026-09-08 report — layout paragraph amended; `sizeof == 64` and
   the reject reasons are unchanged, so only the field list moves for the C++ port.
 

@@ -20,6 +20,7 @@ public enum AllocateType : byte
 public enum ControlType : byte
 {
     AlgoStatus = 200,
+    RiskLimit = 201,
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -60,6 +61,22 @@ public struct ControlAlgoStatus()
     public int StrategyId = -1;
     public int InstrumentId = -1;
     public AlgoStatus AlgoStatus = AlgoStatus.Paused;
+    public override string ToString()
+    {
+        return Json.Serialize(this);
+    }
+}
+
+// Client -> server request: config fields only. Risk limits are server-wide (one row per instrument); the server owns the row and a client never sends one (see Spec.md).
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[RegisterJson]
+public struct ControlRiskLimit()
+{
+    public readonly Header<ControlType> Header = new(ControlType.RiskLimit);
+    public int ClientId = -1;
+    public int InstrumentId = -1;
+    public int MaxOrderQuantity = 0;
+    public int MaxPositionQuantity = 0;
     public override string ToString()
     {
         return Json.Serialize(this);

@@ -1,5 +1,9 @@
 # C++ alignment report — 2026-09-08 (supersedes cpp_alignment.md and cpp_alignment_report_2026-09.md)
 
+> **Amended by `cpp_alignment_report_2026-09-10.md`** — read this report first, then that one; where
+> they disagree the 2026-09-10 report wins (`OrderTarget` 52 bytes, `RiskLimit` 32 bytes,
+> `ControlRiskLimit`, `OrderRisk` layout, threading model, NicTimestamp stamping).
+
 Compared **C++ github.com/emilbigaj/HFT_cpp `aeac53c`** (fresh clone, verified file-by-file
 2026-09-08) against **C# github.com/emilbigaj/HFT_csharp `2e1ddfa`** (the spread trading vertical).
 C# is the source of truth for every item. Both older alignment docs are folded in here; read only
@@ -168,7 +172,10 @@ These values cross the wire as bit positions in `OrderRejected.OrderRejectedReas
 
 `PositionTooLarge` does not exist in C# — delete it. Copy the C# enum verbatim.
 
-## A5. `RiskLimit` — 36 bytes, rate limits deleted (Order.hpp:144)
+## A5. `RiskLimit` — 32 bytes, rate limits deleted (Order.hpp:144)
+
+**Amended 2026-09-10: `StrategyId` is REMOVED — risk limits are server-wide, one row per
+instrument.** (This section said 36 bytes with `StrategyId` at offset 16 until then.)
 
 Clone still has the 40-byte struct with `RateLimit` members. C#:
 
@@ -179,14 +186,13 @@ struct RiskLimit
     Data::Header<OrderType> Header = Data::Header<OrderType>(OrderType::RiskLimit); // 4
     int32_t         InstrumentId = 0;
     Tools::Timestamp Timestamp = Tools::Timestamp::MinValue();   // 8
-    int32_t         StrategyId = -1;                             // -1 = server-wide
     int32_t         MaxOrderQuantity = 0;
     int32_t         MaxPositionQuantity = 0;
     int32_t         WorstLongWorkingQuantity = 0;                // aggregate, >= 0
     int32_t         WorstShortWorkingQuantity = 0;               // aggregate, <= 0
 };
 #pragma pack(pop)
-static_assert(sizeof(RiskLimit) == 36);
+static_assert(sizeof(RiskLimit) == 32);
 ```
 
 Helpers: `GetLongQuantityAllowance(pos) = max(0, MaxPositionQuantity - pos - WorstLong)`,
@@ -495,13 +501,17 @@ server leaf name; no admin echo, no poll bit for id 0.
   TTAS acquire, release = plain store; C# uses byte-wide exchange on the bool — never a 4-byte RMW.
 - **C3. Single-writer discipline (was N7) — now THREE row families**: positions, order states, AND
   risk-limit rows (B2's check-then-commit is only sound on one owner thread). `OnQuantityAhead`
-  (MDP3 thread) and `OnControlAlgoStatus` (admin thread) must route to the owner thread via the
-  injection-queue pattern, never write rows directly. This is the slot-64 torn-seqlock root cause.
-  No CAS — the decision is single-writer.
+  (MDP3 thread) and `OnControlAlgoStatus` (admin thread) must route to the owner thread, never
+  write rows directly. This is the slot-64 torn-seqlock root cause. No CAS — the decision is
+  single-writer. *(Amended 2026-09-10: the C# routes `ControlAlgoStatus` and `ControlRiskLimit` by
+  having the client send them on the instrument's CoreGroup channel, read by `ReadExecution` —
+  not through the injection queue; see cpp_alignment.md §5.)*
 - **C4. Behavior fixes**: type-guards on every `AsFuture()`/`AsLegged()` overlay access (a realtime
   context contains spreads and empty slots — and remember B1: `Spread` is not a `Future`, so the
-  ctor chain must not read `FutureHeader`); `OnRiskLimit` operator edits copy the LIVE `Worst*`
-  from the existing row over the incoming struct; count-and-expose unknown message types (the C#
+  ctor chain must not read `FutureHeader`); risk-limit edits arrive as `ControlRiskLimit` requests
+  on the execution channel and are applied field-wise by the CoreGroup thread — see
+  cpp_alignment.md §5 (amended 2026-09-10; the earlier copy-the-live-`Worst*` workaround is
+  superseded); count-and-expose unknown message types (the C#
   unknown-type flood came from ONE uninitialized `Header` type byte on in-place-constructed
   fills — in C++, any `Fill` built over raw ring memory must run its default member initializers).
 - **C5. Json**: C# now serializes with the relaxed encoder ('+' writes literally, not `\u002B`).
@@ -514,7 +524,8 @@ server leaf name; no admin echo, no poll bit for id 0.
 
 # Part D — verification checklist
 
-1. `static_assert`: `sizeof(Fill)==64` + `offsetof(Fill,Price)==40`; `sizeof(RiskLimit)==36`;
+1. `static_assert`: `sizeof(Fill)==64` + `offsetof(Fill,Price)==40`; `sizeof(RiskLimit)==32`
+   (was 36 — `StrategyId` removed 2026-09-10, see cpp_alignment.md §5);
    `sizeof(OrderRisk)==64`; `sizeof(Header<T>)==4`; `ServerHeader` Persistance at 172, sizeof 173;
    `sizeof(LegHeader)==8`; `LeggedHeader` fits in 128; `OrderState` offsets per A2.
 2. Numeric parity dumps for every enum in A3/A4/A8 against the C# source.

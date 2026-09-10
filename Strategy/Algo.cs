@@ -53,16 +53,22 @@ public unsafe abstract class Algo
 
     private readonly ArrayList<ActiveTarget> _activeTargets = new ArrayList<ActiveTarget>(s_maxOrders);
     private bool _hasSnapshot;
+    // Sides with a cancel sent in an earlier tick that the exchange has not confirmed yet (see Spec.md).
+    private bool _isPendingBuyCancel;
+    private bool _isPendingSellCancel;
 
     // Take at the top of the tick, BEFORE reading position — the era rule (see Spec.md).
     public void SnapshotActives()
     {
         _hasSnapshot = true;
         _activeTargets.Clear();
-        foreach (ActiveTarget active in Position.ActiveTargets)
+        Position.ActiveTargetsEnumerator activeTargets = Position.ActiveTargets.GetEnumerator();
+        while (activeTargets.MoveNext())
         {
-            _activeTargets.Add(active);
+            _activeTargets.Add(activeTargets.Current);
         }
+        _isPendingBuyCancel = activeTargets.IsPendingBuyCancel;
+        _isPendingSellCancel = activeTargets.IsPendingSellCancel;
     }
 
     protected int GetPositionQuantity()
@@ -319,9 +325,9 @@ public unsafe abstract class Algo
         // ---------------------------------------------------------
         // Phase 5: Cancel Unused
         // ---------------------------------------------------------
-        // TRACKING: If we cancel anything, we lock that side for New Orders this tick.
-        bool isPendingSellCancel = false;
-        bool isPendingBuyCancel = false;
+        // TRACKING: this tick's cancels and earlier ticks' unconfirmed cancels lock that side for New Orders (see Spec.md).
+        bool isPendingSellCancel = _isPendingSellCancel;
+        bool isPendingBuyCancel = _isPendingBuyCancel;
 
         while (unmatchedActiveKeys.TryPopLowest(out int activeKeyIndex))
         {

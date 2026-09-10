@@ -21,7 +21,8 @@ namespace Provider;
 // so the inbound exchange-facing methods (OnFill/OnOrderState/OnOrderRejected/OnMarketByPrice/
 // OnTrade) are called on release from the queue, and the outbound callbacks (OrderTarget, Fill, …)
 // are where the simulator re-applies delay on the way out. In realtime the same methods are driven
-// by the vendor session instead, with no queue at either end.
+// by the vendor session on the CoreGroup thread itself — one loop per segment runs ReadFromIlink()
+// then ReadFromClients() — with no queue at either end and no separate RX thread.
 //
 // Divergences from the C++, all forced rather than chosen:
 //  - NewSeries/LoggableManager are omitted: Series<T> and LoggableManager live in the Strategy
@@ -50,16 +51,19 @@ public class Server : IDisposable
         public bool Flag;
     }
 
-    // Guards WriteToExecution (return channel, S->C). Multi-writer per segment (RX fills/states +
-    // send create-acks) but same CCD, so the lock line stays CCD-resident.
+    // Guards WriteToExecution (return channel, S->C). The CoreGroup thread is the only writer today
+    // (fills, states, rejects, positions); the lock stays as cheap insurance against a rare
+    // off-thread writer on the same CCD, so the lock line stays CCD-resident.
     private readonly ExecutionLock[] _recvFromExchangeLocks = new ExecutionLock[8];
 
-    // Guards the PRODUCER end of the injection queue below. Only writers contend (hub + vendor RX);
-    // the ReadExecution(cg) thread is the sole reader and takes no lock (ByteQueue SPSC read side).
+    // Guards the PRODUCER end of the injection queue below. Only off-thread writers contend (client
+    // close on the listen thread, hub); the ReadExecution(cg) thread is the sole reader and takes no
+    // lock (ByteQueue SPSC read side).
     private readonly ExecutionLock[] _sendToExchangeLocks = new ExecutionLock[8];
 
-    // Per-CoreGroup OrderTarget injection queue: hub + vendor RX EnqueueOrderTarget() here, the
-    // ReadExecution(cg) thread drains and sends, so it stays the sole order sender.
+    // Per-CoreGroup OrderTarget injection queue: off-thread cancels (client close on the listen
+    // thread, hub) EnqueueOrderTarget() here, the ReadExecution(cg) thread drains and sends, so it
+    // stays the sole order sender.
     private readonly ByteQueue?[] _orderTargetQueues = new ByteQueue?[8];
 
     // Per CoreGroup: which clients trade it (= the clients ReadExecution(coreGroupId) polls). Set on
@@ -160,8 +164,9 @@ public class Server : IDisposable
         _serverSocket.Listen();
     }
 
-    // Producer API for the injection queue (derives cg from the instrument). Hub + vendor RX call this
-    // instead of sending; writers serialise on _sendToExchangeLocks, full queue spins (never drops).
+    // Producer API for the injection queue (derives cg from the instrument). Off-thread cancels (listen
+    // thread, hub) call this instead of sending; writers serialise on _sendToExchangeLocks, full queue
+    // spins (never drops).
     public void EnqueueOrderTarget(in OrderTarget orderTarget)
     {
         Instrument instrument = _serverContext.GetInstrument(orderTarget.OrderHeader.OrderId.InstrumentId);
@@ -173,14 +178,15 @@ public class Server : IDisposable
         MemoryMarshal.Write(dst, in orderTarget);
     }
 
-    // Per-CoreGroup hot poll: ONE thread per CoreGroup busy-polls this with its own coreGroupId,
-    // reading every connected client's channel for THIS segment and dispatching its OrderTargets.
+    // Per-CoreGroup hot loop: ONE thread per CoreGroup runs ReadFromIlink() then this with its own
+    // coreGroupId, so exchange fills/states/rejects and every connected client's targets and controls
+    // for THIS segment apply on the same thread — every row the segment owns has exactly one writer.
     // One reader thread per (client, channel) => SPSC-safe; different segments touch different
-    // ReadOnlySockets. It also drains the injection queue first (hub cancels + RX replays).
+    // ReadOnlySockets. It also drains the injection queue first (off-thread cancels).
     public void ReadExecution(int coreGroupId)
     {
-        // Drain injected OrderTargets first (hub cancels + RX replays): sole reader, no lock. Copy out
-        // and Dequeue before sending so the slot frees ahead of a slow SendOrder.
+        // Drain injected OrderTargets first (off-thread cancels): sole reader, no lock. Copy out and
+        // Dequeue before sending so the slot frees ahead of a slow SendOrder.
         ByteQueue? injected = _orderTargetQueues[coreGroupId];
         if (injected != null)
         {
@@ -215,6 +221,18 @@ public class Server : IDisposable
                         OnControlAlgoStatus(orderRejected.OrderHeader.OrderId.StrategyId, orderRejected.OrderHeader.OrderId.InstrumentId, AlgoStatus.Paused);
                         break;
                     }
+                    case (byte)ControlType.RiskLimit:
+                    {
+                        ref readonly ControlRiskLimit controlRiskLimit = ref MemoryMarshal.AsRef<ControlRiskLimit>(rdst);
+                        OnControlRiskLimit(in controlRiskLimit);
+                        break;
+                    }
+                    case (byte)ControlType.AlgoStatus:
+                    {
+                        ref readonly ControlAlgoStatus controlAlgoStatus = ref MemoryMarshal.AsRef<ControlAlgoStatus>(rdst);
+                        OnControlAlgoStatus(controlAlgoStatus.StrategyId, controlAlgoStatus.InstrumentId, controlAlgoStatus.AlgoStatus);
+                        break;
+                    }
                     default:
                         break;
                 }
@@ -222,31 +240,49 @@ public class Server : IDisposable
         }
     }
 
-    public void OnRiskLimit(in RiskLimit riskLimit)
+    public void ReadAdmin()
     {
-        // The sender read-modify-writes the whole struct, so the running working quantities in its
-        // copy are as stale as the moment it opened the edit dialog. They are server-owned state, not
-        // config — carry the live ones across or an operator editing a limit silently rewinds them.
-        RiskLimit riskLimitCopy = riskLimit;
-        ref readonly RiskLimit existing = ref _serverContext.GetRiskLimit(riskLimit.InstrumentId).GetReadonlyRef();
-        riskLimitCopy.WorstLongWorkingQuantity = existing.WorstLongWorkingQuantity;
-        riskLimitCopy.WorstShortWorkingQuantity = existing.WorstShortWorkingQuantity;
+        foreach (int clientId in _serverSocket.ClientIds())
+        {
+            while (_serverSocket.TryRead(clientId, SocketChannel.Admin, out ReadOnlySpan<byte> rdst) == ReadStatus.New)
+            {
+                if (rdst.IsEmpty)
+                    continue;
 
-        _serverContext.GetRiskLimit(riskLimit.InstrumentId).Write(in riskLimitCopy);
-        if (riskLimitCopy.StrategyId >= 0)
-            WriteToExecution(riskLimitCopy.StrategyId, _serverContext.GetInstrument(riskLimit.InstrumentId).Header.CoreGroupId, in riskLimitCopy);
-        SaveRiskLimit(riskLimit.InstrumentId, in riskLimitCopy);
+                byte msgType = rdst[0];
+                switch (msgType)
+                {
+                    case (byte)AllocateType.Instrument:
+                        {
+                            AllocateInstrument allocateInstrument = MemoryMarshal.Read<AllocateInstrument>(rdst);
+                            OnAllocateInstrument(clientId, ref allocateInstrument);
+                            break;
+                        }
+                    default:
+                        break;
+                }
+            }
+        }
     }
 
-    public void SaveRiskLimit(int instrumentId, in RiskLimit riskLimit)
+    // CoreGroup thread only — the row's sole writer. Config fields in place under the seq bump; the
+    // working quantities are never touched, so an edit cannot rewind a reservation (see Spec.md).
+    public void OnControlRiskLimit(in ControlRiskLimit controlRiskLimit)
     {
-        string symbol = _serverContext.GetInstrument(instrumentId).Symbol;
-        FileSystemPath riskLimitFilePath = Provider.Context.GetRiskLimitsFilePath(_serverContext.DirectoryPath, symbol);
-        string riskLimitLine = Json.SerializeToLine(riskLimit);
-        Console.WriteLine($"Server::SaveRiskLimit({riskLimitFilePath}):{Environment.NewLine}{riskLimitLine}");
-        File.AppendAllLines(riskLimitFilePath, new string[] { riskLimitLine });
+        ref SharedArrayEntry<RiskLimit> riskLimitEntry = ref _serverContext.GetRiskLimit(controlRiskLimit.InstrumentId);
+        ref RiskLimit riskLimit = ref riskLimitEntry.GetRef();
+        riskLimitEntry.AcquireLock();
+        riskLimit.MaxOrderQuantity = controlRiskLimit.MaxOrderQuantity;
+        riskLimit.MaxPositionQuantity = controlRiskLimit.MaxPositionQuantity;
+        riskLimit.Timestamp = Clock.Now;
+        riskLimitEntry.ReleaseLock();
+
+        // Server-wide limit: the posted row is what the logging server appends to the server's .risklimit file.
+        int coreGroupId = _serverContext.GetInstrument(controlRiskLimit.InstrumentId).Header.CoreGroupId;
+        WriteToAudit(coreGroupId, in riskLimit);
     }
 
+    // CoreGroup thread only (ReadExecution, Reject): the local position row's sole writer alongside OnFill.
     public void OnControlAlgoStatus(int strategyId, int instrumentId, AlgoStatus algoStatus)
     {
         Timestamp now = Clock.Now;
@@ -289,43 +325,6 @@ public class Server : IDisposable
         }
     }
 
-    public void ReadAdmin()
-    {
-        foreach (int clientId in _serverSocket.ClientIds())
-        {
-            while (_serverSocket.TryRead(clientId, SocketChannel.Admin, out ReadOnlySpan<byte> rdst) == ReadStatus.New)
-            {
-                if (rdst.IsEmpty)
-                    continue;
-
-                byte msgType = rdst[0];
-                switch (msgType)
-                {
-                    case (byte)AllocateType.Instrument:
-                    {
-                        AllocateInstrument allocateInstrument = MemoryMarshal.Read<AllocateInstrument>(rdst);
-                        OnAllocateInstrument(clientId, ref allocateInstrument);
-                        break;
-                    }
-                    case (byte)ControlType.AlgoStatus:
-                    {
-                        ref readonly ControlAlgoStatus controlAlgoStatus = ref MemoryMarshal.AsRef<ControlAlgoStatus>(rdst);
-                        OnControlAlgoStatus(controlAlgoStatus.StrategyId, controlAlgoStatus.InstrumentId, controlAlgoStatus.AlgoStatus);
-                        break;
-                    }
-                    case (byte)OrderType.RiskLimit:
-                    {
-                        ref readonly RiskLimit riskLimit = ref MemoryMarshal.AsRef<RiskLimit>(rdst);
-                        OnRiskLimit(in riskLimit);
-                        break;
-                    }
-                    default:
-                        break;
-                }
-            }
-        }
-    }
-
     public void OnInstrumentHeader(in InstrumentHeader128 instrumentHeader128)
     {
         _serverContext.OnInstrumentHeader(in instrumentHeader128);
@@ -343,6 +342,7 @@ public class Server : IDisposable
 
     public OrderState OnOrderState(ref OrderState orderState)
     {
+        orderState.OrderHeader.NicTimestamp = Clock.Now;
         ref OrderState existingOrderState = ref WriteOrderState(ref orderState);
         WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
         OrderState?.Invoke(in existingOrderState);
@@ -372,7 +372,7 @@ public class Server : IDisposable
             existingOrderState.OrderStateReason = orderState.OrderStateReason;
             existingOrderState.QuantityFilled = quantityFilled;
             existingOrderState.OrderHeader.ExchangeTimestamp = orderState.OrderHeader.ExchangeTimestamp;
-            existingOrderState.OrderHeader.NicTimestamp = Clock.Now;
+            existingOrderState.OrderHeader.NicTimestamp = orderState.OrderHeader.NicTimestamp;
             orderStateEntry.ReleaseLock();
             _riskLayer.OnOrderState(in existingOrderState, beforeAckedOrderQuantity);
         }
@@ -451,6 +451,7 @@ public class Server : IDisposable
                 OrderProfile = orderTarget.OrderProfile,
                 OrderRejectedReasons = orderRejectedReasons,
             };
+            orderRejected.OrderHeader.NicTimestamp = Clock.Now;   // server reply: own stamp, so it sorts after the target it copies
             Reject(in orderRejected, "Rejected by Server Risk Layer");
         }
     }
@@ -540,6 +541,7 @@ public class Server : IDisposable
             throw new ArgumentOutOfRangeException(nameof(orderState), "Server.OnFill: unknown clientOrderId");
 
         Timestamp now = Clock.Now;
+        orderState.OrderHeader.NicTimestamp = now;   // same stamp as its fills: equal NIC keeps ring order (state, fill, position) in the audit
         foreach (ref Fill fill in fills)
         {
             // Leg ids differ from the order's only in the InstrumentId bits, so GlobalIndex (client +
@@ -683,9 +685,9 @@ public class Server : IDisposable
     }
 
     // Canonical return-channel writer. EVERY write to a CoreGroup channel (fill, state, reject,
-    // position) funnels through here so the per-CoreGroup spinlock serialises the segment's RX
-    // thread (the near-constant holder) against the rare send/admin/cancel writer on the same CCD.
-    // Without the lock on THIS (hot) path the rare concurrent reject would tear the SPSC ring.
+    // position) funnels through here. The CoreGroup thread is the only writer today; the
+    // per-CoreGroup spinlock stays so a rare off-thread writer on the same CCD can never tear the
+    // SPSC ring, and an uncontended lock costs nothing on this (hot) path.
     public void WriteToExecution<T>(int clientId, int coreGroupId, in T value) where T : unmanaged
     {
         using RAIISpinLock spinLock = new(ref _recvFromExchangeLocks[coreGroupId].Flag);
@@ -701,9 +703,9 @@ public class Server : IDisposable
         WriteToExecution(orderHeader.OrderId.ClientId, coreGroupId, in value);
     }
 
-    // Per-CoreGroup audit: channelId == CoreGroupId (0 = admin). Each segment's RX thread owns its
-    // own audit channel and admin owns channel 0, so every channel is single-writer => no lock and
-    // no cross-CCD bounce on the fill path.
+    // Per-CoreGroup audit: channelId == CoreGroupId (0 = admin). Each CoreGroup thread owns its own
+    // audit channel and admin owns channel 0, so every channel is single-writer => no lock and no
+    // cross-CCD bounce on the fill path.
     public void WriteToAudit<T>(int channelId, in T value) where T : unmanaged
     {
         _audit.Write(channelId, in value);

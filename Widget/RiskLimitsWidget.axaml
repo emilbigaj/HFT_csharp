@@ -37,7 +37,6 @@
 			<DataGridTextColumn Header="ShortSymbol"     Binding="{Binding ShortSymbol}"           Width="Auto"/>
 			<DataGridTextColumn Header="Symbol"          Binding="{Binding Symbol}"                Width="Auto" IsVisible="False"/>
 			<DataGridTextColumn Header="InstrumentId"    Binding="{Binding InstrumentId}"          Width="Auto" IsVisible="False"/>
-			<DataGridTextColumn Header="StrategyId"      Binding="{Binding StrategyId}"            Width="Auto"/>
 			<DataGridTextColumn Header="Position"        Binding="{Binding PositionQuantity}"      Width="Auto"/>
 			<DataGridTextColumn Header="MaxOrderQuantity"     Binding="{Binding MaxOrderQuantity}"   Width="Auto"/>
 			<DataGridTextColumn Header="MaxPositionQuantity"  Binding="{Binding MaxPositionQuantity}" Width="Auto"/>

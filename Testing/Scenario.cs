@@ -83,22 +83,34 @@ public class TestingScenario : Scenario
         int[] months = new int[] { 3, 6, 9, 12 };
         if (CoreGroupName == CoreGroupId.SandP500)
         {
-            Future quote = GetFuture("XCME", "BTC", SimulationEnd);
-            Future hedge = GetFuture("XCME", "MBT", SimulationEnd);
-            strategy.OnFuture(quote, hedge);
-
-
-            Spread spread = GetSpread("XCME", "MES", Clock.Now, Clock.Now);
-            strategy.OnSpread(spread);
-            return;
-/*
-
-            FutureChain quoteChain = GetFutureChain("XCME", "MES", Clock.Now);
-            foreach(Future quote in quoteChain.Futures)
             {
-                Future hedge = GetFuture("XCME", "ES", quote.MaturityDate.Date);
-                strategy.OnFuture(quote, hedge);
-            }*/
+                Future quote = GetFuture("XCBT", "MYM", Clock.Now);
+                strategy.OnFuture(quote, quote);
+
+                Future hedge = GetFuture("XCBT", "YM", Clock.Now);
+                strategy.OnFuture(hedge, hedge);
+            }
+            {
+                Future quote = GetFuture("XCME", "M2K", Clock.Now);
+                strategy.OnFuture(quote, quote);
+
+                Future hedge = GetFuture("XCME", "RTY", Clock.Now);
+                strategy.OnFuture(hedge, hedge);
+            }
+
+            {
+                Future quote = GetFuture("XCME", "MNQ", Clock.Now);
+                strategy.OnFuture(quote, quote);
+                Future hedge = GetFuture("XCME", "NQ", Clock.Now);
+                strategy.OnFuture(hedge, hedge);
+            }
+
+            {
+                Future quote = GetFuture("XCME", "MNK", Clock.Now);
+                strategy.OnFuture(quote, quote);
+                Future hedge = GetFuture("XCME", "NKD", Clock.Now);
+                strategy.OnFuture(hedge, hedge);
+            }
         }
         else if (CoreGroupName == CoreGroupId.Equity)
         {

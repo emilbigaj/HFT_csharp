@@ -69,6 +69,35 @@ cancel/replace). Behind those two sits the invariant alarm: anything that still 
 `Target()` falls back to snapshotting on entry for un-migrated callers — era-unsafe but identical
 to pre-snapshot behaviour — and consumes the snapshot, so a stale list can never be zippered twice.
 
+### Cancel-pending orders are not free capacity
+
+`Position.ActiveTargets` is the *expected future state*: an order whose cancel is sent (a Cancel
+target, or an amend down to at most the filled quantity) is not in it, because its future is
+"gone" and the zipper must never amend it. But it is not gone yet: the exchange holds it until it
+acks, and the server's `RiskLayer` keeps its worst-case quantity reserved until the exchange
+reports `Done`. Until 2026-09-09 the algo saw only the empty side, Phase 7 created a replacement,
+and the server counted both — `PositionExceedsRiskLimit`, instrument paused. 2026-09-08
+(SandP500_Testing on CME_NewRelease): RTY, NQ and NKD each did exactly that, ~400 µs after a
+cancel-all, on the first quote back from a book clear.
+
+**Rule: a side with an unconfirmed cancel takes no new orders.** The enumerator keeps hiding the
+order but reports *why* through `IsPendingBuyCancel` / `IsPendingSellCancel` (side from the acked
+profile, which is never zero for an acked order). `SnapshotActives()` captures the flags in the
+same pass as the actives, under the era rule, and Phase 7's per-tick lock is seeded from them. The
+lock releases on the same `Done` that releases the server's reservation, so client and server agree
+on capacity by construction. A rejected cancel flips `targetRejected`, the order reappears as
+active, and Phase 5 re-cancels it — the lock is set in that tick as before.
+
+Known limit: the lock covers new orders only. An amend-up of a *live* same-side order while
+another order's cancel is pending is still double-counted at the server. `Make` cannot produce it
+(one target per side); closing it needs the pending quantities, which the enumerator could report
+the same way.
+
+Related: the server's `TargetIsActive` no-op check is Amend-only. A Cancel is built as
+`working + filled` at the acked price, i.e. it always equals the acked profile, and with the check
+applied to cancels every first cancel of an acked order was refused (69 of 69 on 2026-09-08) and
+only the client's Seq+2 retry got through — one round trip later, on the next quote.
+
 ### OrderRisk: in-flight quantities are a scanned array, not a bitset
 
 Per order slot the server reserves the largest quantity that could end up working: the acked
@@ -94,6 +123,34 @@ Limits: quantity 1..65535 (`QuantityNotValid` outside), 30 in-flight targets per
 `RiskLimit.MaxOrderQuantity` remains the operative per-order bound; `Algo.NewAmend` still clamps to
 `OrderRisk.MaxOrderQuantity`. The differential test that validated the struct (400k random ops
 against a plain list) is specified in `cpp_alignment_report_2026-09-10_orderrisk.md` §6.
+
+### Risk-limit edits are requests; the CoreGroup thread owns the row
+
+Risk limits are server-wide: one `RiskLimit` row per instrument, applied to every strategy that
+trades it. `StrategyId` was removed from the row and the request on 2026-09-10 — it was never
+enforced or restored per strategy and only chose where an echo went; a per-strategy limit is a
+future feature, not a routing choice.
+
+A `RiskLimit` row mixes operator config (`MaxOrderQuantity`, `MaxPositionQuantity`)
+with server state (`WorstLong/ShortWorkingQuantity`, `Timestamp`). Until 2026-09-10 the GUI edited
+by sending the whole row back on the admin channel, and the admin thread wrote it whole while the
+CoreGroup thread was reserving and releasing in the same row; copying the live aggregates across
+before the write only shrank the window in which an edit rewound a reservation.
+
+**Rule: a client sends `ControlRiskLimit` (config fields only) on the instrument's execution
+channel, and only the CoreGroup thread writes the row.** `ReadExecution` applies the request in
+place under the row's seq bump and stamps `Timestamp`; the aggregates are written by nothing but
+the risk layer on that same thread. The server never writes `.risklimit` files: it posts the row to
+its audit channel and the logging server appends it through the same path helper the server reads
+back at allocation. A crash between the post and the append can lose that one line — the row in
+shared memory is the truth while the server is up, and the logging server flushes its writers
+after every batch it drains, so the window is one poll pass.
+
+`ControlAlgoStatus` follows the same rule: it travels on the instrument's execution channel and
+`ReadExecution` applies it, so the local position row's status has the same single writer as its
+fills. The admin thread's only remaining row writes are allocation. One consequence for GUIs: the
+server polls a client's execution channel only for CoreGroups that client has allocated in, so a
+workspace allocates the instrument to its manual client before sending a control for it.
 
 ## Instrument header immutability
 

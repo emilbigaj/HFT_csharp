@@ -989,6 +989,10 @@ public sealed class ServerContext : Context
 			return;
 		}
 
+        // Already allocated: the live row is fresher than its file and may be mid-fill on the CoreGroup thread — initialise once.
+        if (GetInstrumentIdsByClientId(clientId).GetReadonlyRef()[instrumentId])
+            return;
+
         ref InstrumentHeader128 header128 = ref GetInstrumentHeader(instrumentHeaderId).GetRef();
         Symbology symbology = header128.Symbology;
 

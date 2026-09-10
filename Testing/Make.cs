@@ -55,7 +55,7 @@ public sealed class Make : Algo
 
         if (Position.TryGetQuote(out Quote inst))
         {
-            double pc = inst.MidPrice * 0.00;
+            double pc = inst.MidPrice * 0.000;
             int spread = Instrument.RoundToTicks(pc);
             int half = Math.Max(spread / 2, 2);
 
@@ -132,7 +132,7 @@ public sealed class Make : Algo
         if (maxBuyTicks >= minSellTicks)
             return;
 
-            Target(ref targets);
+        Target(ref targets);
     }
 
 }

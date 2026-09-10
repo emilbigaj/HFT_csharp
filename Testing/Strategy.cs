@@ -14,67 +14,45 @@ namespace Testing;
 
 public class TestingStrategy : Strategy.Strategy
 {
-    Dictionary<string, List<Position>> _positionsByRoot = new Dictionary<string, List<Position>>();
-    Dictionary<string, Series<Point>> _profitByRoot = new Dictionary<string, Series<Point>>();
+    Dictionary<string, List<Series<Point>>> _profitByRoot = new Dictionary<string, List<Series<Point>>>();
+    List<Series<Point>> _profitTotal = new List<Series<Point>>();
+
+
+    public double GetTotal(List<Series<Point>> series)
+    {
+        double _profit = 0;
+        foreach(Series<Point> profit in series)
+            _profit += profit.Value.Value;
+        return _profit;
+    }
 
     private void OnPosition(Position position)
     {
         _positions.Add(position);
-        if (!_positionsByRoot.TryGetValue(position.Instrument.Root, out List<Position>? instrumentIds))
+        if (!_profitByRoot.TryGetValue(position.Instrument.Root, out List<Series<Point>>? profits))
         {
-            _profitByRoot[position.Instrument.Root] = NewSeries<Point>("Profit By Root");
-            instrumentIds = new List<Position>();
-            _positionsByRoot[position.Instrument.Root] = instrumentIds;
+            profits = new List<Series<Point>>();
+            _profitByRoot[position.Instrument.Root] = profits;
+            _profitTotal.Add(NewSeries($"Profit By {position.Instrument.Root}", ref TickTock!, () => GetTotal(profits)));
         }
-        instrumentIds.Add(position);
+        profits.Add(NewSeries($"Profit By {position.Instrument.Symbol}", ref BeforeTickTock!, () => position.Profit.Total));
     }
     public TestingStrategy(Scenario scenario) : base(scenario)
     {
         _latency = NewSeries<Point>("Latency");
-        _profit = NewSeries<Point>("Profit");
+        _profit = NewSeries("Profit", ref AfterTickTock!, () => GetTotal(_profitTotal));
         TickTocker tickTocker = new TickTocker(DirectoryPath, 1_000, OnTickTock);
-        TickTocker mstickTocker = new TickTocker(DirectoryPath, 1_00, OnMS100Timestamp);
 
-        TickTock += timestamp =>
-        {
-            double totalProfit = 0;
-            bool _valid = false;
-            foreach (Position position in _positions)
-            {
-                bool valid = double.IsFinite(position.Profit.Total);
-                totalProfit += valid ? position.Profit.Total : 0;
-                _valid |= valid;
-            }
-            if (_valid)
-                _profit.Append(new Point(timestamp, totalProfit));
+     }
 
-            foreach (KeyValuePair<string, List<Position>> kvp in _positionsByRoot)
-            {
-                bool valid = false;
-                double rootProfit = 0;
-                foreach (Position position in kvp.Value)
-                {
-                    bool positionValid = double.IsFinite(position.Profit.Total);
-                    rootProfit += positionValid ? position.Profit.Total : 0;
-                    valid |= positionValid;
-                }
-                if (valid)
-                    _profitByRoot[kvp.Key].Append(new Point(timestamp, rootProfit));
-            }
-
-        };
-    }
-    protected Action<Timestamp>? MS100;
-    private void OnMS100Timestamp(Timestamp timestamp)
-    {
-        MS100?.Invoke(timestamp);
-    }
-
-
+    protected Action<Timestamp>? BeforeTickTock;
     protected Action<Timestamp>? TickTock;
+    protected Action<Timestamp>? AfterTickTock;
     private void OnTickTock(Timestamp timestamp)
     {
+        BeforeTickTock?.Invoke(timestamp);
         TickTock?.Invoke(timestamp);
+        AfterTickTock?.Invoke(timestamp);
     }
 
     private readonly Series<Point> _latency;
@@ -93,9 +71,9 @@ public class TestingStrategy : Strategy.Strategy
 
         OnPosition(position: position);
 
-        Make executionAlgo = new Make(position, Client, lead, friend);
+        Make makeQuote = new Make(position, Client, lead, friend);
 
-        
+
         // Hook up the flush handler. This fires automatically when ReadSocket() hits its Dispose().
         Latency.OnFlush += (ReadOnlySpan<LatencyRecord> records) =>
         {
@@ -124,13 +102,13 @@ public class TestingStrategy : Strategy.Strategy
         position.PositionChanged += (in PositionHeader header) =>
         {
             using Latency latency = new Latency((int)CallId.InstrumentOnMarketByPrice);
-            executionAlgo.Execute();
+            makeQuote.Execute();
         };
 
         lead.QuoteChanged += () =>
         {
             using Latency latency = new Latency((int)CallId.InstrumentOnMarketByPrice);
-            executionAlgo.Execute();
+            makeQuote.Execute();
         };
 
         Series<Point> total = NewSeries(position.Instrument.Symbology + " Profit", ref TickTock!, ()=> position.Profit.Total);
