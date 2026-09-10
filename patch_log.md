@@ -6,6 +6,20 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ## 2026-09-10 — single-writer server rows, server-wide RiskLimit, audit-trail fixes
 
+### `TradingStatus`: the runtime path (header byte + ring tick)
+
+- `Data/Tick.cs` — `TickType.TradingStatus = 20` (outside the audit's OrderType byte range),
+  `TradingStatusUpdate` (TickHeader + fold byte, padded to 64 like Trade), `Tick.AsTradingStatusUpdate()`;
+  the `TradingStatus` enum moves here from Instrument.cs, values unchanged.
+- `Provider/Server.cs` — `OnTradingStatusUpdate(in tick)`: stores the byte at `InstrumentHeader`
+  offset 7 and broadcasts the tick on the instrument's data ring. Call it on the thread that owns
+  that ring.
+- `Provider/Client.cs`, `Data/Instrument.cs` — ring case → `Instrument.OnTradingStatusUpdate`,
+  which raises `TradingStatusUpdateEvent` on change against a private mirror (the header row is
+  already updated by the time the tick arrives, so it cannot be the guard).
+- Not yet: `IsInSession` still follows `SessionManager`; no `HaltReason`, no audit, no simulator
+  emission. C++ note: `cpp_alignment_report_2026-09-10.md`, amendment T1–T5.
+
 ### Audit-trail fixes from the 2026-09-08 live run (see Spec.md "Cancel-pending orders")
 
 - `Provider/Position.cs`, `Strategy/Algo.cs` — a side with an unconfirmed cancel takes no new

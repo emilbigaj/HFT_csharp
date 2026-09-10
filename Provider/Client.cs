@@ -399,6 +399,12 @@ public abstract class Client
                 Context.GetInstrument(instrumentId).OnSettlement(in settlement);
                 break;
             }
+            case (byte)TickType.TradingStatus:
+            {
+                ref readonly TradingStatusUpdate tradingStatusUpdate = ref MemoryMarshal.AsRef<TradingStatusUpdate>(bytes);
+                Context.GetInstrument(instrumentId).OnTradingStatusUpdate(in tradingStatusUpdate);
+                break;
+            }
             default:
                 throw new NotImplementedException($"Unknown instrument data type: {type}");
         }

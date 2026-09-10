@@ -260,3 +260,89 @@ changes are harness config; the audit-trail widget and logging-server sort key a
    its `AlgoStatus` untouched the second time.
 6. Threading: confirm no code path other than the CoreGroup thread writes a `RiskLimit`, local
    position or order row after allocation; the admin thread's writes stop at first allocation.
+
+---
+
+# Amendment (later on 2026-09-10) — `TradingStatus`: the lib primitive the CME side asked for
+
+Answers the CME-side note ("CME gives it three ways, we consume two and throw the status away, the
+lib has the field but nothing writes it"). The C# lib now has the runtime path; wire secdef tag
+1682, the snapshot's `MDSecurityTradingStatus` and `SecurityStatus` (template 30, incl. the
+group-level fan-out over every subscribed instrument in the `SecurityGroup`) to this one primitive.
+
+## T1. Wire shapes
+
+```cpp
+enum class TickType : uint8_t { /* Trade=0 … MarketByOrderDelta=12 unchanged, */ TradingStatus = 20 };
+// 20, not 13: the audit's first-byte switch spans OrderType 10..16, so a tick that is ever audited
+// must not collide. Nothing audits it yet.
+
+enum class TradingStatus : uint8_t   // the fold; now declared in Data/Tick.cs (moved from Instrument.cs, values unchanged)
+{
+    Unknown = 0,   // uninitialized, CME UnknownorInvalid(20) / NoValue(255)
+    Open,          // ReadyToTrade(17)
+    Closed,        // Close(4), NotAvailableForTrading(18), PostClose(26)
+    Auction,       // PreOpen(21), NewPriceIndication(15), PreCross(24), Cross(25)
+    Halted,        // TradingHalt(2)
+};
+
+#pragma pack(push, 1)
+struct TradingStatusUpdate                 // 64 bytes (padded like Trade)
+{
+    TickHeader    TickHeader;              //  0, 32: TickType | 3 reserved | InstrumentId | Exchange, Sending, Nic timestamps
+    TradingStatus TradingStatus;           // 32, 1
+    uint8_t       _pad[31];                // 33..63
+};
+#pragma pack(pop)
+static_assert(sizeof(TradingStatusUpdate) == 64);
+static_assert(offsetof(TradingStatusUpdate, TradingStatus) == 32);
+```
+
+`InstrumentHeader.TradingStatus` stays where it was: the byte at offset 7 of the 64-byte header
+(after `Header` 4, `InstrumentType` 5, `CoreGroupId` 6). No header size change. `HaltReason` /
+`SecurityTradingEvent` are NOT carried yet — when they are, the reserved byte at offset 8 is where
+`HaltReason` goes, again with no size change.
+
+## T2. Server primitive — `Server::OnTradingStatusUpdate(const TradingStatusUpdate&)`
+
+```
+headerId = GetInstrumentHeaderIdByInstrumentId(tick.TickHeader.InstrumentId)
+GetInstrumentHeader(headerId).AsInstrumentHeader().TradingStatus = tick.TradingStatus   // plain byte store, no seq bump
+WriteToInstrumentData(tick)                                                             // the event: the instrument's data ring
+```
+
+- The byte store is the only write to that field after load, so it needs no lock and is safe from
+  the thread that delivers it. The ring write is NOT: call this on the thread that already writes
+  the instrument's ring (the one running `OnMarketByPrice` for it), never from a second thread.
+- Emit on transitions only; the client filters duplicates too (T3), but the ring is not free.
+- Fill all three `TickHeader` timestamps from the `SecurityStatus` message (exchange, sending, NIC).
+  The C# constructor `TradingStatusUpdate(instrumentId, timestamp, status)` stamps one value into
+  all three — that is the simulator's convenience, not the contract.
+- Start-of-day photo (secdef 1682, snapshot status at seeding): same primitive, or a direct header
+  store before any client is attached. Before the first status the byte is `Unknown`.
+
+## T3. Client side (C# reference: `Client.OnInstrumentData` → `Instrument.OnTradingStatusUpdate`)
+
+`case TickType::TradingStatus` on the instrument data ring → `Instrument::OnTradingStatusUpdate`,
+which keeps a private `_tradingStatus` mirror and raises `TradingStatusUpdateEvent(in tick)` only
+when the value changed. Compare against the private mirror, NOT against the header row: the server
+writes the row before the tick reaches the ring, so the row already equals the tick by the time a
+client reads it and a row-based guard never fires. `Instrument.Header.TradingStatus` (the row) is
+the any-time read for strategies and the GUI.
+
+## T4. Not yet — do not assume these on the C++ side
+
+- `Instrument.IsInSession` is still the clock-based `SessionManager`; it has NOT been switched to
+  `Header.TradingStatus == Open`. The local create/amend gate (`NotInSession`) therefore does not
+  yet follow the feed. When it flips, `Auction` will count as not-in-session and cancels will
+  never be gated locally.
+- No audit record, no `HaltReason`/event, no simulator emission from `SessionManager` yet.
+- `Tick.SizeOf()` has no `TradingStatus` case (only book updates call it today).
+
+## T5. Verification
+
+`sizeof(TradingStatusUpdate) == 64`, `offsetof(TradingStatus) == 32`, `TickType::TradingStatus == 20`,
+`TradingStatus` enum parity 0..4, `offsetof(InstrumentHeader, TradingStatus) == 7`. Round trip: a
+`SecurityStatus` for ES at the 15:15 CT pause updates the header byte of every ES instrument to
+`Halted`, one tick per instrument appears on each ring, each strategy sees exactly one
+`TradingStatusUpdateEvent`, and the GUI's instrument headers show `Halted`.

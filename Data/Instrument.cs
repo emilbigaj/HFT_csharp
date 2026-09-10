@@ -32,15 +32,7 @@ public struct Header<T>(T type) where T : Enum
     }
 }
 
-[RegisterJson]
-public enum TradingStatus : byte
-{
-    Unknown = 0,   // uninitialized, CME UnknownorInvalid(20) / NoValue(255)
-    Open,          // ReadyToTrade(17)
-    Closed,        // Close(4), NotAvailableForTrading(18), PostClose(26)
-    Auction,       // PreOpen(21), NewPriceIndication(15), PreCross(24), Cross(25)
-    Halted,        // TradingHalt(2)
-};
+
 
 
 
@@ -214,6 +206,8 @@ public delegate void MarketByPriceDeltaEvent(in MarketByPrice delta, ReadOnlySpa
 
 public delegate void TradeEvent(in Trade trade);
 public delegate void SettlementEvent(in Settlement settlement);
+public delegate void TradingStatusUpdateEvent(in TradingStatusUpdate tradingStatusUpdate);
+
 public abstract class Instrument
 {
     public int ProductGroupId { get; set; } = -1;
@@ -266,6 +260,17 @@ public abstract class Instrument
     public void OnSettlement(in Settlement settlement)
     {
         SettlementChanged?.Invoke(in settlement);
+    }
+
+    public event TradingStatusUpdateEvent? TradingStatusUpdateEvent;
+    private TradingStatus _tradingStatus = TradingStatus.Unknown;
+    public void OnTradingStatusUpdate(in TradingStatusUpdate tradingStatusUpdate)
+    {
+        if (_tradingStatus != tradingStatusUpdate.TradingStatus)
+        {
+            _tradingStatus = tradingStatusUpdate.TradingStatus;
+            TradingStatusUpdateEvent?.Invoke(in tradingStatusUpdate);
+        }
     }
 
     public bool TryGetQuote(out Quote quote)

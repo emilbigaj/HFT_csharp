@@ -632,6 +632,14 @@ public class Server : IDisposable
         _instrumentData[tickHeader.InstrumentId]?.Write(in tick);
     }
 
+    public void OnTradingStatusUpdate(in TradingStatusUpdate tradingStatusUpdate)
+    {
+        int instrumentHeaderId = _serverContext.GetInstrumentHeaderIdByInstrumentId(tradingStatusUpdate.TickHeader.InstrumentId).GetReadonlyRef();
+        ref InstrumentHeader128 instrumentHeader = ref _serverContext.GetInstrumentHeader(instrumentHeaderId).GetRef();
+        instrumentHeader.AsInstrumentHeader().TradingStatus = tradingStatusUpdate.TradingStatus;
+        WriteToInstrumentData(in tradingStatusUpdate);
+    }
+
     public void OnMarketByPrice(in MarketByPrice marketByPrice, Span<byte> src)
     {
         int instrumentId = marketByPrice.TickHeader.InstrumentId;

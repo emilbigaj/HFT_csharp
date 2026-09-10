@@ -43,7 +43,20 @@ public enum TickType : byte
     MarketByOrderUpdate = 10,
     MarketByOrderPartialUpdate = 11,
     MarketByOrderDelta = 12,
+    TradingStatus = 20,
 }
+
+
+[RegisterJson]
+public enum TradingStatus : byte
+{
+    Unknown = 0,   // uninitialized, CME UnknownorInvalid(20) / NoValue(255)
+    Open,          // ReadyToTrade(17)
+    Closed,        // Close(4), NotAvailableForTrading(18), PostClose(26)
+    Auction,       // PreOpen(21), NewPriceIndication(15), PreCross(24), Cross(25)
+    Halted,        // TradingHalt(2)
+};
+
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
@@ -125,6 +138,14 @@ public struct Tick
             throw new NotSupportedException();
         return ref settlement;
     }
+
+    public ref TradingStatusUpdate AsTradingStatusUpdate()
+    {
+        ref TradingStatusUpdate tradingStatusUpdate = ref Unsafe.As<Tick, TradingStatusUpdate>(ref Unsafe.AsRef(in this));
+        if (tradingStatusUpdate.TickHeader.TickType != TickType.TradingStatus)
+            throw new NotSupportedException();
+        return ref tradingStatusUpdate;
+    }
     public ref Trade AsTrade()
     {
         ref Trade trade = ref Unsafe.As<Tick, Trade>(ref Unsafe.AsRef(in this));
@@ -148,6 +169,24 @@ public struct Settlement
     {
         TickHeader = new(TickType.Settlement, instrumentId, timestamp, timestamp, timestamp);
         Price = price;
+    }
+    public override string ToString()
+    {
+        return Json.Serialize(this);
+    }
+
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1, Size = 64)]
+[RegisterJson]
+public struct TradingStatusUpdate
+{
+    public TickHeader TickHeader;
+    public TradingStatus TradingStatus;
+    public TradingStatusUpdate(int instrumentId, Timestamp timestamp, TradingStatus tradingStatus)
+    {
+        TickHeader = new(TickType.TradingStatus, instrumentId, timestamp, timestamp, timestamp);
+        TradingStatus = tradingStatus;
     }
     public override string ToString()
     {
