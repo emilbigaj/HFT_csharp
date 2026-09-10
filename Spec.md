@@ -69,6 +69,32 @@ cancel/replace). Behind those two sits the invariant alarm: anything that still 
 `Target()` falls back to snapshotting on entry for un-migrated callers — era-unsafe but identical
 to pre-snapshot behaviour — and consumes the snapshot, so a stale list can never be zippered twice.
 
+### OrderRisk: in-flight quantities are a scanned array, not a bitset
+
+Per order slot the server reserves the largest quantity that could end up working: the acked
+quantity or any unacked amend, whichever is bigger (`OrderRisk.GetAbsWorstOrderQuantity`). Amends
+are pipelined, so the unacked set is a multiset — the same quantity at two prices is two entries
+and one ack retires one of them. Until 2026-09-09 that multiset was a `Bitset64` over quantities
+plus 56 byte counters, which is the only reason order quantity was capped at 55: the cap was the
+64-byte budget, not a risk decision.
+
+It is now a count, a cached max and 30 `ushort` entries in the same 64 bytes. Add appends and
+raises the max; remove scans for one matching entry, swap-removes it, and rescans for the max only
+when the max itself left. The scan is fine because the in-flight count on one order is one to
+three in practice (a same-profile amend is refused while one is active, nothing is sent while a
+cancel is pending) and the worst case is a 30-entry scan. Measured against the bitset over 1M
+order lifecycles it is within 1 ns per lifecycle. Every SIMD layout tried was 2× slower: a 2-byte
+lane store followed by the 64-byte reload `RiskLayer` makes right after every `TryAdd`/`Ack`
+defeats store forwarding, and the horizontal max ran on every query. A pessimistic high-water mark
+is faster still but over-reserves during pipelined amend-downs and collapses on a stray ack — the
+multiset's tolerance for an ack it never reserved is deliberate and kept.
+
+Limits: quantity 1..65535 (`QuantityNotValid` outside), 30 in-flight targets per order
+(`TooManyActiveTargets` on the 31st, discarded silently as before, the algo retries next tick).
+`RiskLimit.MaxOrderQuantity` remains the operative per-order bound; `Algo.NewAmend` still clamps to
+`OrderRisk.MaxOrderQuantity`. The differential test that validated the struct (400k random ops
+against a plain list) is specified in `cpp_alignment_report_2026-09-10_orderrisk.md` §6.
+
 ## Instrument header immutability
 
 Instrument headers are append-only: a header's identity (exchange, root, type, maturities) never

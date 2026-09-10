@@ -344,8 +344,10 @@ The four hooks become one-liners (`sideSign = Buy ? 1 : -1`):
   reserved worst, per leg. A leg fill IS an outright fill.
 - **Exchange Rejected**: magnitude delta around `orderRisk.Reject(qty)` → `Apply(..., delta)`
 
-Also port `OrderRisk` (64-byte bucketed multiset, TryAdd/Ack/Reject/GetAbsWorstOrderQuantity — see
-C# Execution/Order.cs) and the client-side `CancelIsActive` guard extension:
+Also port `OrderRisk` (64 bytes, TryAdd/Ack/Reject/GetAbsWorstOrderQuantity — see C#
+Execution/Order.cs; **layout amended 2026-09-09**: count + cached max + 30 × uint16 compact array,
+not the bucketed bitset — take the field list from cpp_alignment.md §3) and the client-side
+`CancelIsActive` guard extension:
 
 ```cpp
 bool existingWillCancel = existingTarget.OrderHeader.OrderId == orderState.OrderHeader.OrderId

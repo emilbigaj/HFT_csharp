@@ -222,10 +222,12 @@ public struct RiskLimit(int instrumentId)
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct OrderRisk
 {
-    public const int MaxOrderQuantity = 55;
+    public const int MaxOrderQuantity = ushort.MaxValue;
+    public const int MaxActiveTargets = 30;
 
-    private Bitset64 _quantities;                       // struct — must NOT be readonly
-    private Array56<byte> _counts;
+    private ushort _activeTargetsCount;                 // struct — must NOT be readonly
+    private ushort _worstOrderQuantity;                 // max over the active targets, 0 when there are none
+    private Array30<ushort> _absOrderQuantities;        // one abs quantity per active target, indices [0, _activeTargetsCount)
 
     /// <summary>Branchless abs. Returns int.MinValue for int.MinValue (no throw);
     /// callers must range-check with an unsigned compare.</summary>
@@ -236,51 +238,72 @@ public struct OrderRisk
         return (int)(((uint)v ^ m) - m);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly int GetAbsWorstOrderQuantity(int ackedOrderQuantity)
     {
         int absAckedOrderQuantity = Abs(ackedOrderQuantity);
-        return Math.Max(absAckedOrderQuantity, _quantities.HighestSet);
+        return Math.Max(absAckedOrderQuantity, _worstOrderQuantity);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAdd(int orderQuantity, out OrderRejectedReason reason)
     {
-        int absQuantity = Abs(orderQuantity);
-        if ((uint)absQuantity > MaxOrderQuantity || absQuantity == 0)
+        int absOrderQuantity = Abs(orderQuantity);
+        if ((uint)absOrderQuantity > MaxOrderQuantity || absOrderQuantity == 0)
         {
             reason = OrderRejectedReason.QuantityNotValid;
             return false;
         }
 
-        ref byte count = ref _counts[absQuantity];
-        if (count == byte.MaxValue)
+        int activeTargetsCount = _activeTargetsCount;
+        if (activeTargetsCount == MaxActiveTargets)
         {
             reason = OrderRejectedReason.TooManyActiveTargets;
             return false;
         }
 
-        if (++count == 1)
-            _quantities.Set(absQuantity);
+        _absOrderQuantities[activeTargetsCount] = (ushort)absOrderQuantity;
+        _activeTargetsCount = (ushort)(activeTargetsCount + 1);
+        _worstOrderQuantity = (ushort)Math.Max(_worstOrderQuantity, absOrderQuantity);
 
         reason = default;
         return true;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Ack(int orderQuantity) => Remove(orderQuantity);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Reject(int orderQuantity) => Remove(orderQuantity);
 
+    // AggressiveInlining: the JIT will not inline a loop-bearing method on its own (+5 ns per order lifecycle measured).
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Remove(int orderQuantity)
     {
-        int absQuantity = Abs(orderQuantity);
-        if ((uint)absQuantity > MaxOrderQuantity)
+        int absOrderQuantity = Abs(orderQuantity);
+        if ((uint)absOrderQuantity > MaxOrderQuantity)
             return;
 
-        ref byte count = ref _counts[absQuantity];
-        if (count == 0)
+        // Acks retire the oldest target, so the forward scan normally stops at index 0.
+        int activeTargetsCount = _activeTargetsCount;
+        int targetIndex = 0;
+        while (targetIndex < activeTargetsCount && _absOrderQuantities[targetIndex] != absOrderQuantity)
+            targetIndex++;
+        if (targetIndex == activeTargetsCount)
             return;
 
-        if (--count == 0)
-            _quantities.Clear(absQuantity);
+        int lastTargetIndex = activeTargetsCount - 1;
+        _absOrderQuantities[targetIndex] = _absOrderQuantities[lastTargetIndex];
+        _absOrderQuantities[lastTargetIndex] = 0;
+        _activeTargetsCount = (ushort)lastTargetIndex;
+
+        if (absOrderQuantity != _worstOrderQuantity)
+            return;
+
+        int worstOrderQuantity = 0;
+        for (int i = 0; i < lastTargetIndex; i++)
+            worstOrderQuantity = Math.Max(worstOrderQuantity, _absOrderQuantities[i]);
+        _worstOrderQuantity = (ushort)worstOrderQuantity;
     }
 }
 

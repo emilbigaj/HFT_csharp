@@ -4,6 +4,23 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## Unreleased (working tree, 2026-09-09)
+
+### `OrderRisk` quantity ceiling 55 → 65535 (see Spec.md)
+
+- `Execution/Order.cs` — `OrderRisk` is a count + cached max + 30 × `ushort` compact array, still
+  64 bytes, same API and multiset semantics. The 55 cap was the `Bitset64` + 56-counter byte
+  budget. Benchmarked equal to the bitset over 1M order lifecycles; every SIMD layout was 2× slower
+  (store forwarding). `Algo.NewAmend`'s clamp is unchanged and now clamps at 65535.
+- `Tools/Array.cs` — `Array30<T>` (+ converter, mirrors `Array32`). `Array56<T>` is now unused.
+- `cpp_alignment_report_2026-09-10_orderrisk.md` — port note for the C++ side (layout, semantics,
+  reference implementation, and the differential test that validated the C# struct — 400k random
+  ops against a plain list; the C# test itself is not in the repo).
+- `cpp_alignment.md` §3 and the 2026-09-08 report — layout paragraph amended; `sizeof == 64` and
+  the reject reasons are unchanged, so only the field list moves for the C++ port.
+
+---
+
 ## Unreleased (working tree, 2026-08-11)
 
 ### Strategy 0 / house book (see Spec.md)
@@ -173,8 +190,8 @@ picks it up. `RiskLimit` gained `Timestamp` and `StrategyId`.
   run before `Server.OnOrderState` overwrites the stored state.
 - **Rate limits are enforced nowhere.** `MaxOrdersPerSecond`/`MaxOrdersPerSession` are gone from
   `RiskLimit` and `RiskLayer` has no rate-limit members in either language. Deferred deliberately.
-- **`OrderRisk` caps order quantity at 55** (`TryAdd` refuses `qty >= 56`). Needs its own reject
-  reason and a provisioning-time check that `MaxOrderQuantity <= 55`.
+- ~~**`OrderRisk` caps order quantity at 55**~~ — resolved 2026-09-09: ceiling is 65535 (compact
+  array layout, see the top entry and Spec.md).
 - **Order.hpp is not yet mirrored** for `RiskLimit`'s new fields. C++ `RiskLimit` is 40 bytes; C# has
   moved on. See `RiskLayerRefactorPlan.md` §5 Step 0.
 - **Simulation defaults limits to `int.MaxValue`** (`GetMaxLimits`), so no backtest has ever exercised

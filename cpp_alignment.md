@@ -139,10 +139,18 @@ Already aligned (6/6/6/14/32) — no change. Listed so nobody "fixes" it.
 C++ `RiskLayer.hpp` has header/seq validation and the `MaxOrderQuantity` check but no reservation
 accounting. Port from C# `Provider/RiskLayer.cs` + `OrderRisk` in `Execution/Order.cs`:
 
-- **`OrderRisk`** — exactly 64 bytes: `Bitset64` + 56 × uint8 counts. A magnitude-bucketed multiset
-  of in-flight (unacked) order quantities. `TryAdd` rejects `abs(q) > 55` (`QuantityNotValid`) or a
-  saturated bucket (`TooManyActiveTargets`). `GetAbsWorstOrderQuantity(acked) =
-  max(abs(acked), highest set bucket)`. One `OrderRisk` per order slot in the server context.
+- **`OrderRisk`** — exactly 64 bytes: `uint16 ActiveTargetsCount`, `uint16 WorstOrderQuantity`,
+  then 30 × uint16 abs quantities (the first `ActiveTargetsCount` are live, the rest are 0). A
+  compact array of in-flight (unacked) order quantities with a cached max — a multiset: the same
+  quantity twice is two entries. `TryAdd` rejects `abs(q) > 65535` or `q == 0` (`QuantityNotValid`)
+  and a 31st in-flight target (`TooManyActiveTargets`); otherwise appends and raises the cached max.
+  `Ack`/`Reject` linear-scan for ONE matching entry (absent → no-op), swap-remove it (last entry
+  into the hole, last slot zeroed), and rescan for the max only when the removed quantity equalled
+  it. `GetAbsWorstOrderQuantity(acked) = max(abs(acked), WorstOrderQuantity)`. One `OrderRisk` per
+  order slot in the server context. *(Amended 2026-09-09: replaces the `Bitset64` + 56 × uint8
+  bucket layout of the 2026-09-08 report — same size, same API and semantics, quantity ceiling
+  55 → 65535. Rationale in Spec.md; port note with offsets, reference implementation and the
+  differential test in `cpp_alignment_report_2026-09-10_orderrisk.md`.)*
 - **Sign convention** — everything signed: buys/longs positive, sells/shorts negative.
   `WorstLongWorkingQuantity >= 0`, `WorstShortWorkingQuantity <= 0`. `GetAbsWorstOrderQuantity`
   returns a **magnitude**; the sign is applied **exactly once** per update (multiplying both

@@ -72,6 +72,14 @@ public struct Array16<T> where T : struct
 }
 
 [JsonConverter(typeof(InlineArrayConverterFactory))]
+[InlineArray(30)]
+public struct Array30<T> where T : struct
+{
+    public const int Length = 30;
+    private T _element0;
+}
+
+[JsonConverter(typeof(InlineArrayConverterFactory))]
 [InlineArray(32)]
 public struct Array32<T> where T : struct
 {
@@ -121,6 +129,7 @@ public sealed class InlineArrayConverterFactory : JsonConverterFactory
         s_registry[(typeof(Array4<>), typeof(T))] = () => new Array4Converter<T>();
         s_registry[(typeof(Array8<>), typeof(T))] = () => new Array8Converter<T>();
         s_registry[(typeof(Array16<>), typeof(T))] = () => new Array16Converter<T>();
+        s_registry[(typeof(Array30<>), typeof(T))] = () => new Array30Converter<T>();
         s_registry[(typeof(Array32<>), typeof(T))] = () => new Array32Converter<T>();
         s_registry[(typeof(Array56<>), typeof(T))] = () => new Array56Converter<T>();
         s_registry[(typeof(Array64<>), typeof(T))] = () => new Array64Converter<T>();
@@ -133,7 +142,7 @@ public sealed class InlineArrayConverterFactory : JsonConverterFactory
 
         Type genericDef = typeToConvert.GetGenericTypeDefinition();
 
-        return genericDef == typeof(Array4<>) || genericDef == typeof(Array8<>) || genericDef == typeof(Array16<>) || genericDef == typeof(Array32<>) || genericDef == typeof(Array64<>);
+        return genericDef == typeof(Array4<>) || genericDef == typeof(Array8<>) || genericDef == typeof(Array16<>) || genericDef == typeof(Array30<>) || genericDef == typeof(Array32<>) || genericDef == typeof(Array64<>);
     }
 
     public override JsonConverter? CreateConverter(Type typeToConvert, JsonSerializerOptions options)
@@ -193,6 +202,21 @@ public sealed class Array16Converter<T> : JsonConverter<Array16<T>> where T : st
     public override void Write(Utf8JsonWriter writer, Array16<T> value, JsonSerializerOptions options)
     {
         ArraySerializer.Write(writer, MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<Array16<T>, T>(ref Unsafe.AsRef(in value)), 16), options);
+    }
+}
+
+public sealed class Array30Converter<T> : JsonConverter<Array30<T>> where T : struct
+{
+    public override Array30<T> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        Array30<T> result = default;
+        ArraySerializer.Read(ref reader, MemoryMarshal.CreateSpan(ref Unsafe.As<Array30<T>, T>(ref result), 30), options);
+        return result;
+    }
+
+    public override void Write(Utf8JsonWriter writer, Array30<T> value, JsonSerializerOptions options)
+    {
+        ArraySerializer.Write(writer, MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<Array30<T>, T>(ref Unsafe.AsRef(in value)), 30), options);
     }
 }
 
