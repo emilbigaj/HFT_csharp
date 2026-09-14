@@ -227,24 +227,37 @@ public abstract class Instrument
     public Quote Quote => _quote;
     private Quote _quote;
     private bool _isQuoteValid = false;
+    private Quote _quoteAtPassStart;                    // the quote when this ReadSocket pass first touched the book
+    private bool _isDirty;
     public event Action? QuoteChanged;
 
     public event Action? MarketByPriceChanged;
 
     public event MarketByPriceDeltaEvent? MarketByPriceDelta;
 
-    public void OnMarketByPriceDelta(in MarketByPrice delta, ReadOnlySpan<byte> bytes)
+    // Phase 1 of a ReadSocket pass, per delta: fold into the image, fire only the per-delta consumers (see Spec.md).
+    public void ApplyMarketByPriceDelta(in MarketByPrice delta, ReadOnlySpan<byte> bytes)
     {
+        if (!_isDirty)
+        {
+            _quoteAtPassStart = _quote;
+            _isDirty = true;
+        }
         ref readonly MarketByPrice64 mbp64 = ref MarketByPrice;
-        bool didQuoteChange = mbp64.BestBid != _quote.Bid || mbp64.BestAsk != _quote.Ask;
         _quote.Bid = mbp64.BidsCount > 0 ? mbp64.BestBid : default!;
         _quote.Ask = mbp64.AsksCount > 0 ? mbp64.BestAsk : default!;
         _isQuoteValid = mbp64.BidsCount > 0 && mbp64.AsksCount > 0;
-        if (didQuoteChange)
+        MarketByPriceDelta?.Invoke(delta, bytes);
+    }
+
+    // Phase 2, once per pass: QuoteChanged only if the quote differs from the start of the pass.
+    public void RaiseChanged()
+    {
+        _isDirty = false;
+        if (_quote.Bid != _quoteAtPassStart.Bid || _quote.Ask != _quoteAtPassStart.Ask)
         {
             QuoteChanged?.Invoke();
         }
-        MarketByPriceDelta?.Invoke(delta, bytes);
         MarketByPriceChanged?.Invoke();
     }
 

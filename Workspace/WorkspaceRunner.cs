@@ -11,6 +11,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Controls.Platform;
 using Avalonia.Dialogs;
+using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -256,5 +257,38 @@ public static class WorkspaceRunner
 
         if (!string.IsNullOrEmpty(request.WorkspacePath))
             _ =window.LoadWorkspaceAsync(request.WorkspacePath);
+    }
+
+    // Renders a workspace window to a PNG file — the given one, else the main window. Safe to call
+    // from any thread (e.g. a Clock reminder firing on the simulation thread): rendering a Visual
+    // must happen on the Avalonia UI thread, so this marshals over via the dispatcher and waits for
+    // it to finish.
+    public static async Task CaptureScreenshotAsync(string filePath, Window? window = null)
+    {
+        if (s_desktopLifetime == null)
+            return;
+
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            try
+            {
+                window ??= s_desktopLifetime.MainWindow ?? s_desktopLifetime.Windows.FirstOrDefault(w => w is Workspace);
+                if (window == null)
+                    return;
+
+                string? directoryPath = Path.GetDirectoryName(filePath);
+                if (!string.IsNullOrEmpty(directoryPath))
+                    Directory.CreateDirectory(directoryPath);
+
+                PixelSize pixelSize = new PixelSize(Math.Max(1, (int)window.Bounds.Width), Math.Max(1, (int)window.Bounds.Height));
+                using RenderTargetBitmap bitmap = new RenderTargetBitmap(pixelSize, new Vector(96, 96));
+                bitmap.Render(window);
+                bitmap.Save(filePath);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.WriteLine($"[WorkspaceRunner] CaptureScreenshot failed: {ex}");
+            }
+        });
     }
 }

@@ -110,9 +110,18 @@ public sealed class Position
     }
 
     public event PositionHeaderHandler? PositionChanged;
-    public void OnPositionHeader(in PositionHeader positionHeader)
+    private PositionHeader _lastPositionHeader;
+
+    // Phase 1 of a ReadSocket pass, per message: keep the latest header, raise nothing (see Spec.md).
+    public void ApplyPositionHeader(in PositionHeader positionHeader)
     {
-        PositionChanged?.Invoke(in positionHeader);
+        _lastPositionHeader = positionHeader;
+    }
+
+    // Phase 2, once per pass.
+    public void RaiseChanged()
+    {
+        PositionChanged?.Invoke(in _lastPositionHeader);
     }
 
     public event RefAction<Fill>? Fill;

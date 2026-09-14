@@ -69,6 +69,22 @@ cancel/replace). Behind those two sits the invariant alarm: anything that still 
 `Target()` falls back to snapshotting on entry for un-migrated callers — era-unsafe but identical
 to pre-snapshot behaviour — and consumes the snapshot, so a stale list can never be zippered twice.
 
+### One strategy run per pass
+
+`Client.ReadSocket()` is two phases. Phase 1 folds every queued message — fills, states, position
+rows on the execution channels, then every delta on every subscribed instrument ring — into the
+images and only marks which books and positions changed. Phase 2 raises `QuoteChanged` /
+`MarketByPriceChanged` once per changed book and `PositionChanged` once per changed position, on
+the final state. Strategies subscribe to those as before; a pass with three deltas on one book
+raises `QuoteChanged` once, after all three, never on a state the next message in the same buffer
+has already superseded. `QuoteChanged` compares the quote against the start of the pass, so a
+quote that moves and moves back within one pass is not a change. Trades still fire per print
+(`TradeChanged`), and `MarketByPriceDelta` still
+fires per delta for consumers that need every one (ladders, queue tracking). Each instrument ring
+is read at most 64 times per pass so a saturated feed cannot starve phase 2; the remainder is
+picked up next pass, still coalesced. The server side does the same thing one hop up: the book
+builder folds every packet the NIC has queued and publishes one tick per touched instrument.
+
 ### Cancel-pending orders are not free capacity
 
 `Position.ActiveTargets` is the *expected future state*: an order whose cancel is sent (a Cancel

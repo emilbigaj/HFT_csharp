@@ -4,6 +4,24 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## Unreleased (working tree, 2026-09-14)
+
+### One strategy run per `ReadSocket` pass (see Spec.md "One strategy run per pass")
+
+- `Provider/Client.cs` — two-phase pass: fold everything queued, then raise once per dirty book
+  (`Instrument.RaiseChanged`) and position (`Position.RaiseChanged`). Each instrument ring is read
+  at most 64 times per pass. Strategies keep their `QuoteChanged` / `PositionChanged` subscriptions.
+- `Data/Instrument.cs` — `OnMarketByPriceDelta` split into `ApplyMarketByPriceDelta` (per delta:
+  image + `MarketByPriceDelta`) and `RaiseChanged` (per pass: `QuoteChanged` only if the quote
+  differs from the start of the pass, then `MarketByPriceChanged`).
+- `Provider/Position.cs` — `OnPositionHeader` → `ApplyPositionHeader` (keeps the latest header) +
+  `RaiseChanged`.
+- `cpp_alignment_report_2026-09-14.md` (new) — port note: the two phases, the 64-read bound and
+  why the execution channels are unbounded, the net-change `QuoteChanged` rule, event ordering,
+  verification.
+- `Workspace/Workspace.axaml(.cs)`, `Workspace/WorkspaceRunner.cs` — File → Save Screenshot...:
+  save picker, PNG of this workspace window via `CaptureScreenshotAsync(path, window)`.
+
 ## 2026-09-10 — single-writer server rows, server-wide RiskLimit, audit-trail fixes
 
 ### `TradingStatus`: the runtime path (header byte + ring tick)

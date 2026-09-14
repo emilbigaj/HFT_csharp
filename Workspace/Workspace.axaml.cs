@@ -361,6 +361,43 @@ public partial class Workspace : Window, IWidgetHost
         }
     }
 
+    private async void OnSaveScreenshotClick(object? sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel == null) return;
+
+            string folder = Context.WorkspaceDirectoryPath;
+            Directory.CreateDirectory(folder);
+
+            var startLocation = await topLevel.StorageProvider.TryGetFolderFromPathAsync(folder);
+
+            string workspaceName = string.IsNullOrEmpty(_currentWorkspacePath) ? "workspace" : Path.GetFileNameWithoutExtension(_currentWorkspacePath);
+            var file = await topLevel.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = "Save Screenshot",
+                SuggestedFileName = $"{workspaceName}_{DateTime.Now:yyyyMMdd_HHmmss}.png",
+                SuggestedStartLocation = startLocation,
+                DefaultExtension = "png",
+                FileTypeChoices = new[]
+                {
+                    new FilePickerFileType("PNG images") { Patterns = new[] { "*.png" } },
+                    new FilePickerFileType("All files") { Patterns = new[] { "*.*" } }
+                }
+            });
+
+            if (file == null) return;
+
+            // This window, not the main one: several workspaces can be open at once.
+            await WorkspaceRunner.CaptureScreenshotAsync(file.Path.LocalPath, this);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"OnSaveScreenshotClick Error: {ex}");
+        }
+    }
+
     private void OnOpenContextDirectoryClick(object? sender, RoutedEventArgs e)
     {
         try

@@ -2,7 +2,9 @@
 
 > **Amended by `cpp_alignment_report_2026-09-10.md`** — read this report first, then that one; where
 > they disagree the 2026-09-10 report wins (`OrderTarget` 52 bytes, `RiskLimit` 32 bytes,
-> `ControlRiskLimit`, `OrderRisk` layout, threading model, NicTimestamp stamping).
+> `ControlRiskLimit`, `OrderRisk` layout, threading model, NicTimestamp stamping, TradingStatus).
+> Then `cpp_alignment_report_2026-09-14.md` (client-side update coalescing: `Instrument` /
+> `Position` apply-then-raise, one callback per `ReadSocket` pass; no wire change).
 
 Compared **C++ github.com/emilbigaj/HFT_cpp `aeac53c`** (fresh clone, verified file-by-file
 2026-09-08) against **C# github.com/emilbigaj/HFT_csharp `2e1ddfa`** (the spread trading vertical).

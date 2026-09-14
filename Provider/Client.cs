@@ -205,6 +205,14 @@ public abstract class Client
     // Per-instrument broadcast ring readers (strategy live-delta path); the GUI reads the server's book directly.
     private readonly ReadOnlySocket?[] _instrumentData;
 
+    // One ReadSocket pass = phase 1 (fold every queued message into the images) then phase 2 (one
+    // callback per changed book/position, on the final state) — see Spec.md.
+    private Bitset64 _dirtyBooks = new Bitset64();
+    private Bitset64 _dirtyPositions = new Bitset64();
+
+    // A saturated ring must not starve phase 2: what is left waits for the next pass, still coalesced.
+    private const int MaxReadsPerInstrumentPerPass = 64;
+
     protected int _clientId = -1;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -353,6 +361,15 @@ public abstract class Client
             instrumentIds.Clear(instrumentId);
             ReadInstrumentData(instrumentId);
         }
+
+        // Phase 2: everything queued is applied; raise once per changed book and position.
+        foreach (int instrumentId in _dirtyBooks)
+            Context.GetInstrument(instrumentId).RaiseChanged();
+        _dirtyBooks.ClearAll();
+
+        foreach (int instrumentId in _dirtyPositions)
+            Context.GetPosition(instrumentId).RaiseChanged();
+        _dirtyPositions.ClearAll();
     }
 
     private void ReadInstrumentData(int instrumentId)
@@ -362,7 +379,7 @@ public abstract class Client
             return;
 
         ReadOnlySpan<byte> bytes;
-        while (true)
+        for (int reads = 0; reads < MaxReadsPerInstrumentPerPass; reads++)
         {
             using (Latency latency = new Latency(CallId.ClientReadData))
             {
@@ -438,7 +455,8 @@ public abstract class Client
             if (!isDeltas)
                 return;
 
-            instrument.OnMarketByPriceDelta(in mbp, deltaSpan);
+            instrument.ApplyMarketByPriceDelta(in mbp, deltaSpan);
+            _dirtyBooks.Set(instrumentId);
         }
         else if (mbp.TickHeader.TickType == TickType.MarketByPriceUpdate)
         {
@@ -453,7 +471,8 @@ public abstract class Client
                 return;
 
             ref readonly MarketByPrice delta = ref MemoryMarshal.AsRef<MarketByPrice>(deltaSpan);
-            instrument.OnMarketByPriceDelta(in delta, deltaSpan);
+            instrument.ApplyMarketByPriceDelta(in delta, deltaSpan);
+            _dirtyBooks.Set(instrumentId);
         }
         else if (mbp.TickHeader.TickType == TickType.MarketByPriceSnapshot)
         {
@@ -475,7 +494,8 @@ public abstract class Client
                 return;
 
             ref readonly MarketByPrice delta = ref MemoryMarshal.AsRef<MarketByPrice>(deltaSpan);
-            instrument.OnMarketByPriceDelta(in delta, deltaSpan);
+            instrument.ApplyMarketByPriceDelta(in delta, deltaSpan);
+            _dirtyBooks.Set(instrumentId);
         }
     }
 
@@ -530,7 +550,9 @@ public abstract class Client
         ref readonly PositionHeader positionHeader = ref MemoryMarshal.AsRef<PositionHeader>(rsrcObj);
         NicTimestamp = positionHeader.OrderHeader.NicTimestamp;
         ExchangeTimestamp = positionHeader.OrderHeader.ExchangeTimestamp;
-        Context.GetPosition(positionHeader.OrderHeader.OrderId.InstrumentId).OnPositionHeader(in positionHeader);
+        int instrumentId = positionHeader.OrderHeader.OrderId.InstrumentId;
+        Context.GetPosition(instrumentId).ApplyPositionHeader(in positionHeader);
+        _dirtyPositions.Set(instrumentId);
         PositionHeader?.Invoke(in positionHeader);
     }
 

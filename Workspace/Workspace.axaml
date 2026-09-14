@@ -25,6 +25,7 @@
 						<MenuItem Header="Open Workspace..." Click="OnOpenWorkspaceClick"/>
 						<MenuItem Header="Save Workspace" Click="OnSaveWorkspaceClick"/>
 						<MenuItem Header="Save Workspace As..." Click="OnSaveWorkspaceAsClick"/>
+						<MenuItem Header="Save Screenshot..." Click="OnSaveScreenshotClick"/>
 						<Separator/>
 						<MenuItem x:Name="OpenDirectoryMenuItem" Header="Open Server Directory" Click="OnOpenContextDirectoryClick"/>
 						<Separator/>

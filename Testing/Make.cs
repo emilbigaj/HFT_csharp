@@ -52,7 +52,6 @@ public sealed class Make : Algo
 
         StackList<Target> targets = new StackList<Target>(stackalloc Target[64]);
         int pos = GetPositionQuantity();
-
         if (Position.TryGetQuote(out Quote inst))
         {
             double pc = inst.MidPrice * 0.000;
