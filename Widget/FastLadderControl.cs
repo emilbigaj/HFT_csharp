@@ -14,26 +14,30 @@ public sealed class RenderedLadderRow
 {
     public int Ticks { get; set; }
     public string MyBuyQty { get; set; } = "";
+    public string MyBuyAhead { get; set; } = "";
     public string BidQty { get; set; } = "";
     public string Price { get; set; } = "";
     public string AskQty { get; set; } = "";
     public string MySellQty { get; set; } = "";
+    public string MySellAhead { get; set; } = "";
 
     // Metadata for interaction
     public ulong BuyOrderId { get; set; }
     public ulong SellOrderId { get; set; }
 
     internal TextLayout? TlMyBuyQty;
+    internal TextLayout? TlMyBuyAhead;
     internal TextLayout? TlBidQty;
     internal TextLayout? TlPrice;
     internal TextLayout? TlAskQty;
     internal TextLayout? TlMySellQty;
+    internal TextLayout? TlMySellAhead;
 
     /// <summary>
-    /// Smart update: compares new values against current values. 
+    /// Smart update: compares new values against current values.
     /// Invalidates specific TextLayout caches ONLY if the string has changed.
     /// </summary>
-    public void Update(int ticks, string price, string bid, string ask, string myBuy, string mySell, ulong buyOrderId, ulong sellOrderId)
+    public void Update(int ticks, string price, string bid, string ask, string myBuyQty, string myBuyAhead, string mySellQty, string mySellAhead, ulong buyOrderId, ulong sellOrderId)
     {
         // 1. Always update lightweight metadata (integers/ulongs are atomic/fast)
         Ticks = ticks;
@@ -44,17 +48,21 @@ public sealed class RenderedLadderRow
         if (Price != price) { Price = price; TlPrice = null; }
         if (BidQty != bid) { BidQty = bid; TlBidQty = null; }
         if (AskQty != ask) { AskQty = ask; TlAskQty = null; }
-        if (MyBuyQty != myBuy) { MyBuyQty = myBuy; TlMyBuyQty = null; }
-        if (MySellQty != mySell) { MySellQty = mySell; TlMySellQty = null; }
+        if (MyBuyQty != myBuyQty) { MyBuyQty = myBuyQty; TlMyBuyQty = null; }
+        if (MyBuyAhead != myBuyAhead) { MyBuyAhead = myBuyAhead; TlMyBuyAhead = null; }
+        if (MySellQty != mySellQty) { MySellQty = mySellQty; TlMySellQty = null; }
+        if (MySellAhead != mySellAhead) { MySellAhead = mySellAhead; TlMySellAhead = null; }
     }
 
     public void ResetCache()
     {
         TlMyBuyQty = null;
+        TlMyBuyAhead = null;
         TlBidQty = null;
         TlPrice = null;
         TlAskQty = null;
         TlMySellQty = null;
+        TlMySellAhead = null;
         BuyOrderId = 0;
         SellOrderId = 0;
     }
@@ -112,6 +120,12 @@ public sealed class FastLadderControl : Control
     private readonly List<RenderedLadderRow> _rows = new();
     private bool _requiresTextCacheRebuild = true;
     private double _calculatedPriceWidth = MinPriceColumnWidth;
+    private double _layoutWidth = -1;
+
+    // Own-order cells are three sub-columns, number | chevron | number, so the chevrons line up whatever the digit counts.
+    private readonly TextLayout _tlBuyChevron;
+    private readonly TextLayout _tlSellChevron;
+    private readonly double _chevronColumnWidth;
 
     // Interaction State
     private int _hoveredRowIndex = -1;
@@ -131,6 +145,9 @@ public sealed class FastLadderControl : Control
     public FastLadderControl()
     {
         ClipToBounds = true;
+        _tlBuyChevron = CreateChevronLayout(">", _columns[0]);
+        _tlSellChevron = CreateChevronLayout("<", _columns[4]);
+        _chevronColumnWidth = Math.Max(_tlBuyChevron.Width, _tlSellChevron.Width) + 4 * CellPadding;
     }
 
     protected override void OnPointerMoved(PointerEventArgs e)
@@ -271,12 +288,17 @@ public sealed class FastLadderControl : Control
     private void RebuildTextCache()
     {
         if (!_requiresTextCacheRebuild) return;
+        double myBuyNumberWidth = NumberWidth(_columns[0]);
+        double mySellNumberWidth = NumberWidth(_columns[4]);
         foreach (var row in _rows)
         {
             if (!IsCompactMode)
             {
-                row.TlMyBuyQty ??= CreateTextLayout(row.MyBuyQty, _columns[0]);
-                row.TlMySellQty ??= CreateTextLayout(row.MySellQty, _columns[4]);
+                // Buys read "quantity > ahead", sells "ahead < quantity": the numbers hug the chevron from either side.
+                row.TlMyBuyQty ??= CreateTextLayout(row.MyBuyQty, _columns[0], myBuyNumberWidth, TextAlignment.Right);
+                row.TlMyBuyAhead ??= CreateTextLayout(row.MyBuyAhead, _columns[0], myBuyNumberWidth, TextAlignment.Left);
+                row.TlMySellAhead ??= CreateTextLayout(row.MySellAhead, _columns[4], mySellNumberWidth, TextAlignment.Right);
+                row.TlMySellQty ??= CreateTextLayout(row.MySellQty, _columns[4], mySellNumberWidth, TextAlignment.Left);
             }
             row.TlBidQty ??= CreateTextLayout(row.BidQty, _columns[1]);
             row.TlPrice ??= CreateTextLayout(row.Price, _columns[2]);
@@ -287,10 +309,28 @@ public sealed class FastLadderControl : Control
 
     private TextLayout? CreateTextLayout(string text, ColumnDefinition colDef)
     {
+        return CreateTextLayout(text, colDef, colDef.Width, colDef.TextAlignment);
+    }
+
+    private TextLayout? CreateTextLayout(string text, ColumnDefinition colDef, double width, TextAlignment textAlignment)
+    {
         if (string.IsNullOrEmpty(text)) return null;
-        double constrainedWidth = Math.Max(0, colDef.Width - 2 * CellPadding);
-        return new TextLayout(text, colDef.Typeface, FontSize, colDef.Foreground, colDef.TextAlignment,
+        double constrainedWidth = Math.Max(0, width - 2 * CellPadding);
+        return new TextLayout(text, colDef.Typeface, FontSize, colDef.Foreground, textAlignment,
             maxWidth: constrainedWidth, maxHeight: RowHeight, textWrapping: TextWrapping.NoWrap);
+    }
+
+    // Natural-width glyph; DrawOrderCell centres it in the chevron sub-column.
+    private static TextLayout CreateChevronLayout(string text, ColumnDefinition colDef)
+    {
+        return new TextLayout(text, colDef.Typeface, FontSize, colDef.Foreground, TextAlignment.Left,
+            maxHeight: RowHeight, textWrapping: TextWrapping.NoWrap);
+    }
+
+    // Width of each number sub-column either side of the chevron.
+    private double NumberWidth(ColumnDefinition colDef)
+    {
+        return Math.Max(0, (colDef.Width - _chevronColumnWidth) / 2);
     }
 
     public override void Render(DrawingContext context)
@@ -322,8 +362,10 @@ public sealed class FastLadderControl : Control
             _columns[4].Width = largeColWidth;
         }
 
-        if (_rows.Count > 0 && (_rows[0].TlPrice?.MaxWidth != (priceColWidth - 2 * CellPadding)))
+        // Aligned text sits inside its layout's MaxWidth, so any width change rebuilds every layout.
+        if (_layoutWidth != actualWidth || (_rows.Count > 0 && _rows[0].TlPrice?.MaxWidth != (priceColWidth - 2 * CellPadding)))
         {
+            _layoutWidth = actualWidth;
             foreach (RenderedLadderRow r in _rows) r.ResetCache();
             _requiresTextCacheRebuild = true;
         }
@@ -348,6 +390,8 @@ public sealed class FastLadderControl : Control
         double xPrice = xBid + _columns[1].Width;
         double xAsk = xPrice + _columns[2].Width;
         double xMySell = xAsk + _columns[3].Width;
+        double myBuyNumberWidth = NumberWidth(_columns[0]);
+        double mySellNumberWidth = NumberWidth(_columns[4]);
 
         double currentY = HeaderHeight;
 
@@ -376,11 +420,11 @@ public sealed class FastLadderControl : Control
             }
 
             // 3. Draw Text
-            if (!IsCompactMode) DrawCellDirect(context, row.TlMyBuyQty, xMyBuy, currentY);
+            if (!IsCompactMode) DrawOrderCell(context, row.TlMyBuyQty, _tlBuyChevron, row.TlMyBuyAhead, xMyBuy, myBuyNumberWidth, currentY);
             DrawCellDirect(context, row.TlBidQty, xBid, currentY);
             DrawCellDirect(context, row.TlPrice, xPrice, currentY);
             DrawCellDirect(context, row.TlAskQty, xAsk, currentY);
-            if (!IsCompactMode) DrawCellDirect(context, row.TlMySellQty, xMySell, currentY);
+            if (!IsCompactMode) DrawOrderCell(context, row.TlMySellAhead, _tlSellChevron, row.TlMySellQty, xMySell, mySellNumberWidth, currentY);
 
             currentY += RowHeight;
         }
@@ -416,6 +460,16 @@ public sealed class FastLadderControl : Control
             double textY = y + (RowHeight - tl.Height) / 2;
             tl.Draw(context, new Point(textX, textY));
         }
+    }
+
+    // Left number right-aligned against the chevron, chevron centred in its fixed sub-column, right number left-aligned after it.
+    private void DrawOrderCell(DrawingContext context, TextLayout? left, TextLayout chevron, TextLayout? right, double x, double numberWidth, double y)
+    {
+        if (left == null) return;
+        DrawCellDirect(context, left, x, y);
+        double xChevron = x + numberWidth;
+        chevron.Draw(context, new Point(xChevron + (_chevronColumnWidth - chevron.Width) / 2, y + (RowHeight - chevron.Height) / 2));
+        DrawCellDirect(context, right, xChevron + _chevronColumnWidth, y);
     }
 
     protected override Size MeasureOverride(Size availableSize)

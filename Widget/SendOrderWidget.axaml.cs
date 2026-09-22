@@ -729,7 +729,9 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
             row.BidQty = bid > 0 ? bid.ToString() : "";
             row.AskQty = ask > 0 ? ask.ToString() : "";
             row.MyBuyQty = "";
+            row.MyBuyAhead = "";
             row.MySellQty = "";
+            row.MySellAhead = "";
 
             row.ResetCache();
             _dataBuffer.Add(row);

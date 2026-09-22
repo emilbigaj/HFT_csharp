@@ -388,35 +388,22 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
                 {
                     for (int i = _sellBuffer.Count - 1; i > 0; i--)
                     {
-                        AddRow(writeCache, rowIndex, t, "", "", "", "", FormatSell(_sellBuffer[i]), 0, _sellBuffer[i].OrderId);
+                        AddRow(writeCache, rowIndex, t, "", "", "", default, _sellBuffer[i]);
                         rowIndex++;
                     }
                 }
 
-                string myBuyMain = "";
-                ulong mainBuyId = 0;
-                if (_showMyOrders && _buyBuffer.Count > 0)
-                {
-                    myBuyMain = FormatBuy(_buyBuffer[0]);
-                    mainBuyId = _buyBuffer[0].OrderId;
-                }
+                OrderQuantity myBuyMain = _showMyOrders && _buyBuffer.Count > 0 ? _buyBuffer[0] : default;
+                OrderQuantity mySellMain = _showMyOrders && _sellBuffer.Count > 0 ? _sellBuffer[0] : default;
 
-                string mySellMain = "";
-                ulong mainSellId = 0;
-                if (_showMyOrders && _sellBuffer.Count > 0)
-                {
-                    mySellMain = FormatSell(_sellBuffer[0]);
-                    mainSellId = _sellBuffer[0].OrderId;
-                }
-
-                AddRow(writeCache, rowIndex, t, priceStr, bidStr, askStr, myBuyMain, mySellMain, mainBuyId, mainSellId);
+                AddRow(writeCache, rowIndex, t, priceStr, bidStr, askStr, myBuyMain, mySellMain);
                 rowIndex++;
 
                 if (_showMyOrders)
                 {
                     for (int i = 1; i < _buyBuffer.Count; i++)
                     {
-                        AddRow(writeCache, rowIndex, t, "", "", "", FormatBuy(_buyBuffer[i]), "", _buyBuffer[i].OrderId, 0);
+                        AddRow(writeCache, rowIndex, t, "", "", "", _buyBuffer[i], default);
                         rowIndex++;
                     }
                 }
@@ -501,7 +488,8 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         }
     }
 
-    private void AddRow(List<RenderedLadderRow> cache, int rowIndex, int ticks, string price, string bid, string ask, string myBuy, string mySell, ulong buyOrderId = 0, ulong sellOrderId = 0)
+    // An OrderQuantity with OrderId 0 means no order in that cell.
+    private void AddRow(List<RenderedLadderRow> cache, int rowIndex, int ticks, string price, string bid, string ask, OrderQuantity myBuy, OrderQuantity mySell)
     {
         while (rowIndex >= cache.Count)
         {
@@ -510,19 +498,15 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
 
         RenderedLadderRow row = cache[rowIndex];
 
-        row.Update(ticks, price, bid, ask, myBuy, mySell, buyOrderId, sellOrderId);
+        // Working quantity and quantity ahead go in as separate strings; FastLadderControl draws them either side of a fixed chevron.
+        string myBuyQty = myBuy.OrderId == 0 ? "" : myBuy.Quantity.ToString();
+        string myBuyAhead = myBuy.OrderId == 0 ? "" : myBuy.Ahead.ToString();
+        string mySellQty = mySell.OrderId == 0 ? "" : (-mySell.Quantity).ToString();
+        string mySellAhead = mySell.OrderId == 0 ? "" : mySell.Ahead.ToString();
+
+        row.Update(ticks, price, bid, ask, myBuyQty, myBuyAhead, mySellQty, mySellAhead, myBuy.OrderId, mySell.OrderId);
 
         _dataBuffer.Add(row);
-    }
-
-    private string FormatBuy(OrderQuantity o)
-    {
-        return $"{o.Quantity} | {o.Ahead}";
-    }
-
-    private string FormatSell(OrderQuantity o)
-    {
-        return $"{o.Ahead} | {-o.Quantity}";
     }
 
     private (int startTick, int endTick) DetermineTickRange(in MarketByPrice64 mbp)
