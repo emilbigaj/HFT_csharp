@@ -189,8 +189,12 @@ against a plain list) is specified in `cpp_alignment_report_2026-09-10_orderrisk
 CME Globex throttles order entry per session and publishes two lines: messages other than cancels
 are rejected past the first and the session is terminated past the second, at 500 and 750. Cancels
 are counted separately with their own, higher, pair. We deliberately do not split the buckets: one
-combined window sized at the tighter line can never breach either, and what it costs is cancel
-throughput, which is the right thing to give up.
+combined window sized at the tighter line can never breach either. A cancel is counted in that
+window but never refused by it (`SendOrder` rather than `TrySendOrder`): it is the message that
+reduces risk, and a throttle that holds one back turns a pause into a book of orders nobody is
+watching, which is what the first test on a new CME release did with the limit set to 10. So what
+the combined window costs is create and amend throughput while cancels are flying, which is the
+right thing to give up.
 
 CME's page does not settle whether the window is one second or three. The application section reads
 like a count within an interval, while the mass quote and admin sections say MPS. Three seconds is

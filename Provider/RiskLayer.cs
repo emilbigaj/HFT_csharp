@@ -353,7 +353,12 @@ public class RiskLayer
             {
                 ref RollingRateLimit rollingRateLimit = ref _serverContext.GetRateLimit(instrument.Header.CoreGroupId).GetRef();
 
-                if (!rollingRateLimit.TrySendOrder(Clock.Now))
+                // A cancel is counted but never refused: it is the message that reduces risk.
+                if (isCancel)
+                {
+                    rollingRateLimit.SendOrder(Clock.Now);
+                }
+                else if (!rollingRateLimit.TrySendOrder(Clock.Now))
                 {
                     orderRejectedReasons.Set((int)OrderRejectedReason.TooManyOrdersPerSecond);
                     return false;

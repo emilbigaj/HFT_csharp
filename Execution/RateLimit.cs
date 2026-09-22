@@ -260,6 +260,22 @@ public struct RollingRateLimit
         return true;
     }
 
+    // Counts a send that goes out regardless of the limit, a cancel; the bucket still stops at 255 rather than wrapping.
+    public void SendOrder(Timestamp timestamp)
+    {
+        // Step 1: roll the ring up to now, so nothing in it is expired and Total is the count
+        Advance(timestamp);
+
+        // Step 2: the newest bucket is at its burst cap; leave the count rather than wrap
+        ref byte count = ref Counts[BucketIndex];
+        if (count == byte.MaxValue)
+            return;
+
+        // Step 3: record the send in the newest bucket and in the running total
+        count++;
+        Total++;
+    }
+
     // Rolls the newest bucket forward to timestamp, zeroing every bucket it passes.
     private void Advance(Timestamp timestamp)
     {

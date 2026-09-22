@@ -4,6 +4,16 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-09-23 — cancels are counted by the rate limit but never refused
+
+- `Execution/RateLimit.cs` — `RollingRateLimit.SendOrder`: rolls the ring and counts the send like
+  `TrySendOrder`, but skips the Limit check; the byte still stops at 255 rather than wrapping.
+- `Provider/RiskLayer.cs` — `ValidateOrder` calls `SendOrder` for a `Cancel` and `TrySendOrder`
+  for everything else. Found on the first test on a new CME release: the limit had been set to 10
+  and a pause could not cancel the algo's orders, so they sat in the book. Spec.md "Order rate
+  limit" paragraph updated: the combined window now costs create/amend throughput while cancels
+  fly, not cancel throughput.
+
 ## 2026-09-22 — order-state reconcile before release (risk aggregate leak)
 
 - Root cause of the leaked `WorstLong/ShortWorkingQuantity` (10 long / 20 short reserved with

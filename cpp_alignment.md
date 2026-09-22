@@ -237,7 +237,9 @@ accounting. Port from C# `Provider/RiskLayer.cs` + `OrderRisk` in `Execution/Ord
   `Context` directly after `MessageEfficiency` (keep that array-id order for the mirror). The server
   writes the CME default (3 s, 500, id = CoreGroupId) into every set CoreGroup at construction;
   `RiskLayer` throttles order entry per CoreGroup with it, `TrySendOrder(Clock.Now)` on a plain ref
-  with no seq bump, rejecting `TooManyOrdersPerSecond`. Bucket semantics and the conservative
+  with no seq bump, rejecting `TooManyOrdersPerSecond`. A `Cancel` goes through `SendOrder` instead
+  (2026-09-23): counted in the window, never refused, bucket byte still capped at 255 — a cancel is
+  the message that reduces risk and must never be held back. Bucket semantics and the conservative
   Duration/31 rule are in Spec.md "Order rate limit". A C++ server must create the same region and
   own its writes, or a C# GUI attached to it shows an empty Rate Limits widget. `CoreGroupId` enum
   (OS 0, Reserved 1, SandP500 2, Equity 3, Forex 4, Crypto 5) moved from Strategy to Data.
