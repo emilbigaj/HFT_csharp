@@ -156,6 +156,11 @@ public struct MessageEfficiencyTier()
 [RegisterJson]
 public record struct RateLimit(Duration Duration, int Limit)
 {
+    public int RateLimitId = -1;
+
+    // CME Globex order entry, on the stricter reading of its window and under the reject line (see Spec.md).
+    public static readonly RateLimit CMEOrderEntry = new RateLimit(Duration.FromSeconds(3), 500);
+
     public override string ToString()
     {
         return Json.Serialize(this);
@@ -167,20 +172,145 @@ public record struct RateLimit(Duration Duration, int Limit)
 
 
 
+// A rolling-window throttle in 64 bytes, so it can live in a shared array and the GUI can read it
+// from another process. Exact send timestamps are replaced by BucketCount coarse buckets; they span
+// one bucket MORE than Duration, so the count covers a superset of the window and can only
+// over-state it, never under-state it. A bucket refuses at 255, which is the burst limit. Total is
+// the running sum of the buckets, so a send never loops over them (see Spec.md).
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[RegisterJson]
+public struct RollingRateLimit
+{
+    public const int BucketCount = 32;
+
+    public RateLimit RateLimit;             //  0, 16
+    public Timestamp BucketTimestamp;       // 16, 8   start of the newest bucket
+    public int BucketIndex;                 // 24, 4   newest bucket
+    public int Total;                       // 28, 4   sum of Counts, kept as they change
+    public Array32<byte> Counts;            // 32, 32
+                                            // = 64
+
+    public RollingRateLimit(RateLimit rateLimit)
+    {
+        RateLimit = rateLimit;
+        BucketTimestamp = default;   // nanos 0: the first send rolls the whole ring forward
+        BucketIndex = 0;
+        Total = 0;
+        Counts = default;
+    }
+
+    // BucketCount-1, not BucketCount: the buckets then span Duration + one bucket, which is what keeps the count conservative.
+    private readonly long BucketNanoseconds => RateLimit.Duration.TotalNanoseconds / (BucketCount - 1);
+
+    // Messages sent in the window ending at timestamp, rounded UP to a bucket boundary. Safe from a
+    // reader in another process: it mutates nothing and decays at the reader's own clock.
+    public readonly int GetCount(Timestamp timestamp)
+    {
+        // Step 1: how many whole buckets have passed since the writer last rolled
+        long elapsedNanoseconds = timestamp.NanosSinceEpoch - BucketTimestamp.NanosSinceEpoch;
+        long expiredBuckets = elapsedNanoseconds <= 0 ? 0 : elapsedNanoseconds / BucketNanoseconds;
+
+        // Step 2: the whole ring has aged out, nothing is in the window
+        if (expiredBuckets >= BucketCount)
+            return 0;
+
+        // Step 3: start from the running total, which covers every bucket as of that last roll
+        int count = Total;
+
+        // Step 4: take off the oldest buckets that have expired since, usually none
+        for (long offset = BucketCount - expiredBuckets; offset < BucketCount; offset++)
+        {
+            int bucketIndex = BucketIndex - (int)offset;
+            if (bucketIndex < 0)
+                bucketIndex += BucketCount;
+            count -= Counts[bucketIndex];
+        }
+        return count;
+    }
+
+    public readonly bool CanSendOrder(Timestamp timestamp)
+    {
+        // Step 1: the window is full
+        if (GetCount(timestamp) >= RateLimit.Limit)
+            return false;
+
+        // Step 2: the send would land in the newest bucket and that bucket is at its burst cap
+        long elapsedNanoseconds = timestamp.NanosSinceEpoch - BucketTimestamp.NanosSinceEpoch;
+        bool isNewestBucketCurrent = elapsedNanoseconds >= 0 && elapsedNanoseconds < BucketNanoseconds;
+        return !isNewestBucketCurrent || Counts[BucketIndex] < byte.MaxValue;
+    }
+
+    public bool TrySendOrder(Timestamp timestamp)
+    {
+        // Step 1: roll the ring up to now, so nothing in it is expired and Total is the count
+        Advance(timestamp);
+
+        // Step 2: the window is full
+        if (Total >= RateLimit.Limit)
+            return false;
+
+        // Step 3: the newest bucket is at its burst cap; refuse rather than wrap
+        ref byte count = ref Counts[BucketIndex];
+        if (count == byte.MaxValue)
+            return false;
+
+        // Step 4: record the send in the newest bucket and in the running total
+        count++;
+        Total++;
+        return true;
+    }
+
+    // Rolls the newest bucket forward to timestamp, zeroing every bucket it passes.
+    private void Advance(Timestamp timestamp)
+    {
+        // Step 1: still inside the newest bucket, nothing to roll; this is the common case
+        long bucketNanoseconds = BucketNanoseconds;
+        long elapsedNanoseconds = timestamp.NanosSinceEpoch - BucketTimestamp.NanosSinceEpoch;
+        if (elapsedNanoseconds < bucketNanoseconds)
+            return;
+
+        // Step 2: a whole ring's worth has passed, start again from empty at this timestamp
+        long steps = elapsedNanoseconds / bucketNanoseconds;
+        if (steps >= BucketCount)
+        {
+            Counts = default;
+            Total = 0;
+            BucketIndex = 0;
+            BucketTimestamp = timestamp;
+            return;
+        }
+
+        // Step 3: step the newest bucket forward, zeroing each bucket it lands on and taking it off Total
+        for (long step = 0; step < steps; step++)
+        {
+            BucketIndex = BucketIndex + 1 < BucketCount ? BucketIndex + 1 : 0;
+            Total -= Counts[BucketIndex];
+            Counts[BucketIndex] = 0;
+        }
+
+        // Step 4: the newest bucket starts on the boundary the steps carried it to, not at timestamp, so buckets stay aligned
+        BucketTimestamp += Duration.FromNanoseconds(steps * bucketNanoseconds);
+    }
+
+    public override readonly string ToString() => Json.Serialize(this);
+}
+
 public sealed class SessionRateLimit
 {
     private readonly int _limit;
-    private int _ordersSentToday;
+
+    // Messages sent since the last Reset, which the session roll calls.
+    public int Count { get; private set; }
 
     public SessionRateLimit(int limit)
     {
         _limit = limit;
-        _ordersSentToday = 0;
+        Count = 0;
     }
 
     public bool CanSendOrder(Timestamp timestamp)
     {
-        return _ordersSentToday < _limit;
+        return Count < _limit;
     }
 
     public bool TrySendOrder(Timestamp timestamp)
@@ -189,51 +319,13 @@ public sealed class SessionRateLimit
         {
             return false;
         }
-        _ordersSentToday++;
+        Count++;
         return true;
     }
 
     public void Reset()
     {
-        _ordersSentToday = 0;
+        Count = 0;
     }
 }
 
-public sealed class RollingRateLimit
-{
-    private readonly RateLimit _rateLimit;
-    private readonly Timestamp[] _timestamps;
-    private int _current;
-
-    public RollingRateLimit(RateLimit rateLimit)
-    {
-        _rateLimit = rateLimit;
-        _timestamps = new Timestamp[_rateLimit.Limit];
-        _current = 0;
-    }
-
-    public bool CanSendOrder(Timestamp timestamp)
-    {
-        Timestamp oldestTimestamp = _timestamps[_current];
-
-        if (timestamp - oldestTimestamp >= _rateLimit.Duration)
-            return true;
-
-        return false;
-    }
-
-    public bool TrySendOrder(Timestamp timestamp)
-    {
-        if (!CanSendOrder(timestamp))
-        {
-            return false;
-        }
-
-        _timestamps[_current] = timestamp;
-
-        int next = _current + 1;
-        _current = next < _rateLimit.Limit ? next : 0;
-
-        return true;
-    }
-}

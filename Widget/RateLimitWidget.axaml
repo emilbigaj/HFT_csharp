@@ -1,0 +1,43 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.RateLimitWidget"
+             x:DataType="local:WidgetRateLimit">
+
+	<UserControl.Styles>
+		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+	</UserControl.Styles>
+
+	<DataGrid x:Name="RateLimitGrid"
+			  Background="Transparent"
+			  AutoGenerateColumns="False"
+			  IsReadOnly="True"
+			  GridLinesVisibility="All"
+			  BorderThickness="1"
+			  BorderBrush="Gray"
+			  RowBackground="White"
+			  HeadersVisibility="Column"
+			  CanUserSortColumns="True"
+			  CanUserResizeColumns="True"
+			  CanUserReorderColumns="True"
+			  MinColumnWidth="80"
+			  RowHeight="24">
+
+		<DataGrid.Styles>
+			<Style Selector="DataGridRow:nth-child(2n)">
+				<Setter Property="Background" Value="#F0F0F0" />
+			</Style>
+		</DataGrid.Styles>
+
+		<DataGrid.ContextMenu>
+			<ContextMenu Opened="OnContextMenuOpened" />
+		</DataGrid.ContextMenu>
+
+		<DataGrid.Columns>
+			<DataGridTextColumn Header="CoreGroup" Binding="{Binding CoreGroup}" Width="Auto"/>
+			<DataGridTextColumn Header="Duration"  Binding="{Binding Duration}"  Width="Auto"/>
+			<DataGridTextColumn Header="Limit"     Binding="{Binding Limit}"     Width="Auto"/>
+			<DataGridTextColumn Header="Count"     Binding="{Binding Count}"     Width="Auto"/>
+		</DataGrid.Columns>
+	</DataGrid>
+</UserControl>

@@ -46,6 +46,7 @@
 						<MenuItem Header="Audit Trail" Click="OnAddAuditTrailWidgetClick"/>
 						<MenuItem Header="Risk Limits" Click="OnAddRiskLimitsWidgetClick"/>
 						<MenuItem Header="Message Efficiency" Click="OnAddMessageEfficiencyWidgetClick"/>
+						<MenuItem Header="Rate Limits" Click="OnAddRateLimitWidgetClick"/>
 					</MenuItem>
 				</Menu>
 				<TextBlock x:Name="TimestampText"

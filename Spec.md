@@ -140,6 +140,53 @@ Limits: quantity 1..65535 (`QuantityNotValid` outside), 30 in-flight targets per
 `OrderRisk.MaxOrderQuantity`. The differential test that validated the struct (400k random ops
 against a plain list) is specified in `cpp_alignment_report_2026-09-10_orderrisk.md` §6.
 
+### Order rate limit: the one limit whose default is the exchange's own number
+
+CME Globex throttles order entry per session and publishes two lines: messages other than cancels
+are rejected past the first and the session is terminated past the second, at 500 and 750. Cancels
+are counted separately with their own, higher, pair. We deliberately do not split the buckets: one
+combined window sized at the tighter line can never breach either, and what it costs is cancel
+throughput, which is the right thing to give up.
+
+CME's page does not settle whether the window is one second or three. The application section reads
+like a count within an interval, while the mass quote and admin sections say MPS. Three seconds is
+the stricter of the two readings, so `RateLimit.CMEOrderEntry` uses it: 400 in 3 seconds, under the
+reject line rather than on it. That is safe under either reading, and only loosening it needs an
+answer from the GCC.
+
+Unlike every other limit in the system, the default is neither permissive nor zero. `RiskLimit` and
+`MessageEfficiency` default to unlimited in simulation and zero in realtime, because an unset
+quantity limit should refuse to trade. A rate limit cannot work that way: zero blocks everything and
+unlimited protects nothing, so the default is the real exchange number and a live session is
+protected before anyone configures it. `RiskLayer` builds one rolling window per CoreGroup, since a
+CoreGroup maps to an iLink session and that is the scope CME throttles.
+
+The window is `RollingRateLimit`, 64 bytes, so that it can sit in a shared array and the GUI can show
+CoreGroup, Duration, Limit and Count from another process. The id is `RateLimit.RateLimitId`, generic
+on purpose: the risk layer happens to key it by CoreGroup, the struct does not know that. The array is
+`Context._rateLimits`, one row per CoreGroup, server-written like `_riskLimits` and reached through
+`GetRateLimit`; it is named for the rate limit rather than the rolling model because another model
+could occupy the same 64-byte row later, cast by the caller. The server writes the CME default into
+every CoreGroup's row at construction; the risk layer takes the row by ref with no seq bump, exactly
+as it writes the risk-limit aggregates. Count is not
+state and must not be
+published as a number: it is a function of the ring and of the reader's clock, and a published
+integer freezes the moment the algo stops sending. So the ring itself is what is shared, and every
+reader derives Count at its own `Clock.Now` with `GetCount`, which mutates nothing.
+
+To fit 64 bytes the exact timestamps are replaced by 32 byte-sized buckets. The trap in any bucketed
+count is that it under-states: the newest bucket is only partly elapsed, so N buckets of width
+Duration/N cover less than Duration and a message can drop out of the sum while still inside the
+true window. That is the unsafe direction for a throttle. The buckets are therefore Duration/31 wide,
+so the 32 of them span one bucket more than Duration and the count covers a superset of the window.
+It can over-state by at most one bucket, about 97ms of a 3 second window, and never under-state.
+A bucket refuses at 255 rather than wrapping, which makes 255 messages in one bucket the burst limit.
+`Total` carries the sum of the buckets incrementally, so a send is one compare against it and never
+loops; a reader starts from `Total` and subtracts only the buckets that expired since the writer last
+rolled, usually none. Summing the 32 bytes was 16 ns and was the entire cost of a send.
+The property that matters, that no true window ever contains more than Limit admitted messages, is
+what the test checks; the over-count is the price of the 64 bytes.
+
 ### Risk-limit edits are requests; the CoreGroup thread owns the row
 
 Risk limits are server-wide: one `RiskLimit` row per instrument, applied to every strategy that

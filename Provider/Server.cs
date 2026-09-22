@@ -127,6 +127,10 @@ public class Server : IDisposable
                 _orderTargetQueues[coreGroupId] = new ByteQueue(Tools.Memory.SmallPageLength);
         }
 
+        // One order-entry throttle row per CoreGroup, at the CME default until configured (see Spec.md).
+        foreach (int coreGroupId in serverHeader.CoreGroupIds)
+            _serverContext.GetRateLimit(coreGroupId).Write(new RollingRateLimit(RateLimit.CMEOrderEntry with { RateLimitId = coreGroupId }));
+
         _serverSocket.AllocateClientId = _serverContext.AllocateClientId;
         _serverSocket.DeallocateClient = _serverContext.DeallocateClient;
         _serverSocket.ClientAllocated += OnClientAllocated;

@@ -54,7 +54,7 @@ public class TestingScenario : Scenario
             ClientName = ClientContext.GetDirectoryPath($"{CoreGroupName}");
         }
         SimulationBegin = new Timestamp(2025, 11, 25);
-        SimulationEnd = new Timestamp(2025, 12, 24);
+        SimulationEnd = new Timestamp(2026, 12, 24);
     }
 
     public override void BuildStrategies()
@@ -83,6 +83,14 @@ public class TestingScenario : Scenario
         int[] months = new int[] { 3, 6, 9, 12 };
         if (CoreGroupName == CoreGroupId.SandP500)
         {
+            FutureChain quoteChain = GetFutureChain("XCBT", "MYM", Clock.Now);
+            foreach(Future quote in quoteChain.Futures)
+            {
+                Future hedge = GetFuture("XCBT", "YM", quote.MaturityDate);
+                strategy.OnFuture(quote, hedge);
+            }
+            return;
+
             {
                 Future quote = GetFuture("XCBT", "MYM", Clock.Now);
                 strategy.OnFuture(quote, quote);

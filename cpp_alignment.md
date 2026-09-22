@@ -215,6 +215,17 @@ accounting. Port from C# `Provider/RiskLayer.cs` + `OrderRisk` in `Execution/Ord
   CoreGroup channel and `ReadExecution` calls `OnControlAlgoStatus` (no audit write — the client
   tap logs it); `ReadAdmin` no longer accepts it. With fills, states and targets already on that
   thread, the local position row has exactly one writer — no queue, no CAS.
+- **New shared array `RateLimits` (2026-09-22):** region `<server>/RateLimits`, `CoreGroupIds.Length`
+  (64) rows of `RollingRateLimit`, 64 bytes each: `RateLimit` 16 @0 (`Duration` int64 nanos @0,
+  `Limit` int32 @8, `RateLimitId` int32 @12), `BucketTimestamp` int64 nanos @16, `BucketIndex` int32
+  @24, `Total` int32 @28, `uint8 Counts[32]` @32. Index == CoreGroupId, server-written, created in
+  `Context` directly after `MessageEfficiency` (keep that array-id order for the mirror). The server
+  writes the CME default (3 s, 500, id = CoreGroupId) into every set CoreGroup at construction;
+  `RiskLayer` throttles order entry per CoreGroup with it, `TrySendOrder(Clock.Now)` on a plain ref
+  with no seq bump, rejecting `TooManyOrdersPerSecond`. Bucket semantics and the conservative
+  Duration/31 rule are in Spec.md "Order rate limit". A C++ server must create the same region and
+  own its writes, or a C# GUI attached to it shows an empty Rate Limits widget. `CoreGroupId` enum
+  (OS 0, Reserved 1, SandP500 2, Equity 3, Forex 4, Crypto 5) moved from Strategy to Data.
 - **Unknown message types**: `default: break` in ReadAdmin/ReadExecution swallowed a real bug in
   C# (a zeroed `Header::Type` made risk-limit edits silently no-op). At minimum count and expose
   them.

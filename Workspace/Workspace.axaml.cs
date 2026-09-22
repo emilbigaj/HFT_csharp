@@ -556,6 +556,7 @@ public partial class Workspace : Window, IWidgetHost
             "InstrumentHeadersWidget" => new InstrumentHeadersWidget(WorkspaceContext),
             "RiskLimitsWidget" => new RiskLimitsWidget(WorkspaceContext),
             "MessageEfficiencyWidget" => new MessageEfficiencyWidget(WorkspaceContext),
+            "RateLimitWidget" => new RateLimitWidget(WorkspaceContext),
             _ => null
         };
 
@@ -632,6 +633,7 @@ public partial class Workspace : Window, IWidgetHost
     private void OnAddAuditTrailWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new AuditTrailWidget(WorkspaceContext));
     private void OnAddInstrumentHeadersWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new InstrumentHeadersWidget(WorkspaceContext));
     private void OnAddMessageEfficiencyWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new MessageEfficiencyWidget(WorkspaceContext));
+    private void OnAddRateLimitWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new RateLimitWidget(WorkspaceContext));
     private void OnAddRiskLimitsWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new RiskLimitsWidget(WorkspaceContext));   // ← add this
 
 }

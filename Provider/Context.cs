@@ -166,6 +166,7 @@ public abstract class Context
     // execution
     protected readonly SharedArray<RiskLimit> _riskLimits;
     protected readonly SharedArray<MessageEfficiency> _messageEfficiency;
+    protected readonly SharedArray<RollingRateLimit> _rateLimits;
 
     protected readonly SharedArray<OrderState> _orderStates;
     protected readonly SharedArray<OrderRisk> _orderRisks;
@@ -237,6 +238,7 @@ public abstract class Context
         _marketsByPrice = NewSharedArray<MarketByPrice64>(directoryPath / "MarketsByPrice", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
         _riskLimits = NewSharedArray<RiskLimit>(serverName / "RiskLimits", serverHeader.InstrumentIds.Length, ServerAccess);
         _messageEfficiency = NewSharedArray<MessageEfficiency>(serverName / "MessageEfficiency", serverHeader.InstrumentIds.Length, ClientAccess);
+        _rateLimits = NewSharedArray<RollingRateLimit>(serverName / "RateLimits", serverHeader.CoreGroupIds.Length, ServerAccess);
 
         _orderStates = NewSharedArray<OrderState>(serverName / "OrderStates", serverHeader.OrdersCapacity, ServerAccess, false);
         _orderRisks = NewSharedArray<OrderRisk>(serverName / "OrderRisks", serverHeader.OrdersCapacity, ServerAccess, false);
@@ -336,6 +338,13 @@ public abstract class Context
     {
         //ThrowIfInstrumentIdOutOfRange(productGroupId);
         return ref _messageEfficiency.GetEntry(productGroupId);
+    }
+
+    // One per CoreGroup, server-written. RollingRateLimit today; another model would be a different 64-byte view of the same row, cast by the caller (see Spec.md).
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref SharedArrayEntry<RollingRateLimit> GetRateLimit(int coreGroupId)
+    {
+        return ref _rateLimits.GetEntry(coreGroupId);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -548,6 +557,11 @@ public abstract class Context
     public MessageEfficiencyEnumerable EnumerateMessageEfficiency()
     {
         return new MessageEfficiencyEnumerable(_messageEfficiency, ServerHeader.GetReadonlyRef().InstrumentIds.Length);
+    }
+
+    public RateLimitEnumerable EnumerateRateLimits()
+    {
+        return new RateLimitEnumerable(_rateLimits, ServerHeader.GetReadonlyRef().CoreGroupIds);
     }
 }
 
@@ -1099,6 +1113,7 @@ public sealed class ServerContext : Context
 
         PrintSharedArray(_marketsByPrice, "MarketsByPrice [instrumentId]");
         PrintSharedArray(_messageEfficiency, "MessageEfficiency [productGroupId]");
+        PrintSharedArray(_rateLimits, "RateLimits [coreGroupId]");
     }
 
     private static void PrintSharedArray<T>(SharedArray<T> sharedArray, string title) where T : unmanaged
@@ -1287,6 +1302,59 @@ public struct MessageEfficiencyEnumerator
         Current = _messageEfficiency[_productGroupId].Read();
         _productGroupId++;
         return true;
+    }
+}
+
+public readonly struct RateLimitEnumerable
+{
+    private readonly SharedArray<RollingRateLimit> _rateLimits;
+    private readonly Bitset64 _coreGroupIds;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public RateLimitEnumerable(SharedArray<RollingRateLimit> rateLimits, Bitset64 coreGroupIds)
+    {
+        _rateLimits = rateLimits;
+        _coreGroupIds = coreGroupIds;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public RateLimitEnumerator GetEnumerator()
+    {
+        return new RateLimitEnumerator(_rateLimits, _coreGroupIds);
+    }
+}
+
+public struct RateLimitEnumerator
+{
+    private readonly SharedArray<RollingRateLimit> _rateLimits;
+    private Bitset64 _coreGroupIds;
+
+    public RollingRateLimit Current { get; private set; }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal RateLimitEnumerator(SharedArray<RollingRateLimit> rateLimits, Bitset64 coreGroupIds)
+    {
+        _rateLimits = rateLimits;
+        _coreGroupIds = coreGroupIds;
+        Current = default!;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool MoveNext()
+    {
+        // CoreGroups are not dense: walk the set bits, one row each, skipping any the server has not written.
+        while (!_coreGroupIds.IsEmpty)
+        {
+            int coreGroupId = _coreGroupIds.LowestSet;
+            _coreGroupIds.Clear(coreGroupId);
+            if (_rateLimits[coreGroupId].IsEmpty())
+                continue;
+            Current = _rateLimits[coreGroupId].Read();
+            return true;
+        }
+
+        Current = default!;
+        return false;
     }
 }
 

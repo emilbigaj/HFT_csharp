@@ -18,6 +18,7 @@ public struct Exposure
 }
 
 
+
 // This class is not thread safe. Only one thread should ever use it.
 public class RiskLayer
 {
@@ -344,7 +345,17 @@ public class RiskLayer
             if (!orderRejectedReasons.IsEmpty)
                 return false;
 
+            if (_orderRejectedSource == OrderRejectedSource.Server)
+            {
+                ref RollingRateLimit rollingRateLimit = ref _serverContext.GetRateLimit(instrument.Header.CoreGroupId).GetRef();
 
+                if (!rollingRateLimit.TrySendOrder(Clock.Now))
+                {
+                    orderRejectedReasons.Set((int)OrderRejectedReason.TooManyOrdersPerSecond);
+                    return false;
+                }
+            }
+            
             // 10. RISK LIMITS
             // Only check risk on New or Amend (increasing size)
             if (!isCancel)

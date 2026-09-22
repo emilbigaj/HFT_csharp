@@ -13,15 +13,6 @@ using System.Collections.Generic;
 namespace Strategy;
 
 [RegisterJson]
-public enum CoreGroupId
-{
-    OS = 0,
-    Reserved = 1,
-    SandP500 = 2,
-    Equity = 3,
-    Forex = 4,
-    Crypto = 5,
-}
 
 
 public class Scenario

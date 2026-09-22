@@ -291,4 +291,21 @@ public static class WorkspaceRunner
             }
         });
     }
+
+    // Closes every open workspace window. Each Window.Close() runs Workspace's own
+    // OnWorkspaceClosed handler, which shuts the desktop lifetime down once the last workspace is
+    // gone — ending the non-background UI thread so an unattended batch process can exit on its
+    // own once this returns. Safe to call from any thread; marshals to the UI thread like
+    // CaptureScreenshotAsync above.
+    public static async Task CloseAllWindowsAsync()
+    {
+        if (s_desktopLifetime == null)
+            return;
+
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            foreach (Window window in s_desktopLifetime.Windows.ToList())
+                window.Close();
+        });
+    }
 }
