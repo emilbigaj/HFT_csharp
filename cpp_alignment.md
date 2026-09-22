@@ -215,6 +215,15 @@ accounting. Port from C# `Provider/RiskLayer.cs` + `OrderRisk` in `Execution/Ord
   CoreGroup channel and `ReadExecution` calls `OnControlAlgoStatus` (no audit write — the client
   tap logs it); `ReadAdmin` no longer accepts it. With fills, states and targets already on that
   thread, the local position row has exactly one writer — no queue, no CAS.
+- **`RiskLayer::OnOrderState` reconciles before it releases (2026-09-22):** run the acknowledge
+  step (retire the pending target, apply `worstAfter - worstBefore` measured from
+  `beforeAckedOrderQuantity`) when `reason == Acked` OR
+  `state.OrderProfile.Quantity != beforeAckedOrderQuantity`, and make the `Done` release an
+  independent `if`, not an `else if`. An amend acknowledged by the fill or cancel that completes the
+  order arrives as one message whose reason is `Fill`/`Canceled`; the old `Acked`-only branch never
+  released the drop from the previous quantity and `Done` measured worst case from the new one,
+  leaking the difference into the aggregates permanently. Spec.md "An order state that carries a
+  new quantity is an acknowledgement" has the ledger proof.
 - **New shared array `RateLimits` (2026-09-22):** region `<server>/RateLimits`, `CoreGroupIds.Length`
   (64) rows of `RollingRateLimit`, 64 bytes each: `RateLimit` 16 @0 (`Duration` int64 nanos @0,
   `Limit` int32 @8, `RateLimitId` int32 @12), `BucketTimestamp` int64 nanos @16, `BucketIndex` int32

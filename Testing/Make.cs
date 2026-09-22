@@ -48,88 +48,41 @@ public sealed class Make : Algo
     
     public void Execute()
     {
-        //using Latency latency = new Latency(CallId.AlgoExecute);
-
         StackList<Target> targets = new StackList<Target>(stackalloc Target[64]);
-        int pos = GetPositionQuantity();
-        if (Position.TryGetQuote(out Quote inst))
+        int maxPos = 10;
+
+        if (Position.TryGetQuote(out var quote))
         {
-            double pc = inst.MidPrice * 0.000;
-            int spread = Instrument.RoundToTicks(pc);
-            int half = Math.Max(spread / 2, 2);
+            int pos = GetPositionQuantity();
+            Console.WriteLine("-----------------------------");
+            Console.WriteLine($"Current position: {pos}, max position: {maxPos}");
+            int buyNeeded = maxPos - pos;
+            int sellNeeded = -maxPos - pos;
 
-            int bidTicks = Instrument.RoundToTicks(inst.BidPrice);
-            if (Math.Abs(bidTicks - _bidTicks) >= half)
-                _bidTicks = bidTicks;
-            int askTicks = Instrument.RoundToTicks(inst.AskPrice);
-            if (Math.Abs(askTicks - _askTicks) >= half)
-                _askTicks = askTicks;
 
-            if (s_exit)
+            int buyTicks = quote.Bid.Ticks;
+            int sellTicks = quote.Ask.Ticks;
+
+
+            while (buyNeeded > 0)
             {
-                int buyTicks = _bidTicks;
-                int sellTicks = _askTicks;
-                if (pos > 0)
-                {
-                    targets.Add(new Target { Ticks = sellTicks, WorkingQuantity = -1 });
-                }
-                if (pos < 0)
-                {
-                    targets.Add(new Target { Ticks = buyTicks, WorkingQuantity = 1 });
-                }
+                int buyQty = Random.Shared.Next(1, buyNeeded + 1);
+                buyNeeded -= buyQty;
+                Target buy = new Target(buyTicks--, buyQty);
+                Console.WriteLine($"Adding buy target: {buyTicks} ticks, quantity: {buyQty}");
+                targets.Add(buy);
+
             }
-            else
+            while (sellNeeded < 0)
             {
-
-                int max = 10;
-                int buy = max - pos;
-                int sell = -max - pos;
-                /*
-                if (pos == 0)
-                {
-                    int buyTicks = _bidTicks - spread;
-                    int sellTicks = _askTicks + spread;
-                    targets.Add(new Target { Ticks = sellTicks, WorkingQuantity = -1 });
-                    targets.Add(new Target { Ticks = buyTicks, WorkingQuantity = 1 });
-
-                }
-                if (pos > 0)
-                {
-                    int sellTicks = _askTicks + 1;
-                    targets.Add(new Target { Ticks = sellTicks, WorkingQuantity = -1 });
-                }
-                if (pos < 0)
-                {
-                    int buyTicks = _bidTicks - 1;
-                    targets.Add(new Target { Ticks = buyTicks, WorkingQuantity = 1 });
-                }*/
-                if (buy > 0)
-                {
-                    int buyTicks = _bidTicks - 1;
-                    targets.Add(new Target { Ticks = buyTicks, WorkingQuantity = buy });
-                }
-                if (sell < 0)
-                {
-                    int sellTicks = _askTicks + 1;
-                    targets.Add(new Target { Ticks = sellTicks, WorkingQuantity = sell });
-                }
+                int sellQty = -Random.Shared.Next(1, -sellNeeded + 1);
+                sellNeeded -= sellQty;
+                Target sell = new Target(sellTicks++, sellQty);
+                Console.WriteLine($"Adding sell target: {sellTicks} ticks, quantity: {sellQty}");
+                targets.Add(sell);
             }
-            
         }
-
-        int maxBuyTicks = int.MinValue;
-        int minSellTicks = int.MaxValue;
-
-        foreach (Target target in targets)
-        {
-            if (target.Sign > 0)
-                maxBuyTicks = Math.Max(maxBuyTicks, target.Ticks);
-            else
-                minSellTicks = Math.Min(minSellTicks, target.Ticks);
-        }
-
-        if (maxBuyTicks >= minSellTicks)
-            return;
+        
 
         Target(ref targets);
     }

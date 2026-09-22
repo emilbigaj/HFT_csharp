@@ -4,6 +4,17 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-09-22 — order-state reconcile before release (risk aggregate leak)
+
+- `Provider/RiskLayer.cs` — `OnOrderState` runs the acknowledge step on any state whose quantity
+  differs from the previously acked one, not only on reason `Acked`, and the `Done` release is an
+  independent `if`. An amend acknowledged by the fill or cancel that completes the order arrives as
+  one message; the drop from the old quantity was never released and `Done` measured worst case from
+  the new one, so each such order leaked the difference into `WorstLong/ShortWorkingQuantity` for
+  good (10 long / 20 short reserved with nothing working after one simulated day of `Make`).
+  Ledger replay of the 2026-09-22 sim audit: 12 leaking orders before, 0 of 492,060 after.
+  Spec.md "An order state that carries a new quantity is an acknowledgement"; cpp_alignment.md §5.
+
 ## Unreleased (working tree, 2026-09-14)
 
 ### One strategy run per `ReadSocket` pass (see Spec.md "One strategy run per pass")

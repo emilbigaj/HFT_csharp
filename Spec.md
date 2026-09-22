@@ -114,6 +114,27 @@ Related: the server's `TargetIsActive` no-op check is Amend-only. A Cancel is bu
 applied to cancels every first cancel of an acked order was refused (69 of 69 on 2026-09-08) and
 only the client's Seq+2 retry got through — one round trip later, on the next quote.
 
+### An order state that carries a new quantity is an acknowledgement, whatever its reason says
+
+The server reserves each order's worst case, the larger of its acked quantity and any unacked
+target, and releases the difference when the exchange acknowledges a target. Until 2026-09-22 that
+release ran only on a state whose reason was `Acked`. But an amend is not always acknowledged on its
+own: when the amended order is matched the instant the amend lands, the exchange reports the new
+quantity and the fill in one message, reason `Fill`, and the same can happen with a cancel. The
+`Acked` branch never ran, the drop from the old quantity to the new one was never released, and the
+`Done` branch then measured the order's worst case against the new, smaller quantity in the message
+rather than the old one the aggregate was holding. Each such order leaked the difference into
+`WorstLong/ShortWorkingQuantity` for good. `Make`'s ladder produced it on twelve of 1.3 million
+orders in one simulated day, enough to leave 10 long and 20 short reserved with nothing working.
+
+**Rule: `OnOrderState` reconciles first, then releases.** Any state whose quantity differs from the
+previously acked quantity is treated as the acknowledgement of that target and released through the
+same arithmetic as an `Acked` state, and only then does a `Done` release the remainder. The two steps
+telescope even when the acknowledged quantity matches no pending target: reconcile applies the change
+in worst case, `Done` releases the rest, and the sum is exactly what was held. The rule was checked by
+replaying the server's ledger per order from the day's audit: twelve residuals under the old rule,
+none under this one.
+
 ### OrderRisk: in-flight quantities are a scanned array, not a bitset
 
 Per order slot the server reserves the largest quantity that could end up working: the acked

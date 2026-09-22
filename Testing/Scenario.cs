@@ -88,8 +88,9 @@ public class TestingScenario : Scenario
             {
                 Future hedge = GetFuture("XCBT", "YM", quote.MaturityDate);
                 strategy.OnFuture(quote, hedge);
+                return;
+
             }
-            return;
 
             {
                 Future quote = GetFuture("XCBT", "MYM", Clock.Now);
