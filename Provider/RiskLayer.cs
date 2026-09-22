@@ -175,13 +175,15 @@ public class RiskLayer
         if (_orderRejectedSource != OrderRejectedSource.Server)
             return;
 
-        ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
-        Side side = orderState.OrderProfile.Side;
-
-        // A state carrying a new quantity acknowledges a target whatever its reason says: an amend acked by
-        // the fill or cancel that completes the order never arrives as Acked. Reconcile before any release (see Spec.md).
-        if (orderState.OrderStateReason == OrderStateReason.Acked || orderState.OrderProfile.Quantity != beforeAckedOrderQuantity)
+        // Expects the exchange to acknowledge before it trades: a marketable create or amend arrives as Acked,
+        // then its fills. The Acked branch releases the old-to-new quantity change, the Done branch releases
+        // the rest measured from the acked quantity; a fill that carried an unacked quantity would leak the
+        // difference for good. The simulator and CME both honour this (see Spec.md "Acceptance before trade").
+        if (orderState.OrderStateReason == OrderStateReason.Acked)
         {
+            ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
+            Side side = orderState.OrderProfile.Side;
+
             int worstOrderQuantityBefore = orderRisk.GetAbsWorstOrderQuantity(beforeAckedOrderQuantity);
             orderRisk.Ack(orderState.OrderProfile.Quantity);
             int worstOrderQuantityAfter = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
@@ -189,10 +191,11 @@ public class RiskLayer
 
             ApplyWorstWorkingQuantityDelta(orderState.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, worstOrderQuantityDelta);
         }
-
-        // Not else: one message can acknowledge an amend and complete the order.
-        if (orderState.OrderStateStatus == OrderStateStatus.Done)
+        else if (orderState.OrderStateStatus == OrderStateStatus.Done)
         {
+            ref OrderRisk orderRisk = ref _serverContext.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
+            Side side = orderState.OrderProfile.Side;
+
             int worstOrderQuantity = orderRisk.GetAbsWorstOrderQuantity(orderState.OrderProfile.Quantity);
             int released = worstOrderQuantity - Math.Abs(orderState.QuantityFilled);
 

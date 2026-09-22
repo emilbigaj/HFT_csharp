@@ -5,6 +5,8 @@
 > `ControlRiskLimit`, `OrderRisk` layout, threading model, NicTimestamp stamping, TradingStatus).
 > Then `cpp_alignment_report_2026-09-14.md` (client-side update coalescing: `Instrument` /
 > `Position` apply-then-raise, one callback per `ReadSocket` pass; no wire change).
+> Then `cpp_alignment_report_2026-09-22.md` (two session contracts `RiskLayer` depends on:
+> acceptance before trade, and In-Flight Mitigation always on; no wire change).
 
 Compared **C++ github.com/emilbigaj/HFT_cpp `aeac53c`** (fresh clone, verified file-by-file
 2026-09-08) against **C# github.com/emilbigaj/HFT_csharp `2e1ddfa`** (the spread trading vertical).

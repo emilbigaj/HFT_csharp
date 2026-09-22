@@ -215,15 +215,21 @@ accounting. Port from C# `Provider/RiskLayer.cs` + `OrderRisk` in `Execution/Ord
   CoreGroup channel and `ReadExecution` calls `OnControlAlgoStatus` (no audit write — the client
   tap logs it); `ReadAdmin` no longer accepts it. With fills, states and targets already on that
   thread, the local position row has exactly one writer — no queue, no CAS.
-- **`RiskLayer::OnOrderState` reconciles before it releases (2026-09-22):** run the acknowledge
-  step (retire the pending target, apply `worstAfter - worstBefore` measured from
-  `beforeAckedOrderQuantity`) when `reason == Acked` OR
-  `state.OrderProfile.Quantity != beforeAckedOrderQuantity`, and make the `Done` release an
-  independent `if`, not an `else if`. An amend acknowledged by the fill or cancel that completes the
-  order arrives as one message whose reason is `Fill`/`Canceled`; the old `Acked`-only branch never
-  released the drop from the previous quantity and `Done` measured worst case from the new one,
-  leaking the difference into the aggregates permanently. Spec.md "An order state that carries a
-  new quantity is an acknowledgement" has the ledger proof.
+- **In-Flight Mitigation is mandatory (2026-09-22):** every iLink 3 session logs on with IFM,
+  tag 9768 = 1. `OrderState.QuantityFilled` is cumulative across every cancel/replace and the risk
+  layer's `Done` release is `worst - QuantityFilled`; a non-IFM session restarts CumQty at zero on
+  each modify and would over-release by everything filled before the replace. If a session ever
+  cannot get IFM, the adapter must normalise CumQty to cumulative before the state reaches the
+  server. It must never pass a reset through. Spec.md "In-Flight Mitigation is always on".
+- **Acceptance before trade is a contract the risk layer depends on (2026-09-22):**
+  `RiskLayer::OnOrderState` stays the two-branch form, `Acked` releases the old-to-new quantity
+  change, `else if Done` releases the remainder measured from the acked quantity. It is NOT
+  defensive: a fill carrying a quantity the server never saw acknowledged leaks the difference into
+  the aggregates permanently. CME delivers ExecutionReportNew/Modify before ExecutionReportTrade;
+  the adapter must preserve that order and must never coalesce an acceptance into a fill, cancel or
+  elimination, and on recovery must replay acceptances before fills. If a venue ever coalesces, the
+  adapter synthesises the acceptance; do not "fix" it in RiskLayer. (A reconcile-on-any-quantity-
+  change variant shipped briefly in 1eef81a and was reverted.) Spec.md "Acceptance before trade".
 - **New shared array `RateLimits` (2026-09-22):** region `<server>/RateLimits`, `CoreGroupIds.Length`
   (64) rows of `RollingRateLimit`, 64 bytes each: `RateLimit` 16 @0 (`Duration` int64 nanos @0,
   `Limit` int32 @8, `RateLimitId` int32 @12), `BucketTimestamp` int64 nanos @16, `BucketIndex` int32

@@ -611,6 +611,17 @@ public class InstrumentSimulator
             Console.WriteLine($"    ExecutionSimulator.Enqueue(ClientOrderId: {orderState.OrderHeader.OrderId}, TargetTicks: {orderProfile.Ticks}, TargetQuantity: {orderProfile.Quantity})");
         }
         int workingQuantity = orderProfile.Quantity - orderState.QuantityFilled;
+
+        // CME reports the acceptance before any trade it causes, new order and replace alike (see Spec.md).
+        // A marketable order is at the front of whatever it sweeps, so nothing is ahead of it; a resting
+        // one takes its place in the book first so the ack carries its real queue position.
+        bool isMarketable = IsMarketable(orderProfile, workingQuantity);
+        orderState.QuantityAhead = isMarketable ? 0 : orderManager.Enqeue(orderState.OrderHeader.OrderId, orderProfile.Ticks, workingQuantity);
+        Update(ref orderState, orderProfile, 0, OrderStateReason.Acked);
+
+        if (!isMarketable)
+            return;
+
         Take(ref orderState, orderProfile, ref workingQuantity);
         if (workingQuantity != 0)
         {
@@ -618,10 +629,20 @@ public class InstrumentSimulator
             {
                 Console.WriteLine($"        ExecutionSimulator.Enqueue.Enqueue(WorkingQuantity: {workingQuantity})");
             }
-            int quantityAhead = orderManager.Enqeue(orderState.OrderHeader.OrderId, orderProfile.Ticks, workingQuantity);
-            orderState.QuantityAhead = quantityAhead;
-            Update(ref orderState, orderProfile, 0, OrderStateReason.Acked);
+            // Whatever survives the sweep rests at the limit. CME sends no second ack for it, so neither do we.
+            orderState.QuantityAhead = orderManager.Enqeue(orderState.OrderHeader.OrderId, orderProfile.Ticks, workingQuantity);
         }
+    }
+
+    // Would Take trade at least one lot right now: the same guard Take's loop applies against the opposite best.
+    // Probed, not enqueued: a crossing order placed in our own book first would make IsCrossed true and Take would never trade.
+    private bool IsMarketable(OrderProfile orderProfile, int workingQuantity)
+    {
+        if (_marketByPrice64.IsCrossed)
+            return false;
+        if (workingQuantity > 0)
+            return _marketByPrice64.AsksCount > 0 && orderProfile.Ticks >= _marketByPrice64.BestAsk.Ticks;
+        return _marketByPrice64.BidsCount > 0 && orderProfile.Ticks <= _marketByPrice64.BestBid.Ticks;
     }
     private void Reduce(ref OrderState orderState, OrderManager orderManager, OrderProfile orderProfile)
     {

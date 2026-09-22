@@ -6,14 +6,29 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ## 2026-09-22 — order-state reconcile before release (risk aggregate leak)
 
-- `Provider/RiskLayer.cs` — `OnOrderState` runs the acknowledge step on any state whose quantity
-  differs from the previously acked one, not only on reason `Acked`, and the `Done` release is an
-  independent `if`. An amend acknowledged by the fill or cancel that completes the order arrives as
-  one message; the drop from the old quantity was never released and `Done` measured worst case from
-  the new one, so each such order leaked the difference into `WorstLong/ShortWorkingQuantity` for
-  good (10 long / 20 short reserved with nothing working after one simulated day of `Make`).
-  Ledger replay of the 2026-09-22 sim audit: 12 leaking orders before, 0 of 492,060 after.
-  Spec.md "An order state that carries a new quantity is an acknowledgement"; cpp_alignment.md §5.
+- Root cause of the leaked `WorstLong/ShortWorkingQuantity` (10 long / 20 short reserved with
+  nothing working after one simulated day of `Make`): the simulator acknowledged a marketable amend
+  or create only for the remainder, so an order that filled on arrival delivered a `Fill` carrying
+  a quantity the server had never seen acked. `RiskLayer.OnOrderState` releases the old-to-new
+  change only on `Acked`, so the difference leaked for good. Ledger replay of the 2026-09-22 sim
+  audit: 1,316 such orders, 12 leaking. Fixed in the simulator (below); `OnOrderState` keeps its
+  two-branch form with a comment stating the acceptance-before-trade contract it depends on. A
+  reconcile-on-any-quantity-change variant went in as 1eef81a and is reverted here: correct, but
+  it hid the sequence violation and made the code say something other than the rule.
+  Spec.md "Acceptance before trade: OrderRisk depends on it"; cpp_alignment.md §5.
+- `Simulator/ServerSimulator.cs` — `Enqueue` now acks before it trades, as CME does: the `Acked`
+  state goes out first (queue position 0 if marketable, else the book position), then `Take` sends
+  the fills, and a remainder rests at the limit with no second ack. Before, a marketable new order
+  or replace produced fills with no ack at all, and a partial fill produced fills then the ack; the
+  2026-09-22 MYM audit had 1,316 such orders. `IsMarketable` probes the opposite best rather than
+  enqueueing first, because a crossing order in our own book flips `IsCrossed` and `Take` would
+  never trade. Create, reprice and amend-up all funnel through `Enqueue`; `Reduce` was already right.
+- Spec.md — "In-Flight Mitigation is always on": tag 9768 = 1 on every session; `QuantityFilled`
+  is cumulative across every replace; an adapter that cannot get IFM must normalise `CumQty` before
+  the server sees it.
+- `cpp_alignment_report_2026-09-22.md` (new) — the two contracts for the C++ session and adapter:
+  acceptance before trade (the two-branch `OnOrderState`, why it is not defensive, the leak
+  evidence, the audit check) and IFM always on (`CumQty` = `QuantityFilled`, cumulative).
 
 ## Unreleased (working tree, 2026-09-14)
 
