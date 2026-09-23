@@ -263,6 +263,14 @@ accounting. Port from C# `Provider/RiskLayer.cs` + `OrderRisk` in `Execution/Ord
   strategy thread to the row's `StrategyCoreId`; the C# Testing scenario prompts for one of those four
   names, so the strings in the C++ server's files must match them exactly. The Rate Limits widget
   shows `CoreGroupName` from this row, so a group with no file shows an empty name.
+- **PendingNew `QuantityAhead` is provisional, not 0 (2026-09-23):** in the `Create` branch of the
+  order-target path the C# server writes the PendingNew `OrderState` with `QuantityAhead` = its own
+  `MarketByPrice64` quantity at the order's price on the order's side (`Bids.GetQuantity(ticks)` for
+  a buy, `Asks.GetQuantity(ticks)` for a sell), read by `ref readonly` before the order row lock is
+  taken. The C++ server must seed the same way: a 0 there shows every fresh order at the front of
+  the queue for the whole round trip to the venue. The acceptance overwrites it with the real
+  position and `OnQuantityAhead` keeps it current afterwards. No wire-shape change; addendum in
+  cpp_alignment_report_2026-09-22.md.
 - **Unknown message types**: `default: break` in ReadAdmin/ReadExecution swallowed a real bug in
   C# (a zeroed `Header::Type` made risk-limit edits silently no-op). At minimum count and expose
   them.

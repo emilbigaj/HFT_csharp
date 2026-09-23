@@ -103,3 +103,29 @@ construction.
 3. Logon carries 9768 = 1; `QuantityFilled` is cumulative across replaces.
 4. Day-end audit replay: zero orders with nonzero reserve/release residual, zero fills whose
    quantity differs from the last acknowledged quantity.
+
+---
+
+# Addendum 2026-09-23 — PendingNew carries a provisional QuantityAhead
+
+**Rule.** When the server accepts a `Create` and writes the PendingNew `OrderState` (Seq 0,
+`OrderStateReason::PendingNew`), `QuantityAhead` is the server's own book quantity at the order's
+price on the order's side: `MarketByPrice64.Bids.GetQuantity(ticks)` for a buy,
+`Asks.GetQuantity(ticks)` for a sell. Not 0.
+
+**Why.** The ladder, and any strategy that reads `QuantityAhead`, sees a PendingNew order for the
+whole round trip to the venue. With 0 every fresh order reads as front of queue; on a strategy that
+re-quotes constantly that is the entire ladder. The book quantity is the best estimate the server
+has before the venue answers: it is the position the order will hold if nothing at that price
+changes while it is in flight.
+
+**What the C++ server must do.** Read the book row before taking the order-row lock (the C# takes
+a `ref readonly` into the shared `MarketByPrice64` entry), write the seeded value in the same
+`OrderState` that carries PendingNew, and let the acceptance overwrite it. `OnQuantityAhead` /
+`AheadOfOrder` are unchanged.
+
+**Verification.** In the audit, every `OrderState` with `Seq == 0` and reason PendingNew for a
+resting create carries a `QuantityAhead` equal to the book quantity at its price at that
+`NicTimestamp`. The `Acked` state that follows may differ and does not have to match.
+
+Checklist item 5: PendingNew `QuantityAhead` is seeded from the book, never left at 0.

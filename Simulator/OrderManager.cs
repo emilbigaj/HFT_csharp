@@ -87,12 +87,14 @@ public class QueueManager
             {
                 if (order.Quantity < quantity)
                     throw new ArgumentOutOfRangeException();
+                ulong priorityId = order.PriorityId;
                 UserQuantity += quantity - order.Quantity;
                 order.AmendTo(quantity);
                 if (order.Quantity == 0)
                 {
                     Orders.Remove(in node);
                 }
+                PublishQuantityAhead(priorityId);   // only the orders queued behind this one moved
                 return;
             }
         }
@@ -104,8 +106,10 @@ public class QueueManager
         {
             if (node.Item.OrderId == orderId)
             {
+                ulong priorityId = node.Item.PriorityId;
                 UserQuantity -= node.Item.Quantity;
                 Orders.Remove(in node);
+                PublishQuantityAhead(priorityId);   // only the orders queued behind this one moved
                 return;
             }
         }
@@ -353,12 +357,12 @@ public class QueueManager
                 Orders.Remove(in node);
             break;   // an order lives in exactly one blob
         }
-        PublishQuantityAhead();
+        PublishQuantityAhead(priorityId);   // only the orders queued behind the deleted one moved
     }
 
-    
-
-    private void PublishQuantityAhead()
+    // Publishes the user orders queued behind the order with priorityId. A user order takes the highest id seen when it
+    // was enqueued, so an id at or above the given one means it joined the queue later and its position is what moved.
+    private void PublishQuantityAhead(ulong priorityId = 0)
     {
         int quantityAhead = 0;
         foreach (ref NodeList<SimOrder>.Node node in Orders.Nodes)
@@ -367,7 +371,7 @@ public class QueueManager
                 throw new ArgumentOutOfRangeException();
 
             ref SimOrder order = ref node.Item;
-            if (order.IsUserOrder)
+            if (order.IsUserOrder && order.PriorityId >= priorityId)
                 InstrumentSimulator.ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_AheadOfOrder(new AheadOfOrder(order.OrderId, quantityAhead));
             quantityAhead += order.Quantity;
         }

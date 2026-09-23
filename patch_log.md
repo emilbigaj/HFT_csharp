@@ -4,6 +4,32 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-09-23 — PendingNew carries the book's quantity at its price as `QuantityAhead`
+
+- `Provider/Server.cs` — the `Create` branch of the order-target path wrote the PendingNew
+  `OrderState` with `QuantityAhead = 0`, so every fresh order showed front-of-queue in the ladder
+  until its ack arrived; with the Testing algo re-quoting constantly the ladder was a wall of
+  zeros. The server now seeds it from its own book: the bid or ask quantity at the order's price on
+  the order's side, read from the shared `MarketByPrice64` row before the order row is locked. It
+  is provisional: the exchange's ack (the simulator's `Enqeue` position) replaces it and
+  `AheadOfOrder` publishes keep it current after that. No wire-shape change; the C++ server must
+  seed the same way (cpp_alignment.md §5; addendum in cpp_alignment_report_2026-09-22.md).
+
+## 2026-09-23 — simulated queue: publish only the orders whose position moved
+
+- `Simulator/OrderManager.cs` — `QueueManager.PublishQuantityAhead(ulong priorityId)` publishes
+  `AheadOfOrder` only for user orders with `PriorityId >= priorityId`: a user order is stamped with
+  the highest id seen when it was enqueued, so at-or-above means it joined the queue after the order
+  that just changed and its position is what moved (at-or-above, not above: the seed blob and a user
+  order queued right after it share an id, as do two user orders with no MBO event between them).
+  The id defaults to 0, so a bare `PublishQuantityAhead()` still publishes the whole level. Callers:
+  `ReduceMarketBy(priorityId, quantity)` passes the deleted order's id, so a cancel behind you no
+  longer republishes your unchanged value on every event; `ReduceUserOrderTo` and `DeleteUserOrder`
+  now publish at all, with the changed order's id, where before a user order behind another of ours
+  kept a stale number until the next market event at that level. `OnTrade` and the MBP-path
+  `ReduceMarketBy(int)` still publish the whole level; in `OnTrade` that is exact, since fills come
+  off the front and everything left has moved.
+
 ## 2026-09-23 — CoreGroups named by the server; rate limits load from `.ratelimit` files
 
 - `Provider/Allocate.cs` — `CoreGroup` row (36 B): `String16 CoreGroupName`, `CoreGroupId`, and the

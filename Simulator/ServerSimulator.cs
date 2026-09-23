@@ -1109,7 +1109,7 @@ public class ServerSimulator
 
     private const int s_instrumentsCapacity = 4096;
     private const int s_ordersPerClient = 64;
-    private const int SimulatorCoreGroupId = 1; // the single trading CoreGroup all sim instruments use
+    private const int ServerCoreGroupId = 1; // the single trading CoreGroup all sim instruments use
 
     public ExchangeSimulator ExchangeSimulator { get; }
 
@@ -1124,7 +1124,7 @@ public class ServerSimulator
             OrdersPerClient = s_ordersPerClient,
         };
         serverHeader.CoreGroupIds.Set(0); // admin / housekeeping channel
-        serverHeader.CoreGroupIds.Set(SimulatorCoreGroupId); // single trading CoreGroup (all sim instruments)
+        serverHeader.CoreGroupIds.Set(ServerCoreGroupId); // single trading CoreGroup (all sim instruments)
 
         // Must be up before Server's constructor, which connects its .server and .audit sockets to it.
         if (startLogginServer)
@@ -1137,7 +1137,7 @@ public class ServerSimulator
         if (!File.Exists(coreGroupPath))
         {
             Directory.CreateDirectory(Path.GetDirectoryName(coreGroupPath)!);
-            File.WriteAllText(coreGroupPath, Json.Serialize(new CoreGroup { CoreGroupName = "Simulation", CoreGroupId = SimulatorCoreGroupId }));
+            File.WriteAllText(coreGroupPath, Json.Serialize(new CoreGroup { CoreGroupName = "Simulation", CoreGroupId = ServerCoreGroupId }));
         }
 
         // Server publishes the header, opens the context, sockets, audit and risk layer.
@@ -1378,7 +1378,7 @@ public class ServerSimulator
             header = new InstrumentHeader()
             {
                 InstrumentType = instrumentDetails.InstrumentType,
-                CoreGroupId = SimulatorCoreGroupId,
+                CoreGroupId = ServerCoreGroupId,
                 InstrumentId = -1,
                 InstrumentHeaderId = instrumentHeaderId,
                 Exchange = new String8(instrumentDetails.Exchange),
@@ -1463,7 +1463,7 @@ public class ServerSimulator
         // Client -> socket -> Server, with no delay on this leg. Server validates each target and
         // fires OrderTarget, which is bound to ExchangeSimulator's own latency queue, so the only
         // delay on the way out is the exchange's.
-        _server.ReadExecution(SimulatorCoreGroupId);
+        _server.ReadExecution(ServerCoreGroupId);
 
         // Admin is polled at most once a second: allocations happen in Init() before the clock runs,
         // and scanning every client's admin channel on each interject is pure cost during a backtest.

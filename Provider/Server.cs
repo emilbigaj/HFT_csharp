@@ -418,6 +418,8 @@ public class Server : IDisposable
 
         if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
         {
+            ref readonly MarketByPrice64 mbp64 = ref _serverContext.GetMarketByPrice64(orderTarget.OrderHeader.OrderId.InstrumentId).GetReadonlyRef();
+            int quantityAhead = orderTarget.OrderProfile.Side == Side.Buy ? mbp64.Bids.GetQuantity(orderTarget.OrderProfile.Ticks) : mbp64.Asks.GetQuantity(orderTarget.OrderProfile.Ticks);
             orderStateEntry.AcquireLock();
             orderState = new OrderState()
             {
@@ -429,7 +431,7 @@ public class Server : IDisposable
                 // tell PendingNew from an ack without inferring it from the sequence.
                 OrderStateReason = isValid ? OrderStateReason.PendingNew : OrderStateReason.Rejected,
                 QuantityFilled = 0,
-                QuantityAhead = 0,
+                QuantityAhead = quantityAhead,
             };
             orderState.OrderHeader.Seq = 0; // indicates new Order but that ordertarget is not acked by exchange
             orderState.OrderHeader.NicTimestamp = Clock.Now;
