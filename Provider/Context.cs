@@ -134,6 +134,16 @@ public abstract class Context
         return Path.Combine(directoryPath, "MessageEfficiency", symbol + ".messageefficiency");
     }
 
+    public static FileSystemPath GetRateLimitFilePath(FileSystemPath directoryPath, string coreGroupName)
+    {
+        return Path.Combine(directoryPath, "RateLimits", coreGroupName + ".ratelimit");
+    }
+
+    public static FileSystemPath GetCoreGroupFilePath(FileSystemPath directoryPath, string coreGroupName)
+    {
+        return Path.Combine(directoryPath, "CoreGroups", coreGroupName + ".coregroup");
+    }
+
     public static FileSystemPath GetLoggingServerDirectoryPath(FileSystemPath directoryPath)
     {
         return Path.Combine(directoryPath, "LoggingServer");
@@ -144,6 +154,8 @@ public abstract class Context
     public FileSystemPath AlertsDirectoryPath { get; }
     public FileSystemPath RiskLimitsDirectoryPath { get; }
     public FileSystemPath MessageEfficiencyDirectoryPath { get; }
+    public FileSystemPath RateLimitsDirectoryPath { get; }
+    public FileSystemPath CoreGroupsDirectoryPath { get; }
     public FileSystemPath AuditDirectoryPath { get; }
     public FileSystemPath SeriesDirectoryPath { get; }
     public FileSystemPath WorkspaceDirectoryPath { get; }
@@ -167,6 +179,7 @@ public abstract class Context
     protected readonly SharedArray<RiskLimit> _riskLimits;
     protected readonly SharedArray<MessageEfficiency> _messageEfficiency;
     protected readonly SharedArray<RollingRateLimit> _rateLimits;
+    protected readonly SharedArray<CoreGroup> _coreGroups;
 
     protected readonly SharedArray<OrderState> _orderStates;
     protected readonly SharedArray<OrderRisk> _orderRisks;
@@ -200,6 +213,10 @@ public abstract class Context
         Directory.CreateDirectory(RiskLimitsDirectoryPath);
         MessageEfficiencyDirectoryPath = Path.Combine(DirectoryPath, "MessageEfficiency");
         Directory.CreateDirectory(MessageEfficiencyDirectoryPath);
+        RateLimitsDirectoryPath = Path.Combine(DirectoryPath, "RateLimits");
+        Directory.CreateDirectory(RateLimitsDirectoryPath);
+        CoreGroupsDirectoryPath = Path.Combine(DirectoryPath, "CoreGroups");
+        Directory.CreateDirectory(CoreGroupsDirectoryPath);
         AlertsDirectoryPath = Path.Combine(DirectoryPath, "Alerts");
         Directory.CreateDirectory(AlertsDirectoryPath);
         AuditDirectoryPath = GetAuditDirectoryPath(DirectoryPath);
@@ -239,6 +256,7 @@ public abstract class Context
         _riskLimits = NewSharedArray<RiskLimit>(serverName / "RiskLimits", serverHeader.InstrumentIds.Length, ServerAccess);
         _messageEfficiency = NewSharedArray<MessageEfficiency>(serverName / "MessageEfficiency", serverHeader.InstrumentIds.Length, ClientAccess);
         _rateLimits = NewSharedArray<RollingRateLimit>(serverName / "RateLimits", serverHeader.CoreGroupIds.Length, ServerAccess);
+        _coreGroups = NewSharedArray<CoreGroup>(serverName / "CoreGroups", serverHeader.CoreGroupIds.Length, ServerAccess);
 
         _orderStates = NewSharedArray<OrderState>(serverName / "OrderStates", serverHeader.OrdersCapacity, ServerAccess, false);
         _orderRisks = NewSharedArray<OrderRisk>(serverName / "OrderRisks", serverHeader.OrdersCapacity, ServerAccess, false);
@@ -345,6 +363,25 @@ public abstract class Context
     public ref SharedArrayEntry<RollingRateLimit> GetRateLimit(int coreGroupId)
     {
         return ref _rateLimits.GetEntry(coreGroupId);
+    }
+
+    // One per CoreGroup, server-written at AllocateCoreGroup: the name and the cores its threads pin to.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref SharedArrayEntry<CoreGroup> GetCoreGroup(int coreGroupId)
+    {
+        return ref _coreGroups.GetEntry(coreGroupId);
+    }
+
+    // Throws when no loaded CoreGroup has that name: a client asking for a group the server does not have is a setup error.
+    public int GetCoreGroupId(String16 coreGroupName)
+    {
+        foreach (int coreGroupId in ServerHeader.GetReadonlyRef().CoreGroupIds)
+        {
+            ref SharedArrayEntry<CoreGroup> coreGroupEntry = ref _coreGroups.GetEntry(coreGroupId);
+            if (!coreGroupEntry.IsEmpty() && coreGroupEntry.GetReadonlyRef().CoreGroupName == coreGroupName)
+                return coreGroupId;
+        }
+        throw new InvalidOperationException($"{GetType()}.GetCoreGroupId({coreGroupName}), no CoreGroup with that name in {CoreGroupsDirectoryPath}");
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -562,6 +599,11 @@ public abstract class Context
     public RateLimitEnumerable EnumerateRateLimits()
     {
         return new RateLimitEnumerable(_rateLimits, ServerHeader.GetReadonlyRef().CoreGroupIds);
+    }
+
+    public CoreGroupEnumerable EnumerateCoreGroups()
+    {
+        return new CoreGroupEnumerable(_coreGroups, ServerHeader.GetReadonlyRef().CoreGroupIds);
     }
 }
 
@@ -788,6 +830,27 @@ public sealed class ServerContext : Context
         Directory.CreateDirectory(InstrumentsDirectoryPath);
 
         _serverPositionHeaders = NewSharedArray<PositionHeader>(serverName / "ServerPositionHeaders", ServerHeader.GetReadonlyRef().InstrumentIds.Length, ServerAccess);
+
+        // Write mode: the server names its CoreGroups in files, one static JSON CoreGroup each, and each group's rate
+        // limit follows by name from its .ratelimit file, static JSON too; Max in simulation and Min in realtime without one, like .risklimit.
+        // The channel and thread for an id were built from ServerHeader.CoreGroupIds, so a file outside that set is fatal.
+        if (access == Access.Write)
+        {
+            ref readonly ServerHeader serverHeader = ref ServerHeader.GetReadonlyRef();
+            foreach (string coreGroupPath in Directory.GetFiles(CoreGroupsDirectoryPath, "*.coregroup"))
+            {
+                CoreGroup coreGroup = Json.Deserialize<CoreGroup>(File.ReadAllText(coreGroupPath));
+                int coreGroupId = coreGroup.CoreGroupId;
+                if (!serverHeader.CoreGroupIds[coreGroupId])
+                    throw new InvalidOperationException($"{GetType()}({serverName}), {coreGroupPath}: CoreGroupId {coreGroupId} is not set in ServerHeader.CoreGroupIds");
+                _coreGroups.GetEntry(coreGroupId).Write(in coreGroup);
+
+                string rateLimitPath = GetRateLimitFilePath(DirectoryPath, coreGroup.CoreGroupName.ToString()).ToString();
+                RateLimit rateLimit = File.Exists(rateLimitPath) ? Json.Deserialize<RateLimit>(File.ReadAllText(rateLimitPath)) : Clock.Mode == ClockMode.Simulation ? RateLimit.GetMaxLimits(coreGroupId) : RateLimit.GetMinLimits(coreGroupId);
+                rateLimit.RateLimitId = coreGroupId;
+                _rateLimits.GetEntry(coreGroupId).Write(new RollingRateLimit(rateLimit));
+            }
+        }
     }
 
     public static void ThrowIfInvalidServerName(FileSystemPath serverName)
@@ -1114,6 +1177,7 @@ public sealed class ServerContext : Context
         PrintSharedArray(_marketsByPrice, "MarketsByPrice [instrumentId]");
         PrintSharedArray(_messageEfficiency, "MessageEfficiency [productGroupId]");
         PrintSharedArray(_rateLimits, "RateLimits [coreGroupId]");
+        PrintSharedArray(_coreGroups, "CoreGroups [coreGroupId]");
     }
 
     private static void PrintSharedArray<T>(SharedArray<T> sharedArray, string title) where T : unmanaged
@@ -1302,6 +1366,59 @@ public struct MessageEfficiencyEnumerator
         Current = _messageEfficiency[_productGroupId].Read();
         _productGroupId++;
         return true;
+    }
+}
+
+public readonly struct CoreGroupEnumerable
+{
+    private readonly SharedArray<CoreGroup> _coreGroups;
+    private readonly Bitset64 _coreGroupIds;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public CoreGroupEnumerable(SharedArray<CoreGroup> coreGroups, Bitset64 coreGroupIds)
+    {
+        _coreGroups = coreGroups;
+        _coreGroupIds = coreGroupIds;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public CoreGroupEnumerator GetEnumerator()
+    {
+        return new CoreGroupEnumerator(_coreGroups, _coreGroupIds);
+    }
+}
+
+public struct CoreGroupEnumerator
+{
+    private readonly SharedArray<CoreGroup> _coreGroups;
+    private Bitset64 _coreGroupIds;
+
+    public CoreGroup Current { get; private set; }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal CoreGroupEnumerator(SharedArray<CoreGroup> coreGroups, Bitset64 coreGroupIds)
+    {
+        _coreGroups = coreGroups;
+        _coreGroupIds = coreGroupIds;
+        Current = default!;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool MoveNext()
+    {
+        // CoreGroups are not dense: walk the set bits, one row each, skipping any the server has not allocated.
+        while (!_coreGroupIds.IsEmpty)
+        {
+            int coreGroupId = _coreGroupIds.LowestSet;
+            _coreGroupIds.Clear(coreGroupId);
+            if (_coreGroups[coreGroupId].IsEmpty())
+                continue;
+            Current = _coreGroups[coreGroupId].Read();
+            return true;
+        }
+
+        Current = default!;
+        return false;
     }
 }
 

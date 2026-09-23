@@ -158,8 +158,15 @@ public record struct RateLimit(Duration Duration, int Limit)
 {
     public int RateLimitId = -1;
 
-    // CME Globex order entry, on the stricter reading of its window and under the reject line (see Spec.md).
-    public static readonly RateLimit CMEOrderEntry = new RateLimit(Duration.FromSeconds(3), 500);
+    // Unlimited in a 1 second window: only the 255-per-bucket burst cap remains (see Spec.md).
+    public static RateLimit GetMaxLimits(int rateLimitId) => new RateLimit(Duration.FromSeconds(1), int.MaxValue)
+    {
+        RateLimitId = rateLimitId,
+    };
+    public static RateLimit GetMinLimits(int rateLimitId) => new RateLimit(Duration.FromSeconds(1), 0)
+    {
+        RateLimitId = rateLimitId,
+    };
 
     public override string ToString()
     {

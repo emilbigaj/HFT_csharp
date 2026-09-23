@@ -198,24 +198,30 @@ right thing to give up.
 
 CME's page does not settle whether the window is one second or three. The application section reads
 like a count within an interval, while the mass quote and admin sections say MPS. Three seconds is
-the stricter of the two readings, so `RateLimit.CMEOrderEntry` uses it: 400 in 3 seconds, under the
+the stricter of the two readings, so a production file should say 3 seconds and sit under the
 reject line rather than on it. That is safe under either reading, and only loosening it needs an
 answer from the GCC.
 
-Unlike every other limit in the system, the default is neither permissive nor zero. `RiskLimit` and
-`MessageEfficiency` default to unlimited in simulation and zero in realtime, because an unset
-quantity limit should refuse to trade. A rate limit cannot work that way: zero blocks everything and
-unlimited protects nothing, so the default is the real exchange number and a live session is
-protected before anyone configures it. `RiskLayer` builds one rolling window per CoreGroup, since a
-CoreGroup maps to an iLink session and that is the scope CME throttles.
+The number lives in a file, not in code, because New Release, Certification and Production publish
+different limits and the server directory is the environment:
+`S:\Servers\Realtime\CME_NewRelease\RateLimits\SandP500.ratelimit` holds one static JSON `RateLimit`,
+the whole file, read when the server context loads the CoreGroup's file; the defaults without one are
+those of `.risklimit`. One file per CoreGroup, named by the CoreGroup's name, since a
+CoreGroup maps to an iLink session and that is the scope CME throttles. With no file the default is
+the same as every other limit: `GetMaxLimits` in simulation and `GetMinLimits` in realtime, so a
+production server nobody configured refuses every create and amend with `TooManyOrdersPerSecond`,
+the same refusal an unset risk limit gives, until the operator writes the real number for that
+environment. `GetMaxLimits` is `int.MaxValue` in a 1 second window, which leaves only the burst cap
+below, 255 sends in one 32 ms bucket. The ring is not persisted: it is a few seconds of state and is
+rebuilt empty on load.
 
 The window is `RollingRateLimit`, 64 bytes, so that it can sit in a shared array and the GUI can show
 CoreGroup, Duration, Limit and Count from another process. The id is `RateLimit.RateLimitId`, generic
 on purpose: the risk layer happens to key it by CoreGroup, the struct does not know that. The array is
 `Context._rateLimits`, one row per CoreGroup, server-written like `_riskLimits` and reached through
 `GetRateLimit`; it is named for the rate limit rather than the rolling model because another model
-could occupy the same 64-byte row later, cast by the caller. The server writes the CME default into
-every CoreGroup's row at construction; the risk layer takes the row by ref with no seq bump, exactly
+could occupy the same 64-byte row later, cast by the caller. The server writes the file's `RateLimit`
+into the row when it loads the CoreGroup; the risk layer takes the row by ref with no seq bump, exactly
 as it writes the risk-limit aggregates. Count is not
 state and must not be
 published as a number: it is a function of the ring and of the reader's clock, and a published
@@ -234,6 +240,32 @@ loops; a reader starts from `Total` and subtracts only the buckets that expired 
 rolled, usually none. Summing the 32 bytes was 16 ns and was the entire cost of a send.
 The property that matters, that no true window ever contains more than Limit admitted messages, is
 what the test checks; the over-count is the price of the 64 bytes.
+
+### CoreGroups are named by the server, not by an enum
+
+A CoreGroup is an execution channel, a server thread and, on CME, an iLink session. Its id is a
+small integer everywhere: `InstrumentHeader.CoreGroupId`, the socket channel index, the audit
+channel, the `RateLimits` row. Its name used to be a `CoreGroupId` enum in Data, which meant the
+platform knew CME's grouping (S&P 500, Equity, Forex, Crypto) and nothing else's. A Eurex, NYSE or
+Binance server has its own natural split, so the name is now data the server publishes: the
+`CoreGroups` shared array, one `CoreGroup` row per id, loaded by the server context when it opens
+for write from `<server>/CoreGroups/<CoreGroupName>.coregroup`, one static JSON `CoreGroup` per
+file. Static, whole-file JSON rather than the appended-line form of `.risklimit`: a CoreGroup, like
+a rate limit, is never amended at runtime, so there is no last line to win. The row carries the name and the
+cores the group's threads pin to (`ServerCoreId`, `MarketDataCoreId`, `StrategyCoreId`,
+`ReservedCoreId`), chosen for the machine the server is on. `ServerHeader.CoreGroupIds` still says
+which ids exist, because channels and threads are built from it before the context exists; a file
+whose id is not in it fails the load loudly. Each group's rate limit is read right after its row,
+by name, which is why the name has to exist first.
+
+Each server keeps its own enum for its own groups, as a convenience for naming them, and the enum
+stays on that server's side: a CME server files the four CME groups, a NYSE server its stock groups,
+and the C# simulator seeds one file called `Simulation` if none exists. Clients choose a group by
+name. `Scenario.CoreGroupName` is a string; after connecting, the scenario looks the name up in the
+server's array, which throws if no such group exists, and pins its strategy thread to that row's
+`StrategyCoreId`. The Testing scenario keeps a `CMECoreGroupId` enum only because it is a CME
+strategy and prompts for one of CME's groups. The GUI shows a rate limit's CoreGroup by looking its
+id up in the same array.
 
 ### Risk-limit edits are requests; the CoreGroup thread owns the row
 

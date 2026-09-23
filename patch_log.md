@@ -4,6 +4,43 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-09-23 — CoreGroups named by the server; rate limits load from `.ratelimit` files
+
+- `Provider/Allocate.cs` — `CoreGroup` row (36 B): `String16 CoreGroupName`, `CoreGroupId`, and the
+  four core ids the group's threads pin to (`ServerCoreId`, `MarketDataCoreId`, `StrategyCoreId`,
+  `ReservedCoreId`, -1 when unset).
+- `Provider/Context.cs` — `CoreGroups` shared array (server-written, after `RateLimits`),
+  `GetCoreGroup(id)`, `GetCoreGroupId(name)` (throws if absent: a client asking for a group the
+  server does not have is a setup error), `EnumerateCoreGroups()`. A `ServerContext` opened for
+  write loads every `<server>/CoreGroups/*.coregroup` (static whole-file JSON `CoreGroup`; never
+  amended at runtime, so not the appended-line form) into the
+  row at its `CoreGroupId`, throwing if that id is not in `ServerHeader.CoreGroupIds` (channels and
+  threads were built from it), then loads that group's rate limit from
+  `<server>/RateLimits/<CoreGroupName>.ratelimit` (static whole-file JSON as well), else
+  `RateLimit.GetMaxLimits` in simulation / `GetMinLimits` in realtime, the defaults `.risklimit` uses.
+  `GetCoreGroupFilePath`, `GetRateLimitFilePath`, `CoreGroupsDirectoryPath`, `RateLimitsDirectoryPath`.
+- `Execution/RateLimit.cs` — `GetMaxLimits` (1 s, int.MaxValue) and `GetMinLimits` (1 s, 0) replace
+  the hard-coded `CMEOrderEntry`: New Release, Certification and Production publish different limits,
+  and the server directory already is the environment. A production server with no file now refuses
+  every create and amend until the operator writes the number.
+- `Provider/Server.cs` — the constructor no longer writes a default rate limit per CoreGroup.
+- `Simulator/ServerSimulator.cs` — seeds `CoreGroups/Simulation.coregroup` (id 1, no cores; a
+  simulation never pins) before building the server if nobody has written it, so the context's file
+  load names the trading group and its rate limit comes from `Simulation.ratelimit`.
+- `Data/Instrument.cs` — `CoreGroupId` enum deleted. `Strategy/Scenario.cs` — `CoreGroupName` is a
+  string; the strategy thread pins to the chosen group's `StrategyCoreId` from the server's row after
+  `BuildRealtime` (the context exists only then); the `coreGroupId * 4 + n` core helpers are gone.
+  `Testing/Scenario.cs` — keeps a CME-only `CMECoreGroupId` enum for its prompt and branches.
+- `Widget/RateLimitWidget.axaml.cs` — the CoreGroup column reads the name from the `CoreGroups` row.
+- `Tools/Json.cs` — `MutableResolver.GetTypeInfo` walks the contexts by index instead of `foreach`.
+  The simulator's `.coregroup` seed was the first JSON call of the run; walking the chain for
+  `CoreGroup` triggered a not-yet-initialised module's `[ModuleInitializer]`, which registered its
+  own context on the same thread mid-walk (the lock is re-entrant) and the `foreach` threw
+  "Collection was modified" (8 contexts registered, a 9th arriving). The index walk survives that
+  and visits the newcomer in the same call.
+- Spec.md "Order rate limit" rewritten around the file, new "CoreGroups are named by the server, not
+  by an enum"; cpp_alignment.md §5 (new region, C++ server must allocate its groups by name).
+
 ## 2026-09-23 — cancels are counted by the rate limit but never refused
 
 - `Execution/RateLimit.cs` — `RollingRateLimit.SendOrder`: rolls the ring and counts the send like

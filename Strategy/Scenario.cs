@@ -20,7 +20,8 @@ public class Scenario
     public AlertManager AlertManager { get; private set; } = null!;
     public string Name { get; }
     public virtual FileSystemPath ServerName { get; }
-    public CoreGroupId CoreGroupName { get; set; } = CoreGroupId.OS;
+    // The server names its CoreGroups (ServerContext.EnumerateCoreGroups); this picks the one the strategy thread runs on.
+    public string CoreGroupName { get; set; } = "";
     public virtual FileSystemPath ClientName { get; }
 
     public Client Client { get; protected set; } = null!;
@@ -38,11 +39,6 @@ public class Scenario
         ServerName = ServerContext.GetDirectoryPath(Name);
         ClientName = ClientContext.GetDirectoryPath(Name);
     }
-
-    private static int GetMarketDataCore(int coreGroupId) => coreGroupId * 4;
-    private static int GetExchangeRecvCore(int coreGroupId) => coreGroupId * 4 + 1;
-    private static int GetExchangeSendCore(int coreGroupId) => coreGroupId * 4 + 2;
-    private static int GetStrategyCore(int coreGroupId) => coreGroupId * 4 + 3;
 
     // Simulation-only: provision an instrument's quantity limits so a backtest can actually exercise
     // them. The default is GetMaxLimits (int.MaxValue), under which no order is ever refused.
@@ -155,12 +151,11 @@ public class Scenario
         if (Clock.Mode == ClockMode.Realtime)
         {
             Thread.CurrentThread.Name = Name;
-            if (CoreGroupName > 0)
-            {
-                int strategyCore = GetStrategyCore((int)CoreGroupName);
-                LowLatency.PinCurrentThreadToCore(strategyCore);
-            }
             BuildRealtime();
+
+            // The server assigned the cores in the CoreGroup's file; pin to the strategy core of the one chosen. Unknown name or unset core throws.
+            int coreGroupId = ContextManager.ServerContext.GetCoreGroupId(CoreGroupName);
+            LowLatency.PinCurrentThreadToCore(ContextManager.ServerContext.GetCoreGroup(coreGroupId).GetReadonlyRef().StrategyCoreId);
         }
         else if (Clock.Mode == ClockMode.Simulation)
         {

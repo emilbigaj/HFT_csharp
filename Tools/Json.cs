@@ -58,9 +58,11 @@ public static class Json
         {
             lock (_lock)
             {
-                foreach (var resolver in _resolvers)
+                // By index, not foreach: resolving a type can load its module, whose initializer registers a new context
+                // on this same thread mid-walk (the lock is re-entrant). An index walk survives that and visits the newcomer.
+                for (int i = 0; i < _resolvers.Count; i++)
                 {
-                    var info = resolver.GetTypeInfo(type, options);
+                    var info = _resolvers[i].GetTypeInfo(type, options);
                     if (info != null)
                     {
                         return info;

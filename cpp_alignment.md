@@ -235,14 +235,34 @@ accounting. Port from C# `Provider/RiskLayer.cs` + `OrderRisk` in `Execution/Ord
   `Limit` int32 @8, `RateLimitId` int32 @12), `BucketTimestamp` int64 nanos @16, `BucketIndex` int32
   @24, `Total` int32 @28, `uint8 Counts[32]` @32. Index == CoreGroupId, server-written, created in
   `Context` directly after `MessageEfficiency` (keep that array-id order for the mirror). The server
-  writes the CME default (3 s, 500, id = CoreGroupId) into every set CoreGroup at construction;
-  `RiskLayer` throttles order entry per CoreGroup with it, `TrySendOrder(Clock.Now)` on a plain ref
-  with no seq bump, rejecting `TooManyOrdersPerSecond`. A `Cancel` goes through `SendOrder` instead
-  (2026-09-23): counted in the window, never refused, bucket byte still capped at 255 — a cancel is
-  the message that reduces risk and must never be held back. Bucket semantics and the conservative
-  Duration/31 rule are in Spec.md "Order rate limit". A C++ server must create the same region and
-  own its writes, or a C# GUI attached to it shows an empty Rate Limits widget. `CoreGroupId` enum
-  (OS 0, Reserved 1, SandP500 2, Equity 3, Forex 4, Crypto 5) moved from Strategy to Data.
+  writes a CoreGroup's row when it loads the CoreGroup's file (2026-09-23, see next bullet): the
+  whole of `<server>/RateLimits/<CoreGroupName>.ratelimit` (static pretty JSON `RateLimit`, `Duration`
+  in the Duration converter's string form, e.g. "0.00:00:03.000_000_000"), else
+  `RateLimit::GetMaxLimits` (1 s, int32 max) in simulation and `GetMinLimits` (1 s, 0) in realtime,
+  the same defaults as `.risklimit`. The hard-coded CME default is
+  gone: New Release, Certification and Production publish different limits, so the number is per
+  server directory. `RiskLayer` throttles order entry per CoreGroup with it, `TrySendOrder(Clock.Now)`
+  on a plain ref with no seq bump, rejecting `TooManyOrdersPerSecond`. A `Cancel` goes through
+  `SendOrder` instead (2026-09-23): counted in the window, never refused, bucket byte still capped at
+  255 — a cancel is the message that reduces risk and must never be held back. Bucket semantics and
+  the conservative Duration/31 rule are in Spec.md "Order rate limit". A C++ server must create the
+  same region and own its writes, or a C# GUI attached to it shows an empty Rate Limits widget.
+- **New shared array `CoreGroups` (2026-09-23):** region `<server>/CoreGroups`, `CoreGroupIds.Length`
+  (64) rows of `CoreGroup`, 36 bytes each: `String16 CoreGroupName` @0, `int32 CoreGroupId` @16,
+  `int32 ServerCoreId` @20, `int32 MarketDataCoreId` @24, `int32 StrategyCoreId` @28,
+  `int32 ReservedCoreId` @32 (all ids -1 when unset). Index == CoreGroupId, server-written, created in
+  `Context` directly after `RateLimits` (array-id order for the mirror). The `CoreGroupId` enum in Data
+  is DELETED: the server names its groups in files. A server context opened for write loads every
+  `<server>/CoreGroups/*.coregroup` (one static whole-file pretty JSON `CoreGroup` per file, NOT the
+  appended-line form of `.risklimit`: neither a CoreGroup nor a rate limit is amended at runtime) into the row at
+  its `CoreGroupId`, throwing for an id not in `ServerHeader.CoreGroupIds`, then loads that group's
+  `.ratelimit` by name as above. The C++ CME server must do the same when it opens its context. Keep
+  a CME-side enum (OS 0, Reserved 1, SandP500 2, Equity 3, Forex 4, Crypto 5) for the names, and put
+  the four core ids for the box in each file. Clients resolve a group by name
+  (`Context::GetCoreGroupId(String16)` scans the set bits and THROWS if absent) and pin their
+  strategy thread to the row's `StrategyCoreId`; the C# Testing scenario prompts for one of those four
+  names, so the strings in the C++ server's files must match them exactly. The Rate Limits widget
+  shows `CoreGroupName` from this row, so a group with no file shows an empty name.
 - **Unknown message types**: `default: break` in ReadAdmin/ReadExecution swallowed a real bug in
   C# (a zeroed `Header::Type` made risk-limit edits silently no-op). At minimum count and expose
   them.

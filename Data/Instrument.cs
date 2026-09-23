@@ -36,17 +36,6 @@ public struct Header<T>(T type) where T : Enum
 
 
 
-// Names for InstrumentHeader.CoreGroupId. Lives here, not in Strategy, so the GUI can show the name.
-public enum CoreGroupId
-{
-    OS = 0,
-    Reserved = 1,
-    SandP500 = 2,
-    Equity = 3,
-    Forex = 4,
-    Crypto = 5,
-}
-
 [StructLayout(LayoutKind.Sequential, Pack = 1, Size = 64)]
 [RegisterJson]
 public struct InstrumentHeader()

@@ -83,6 +83,21 @@ public struct ControlRiskLimit()
     }
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[RegisterJson]
+public struct CoreGroup()
+{
+    public String16 CoreGroupName;
+    public int CoreGroupId = -1;
+    public int ServerCoreId = -1;
+    public int MarketDataCoreId = -1;
+    public int StrategyCoreId = -1;
+    public int ReservedCoreId = -1; // could be a second server, strategy or market data core - depends on circumstances.
+    public override string ToString()
+    {
+        return Json.Serialize(this);
+    }
+}
 
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]

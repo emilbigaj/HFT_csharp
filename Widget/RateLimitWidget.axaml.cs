@@ -23,17 +23,19 @@ public sealed class WidgetRateLimit : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private RollingRateLimit _rollingRateLimit;
+    private string _coreGroupName;
     private int _count;
 
-    // The row's id is a CoreGroupId; show the enum name, or the number if it has none.
-    public string CoreGroup => Enum.IsDefined(typeof(CoreGroupId), _rollingRateLimit.RateLimit.RateLimitId) ? ((CoreGroupId)_rollingRateLimit.RateLimit.RateLimitId).ToString() : _rollingRateLimit.RateLimit.RateLimitId.ToString();
+    // The row's id is a CoreGroupId; the name comes from the server's CoreGroups array.
+    public string CoreGroup => _coreGroupName;
     public string Duration => _rollingRateLimit.RateLimit.Duration.TotalSeconds.ToString("0.###") + " s";
     public string Limit => _rollingRateLimit.RateLimit.Limit.ToString("N0");
     public string Count => _count.ToString("N0");
 
-    public WidgetRateLimit(in RollingRateLimit rollingRateLimit, int count)
+    public WidgetRateLimit(in RollingRateLimit rollingRateLimit, string coreGroupName, int count)
     {
         _rollingRateLimit = rollingRateLimit;
+        _coreGroupName = coreGroupName;
         _count = count;
     }
 
@@ -41,11 +43,12 @@ public sealed class WidgetRateLimit : INotifyPropertyChanged
     /// Pull current values from shared memory. The count is computed by the caller at its own clock,
     /// so it decays between sends. Returns true if anything changed and bindings should be re-evaluated.
     /// </summary>
-    public bool Refresh(in RollingRateLimit newRollingRateLimit, int newCount)
+    public bool Refresh(in RollingRateLimit newRollingRateLimit, string newCoreGroupName, int newCount)
     {
-        bool changed = newCount != _count || newRollingRateLimit.RateLimit != _rollingRateLimit.RateLimit;
+        bool changed = newCount != _count || newRollingRateLimit.RateLimit != _rollingRateLimit.RateLimit || newCoreGroupName != _coreGroupName;
 
         _rollingRateLimit = newRollingRateLimit;
+        _coreGroupName = newCoreGroupName;
         _count = newCount;
 
         if (changed)
@@ -129,13 +132,14 @@ public sealed partial class RateLimitWidget : UserControl, IWidget, IDisposable
             foreach (RollingRateLimit rollingRateLimit in _context.Primary.EnumerateRateLimits())
             {
                 int count = rollingRateLimit.GetCount(now);
+                string coreGroupName = _context.Primary.GetCoreGroup(rollingRateLimit.RateLimit.RateLimitId).Read().CoreGroupName.ToString();
                 if (_rowsByRateLimitId.TryGetValue(rollingRateLimit.RateLimit.RateLimitId, out WidgetRateLimit? row))
                 {
-                    row.Refresh(in rollingRateLimit, count);
+                    row.Refresh(in rollingRateLimit, coreGroupName, count);
                 }
                 else
                 {
-                    row = new WidgetRateLimit(in rollingRateLimit, count);
+                    row = new WidgetRateLimit(in rollingRateLimit, coreGroupName, count);
                     _rowsByRateLimitId[rollingRateLimit.RateLimit.RateLimitId] = row;
                 }
                 active.Add(row);

@@ -11,10 +11,22 @@ using Testing;
 
 namespace Testing;
 
+// CME's CoreGroups, as the CME server files them; a CME strategy prompts for one of these by name.
+public enum CMECoreGroupId
+{
+    OS = 0,
+    Reserved = 1,
+    SandP500 = 2,
+    Equity = 3,
+    Forex = 4,
+    Crypto = 5,
+}
+
 public class TestingScenario : Scenario
 {
     public override FileSystemPath ServerName { get; }
     public override FileSystemPath ClientName { get; }
+    public CMECoreGroupId CMECoreGroup { get; }
     public override FileSystemPath DefaultTickHistoryDirectoryPath { get; } = $"Z:\\TickHistory\\Databento";
     public override FileSystemPath DefaultInstrumentDetailsDirectoryPath { get; } = $"Z:\\InstrumentDetails\\Databento";
 
@@ -42,14 +54,16 @@ public class TestingScenario : Scenario
 
 
 
-            CoreGroupName = (CoreGroupId)Enum.Parse(typeof(CoreGroupId), coreGroupName);
+            CMECoreGroup = (CMECoreGroupId)Enum.Parse(typeof(CMECoreGroupId), coreGroupName);
+            CoreGroupName = CMECoreGroup.ToString();
             ServerName = ServerContext.GetDirectoryPath($"CME_{env}");
             ClientName = ClientContext.GetDirectoryPath($"{CoreGroupName}_Testing");
 
         }
         else
         {
-            CoreGroupName = CoreGroupId.SandP500;
+            CMECoreGroup = CMECoreGroupId.SandP500;
+            CoreGroupName = CMECoreGroup.ToString();
             ServerName = ServerContext.GetDirectoryPath("ServerSimulation");
             ClientName = ClientContext.GetDirectoryPath($"{CoreGroupName}");
         }
@@ -81,47 +95,17 @@ public class TestingScenario : Scenario
 
 
         int[] months = new int[] { 3, 6, 9, 12 };
-        if (CoreGroupName == CoreGroupId.SandP500)
+        if (CMECoreGroup == CMECoreGroupId.SandP500)
         {
-            FutureChain quoteChain = GetFutureChain("XCBT", "MYM", Clock.Now);
-            foreach(Future quote in quoteChain.Futures)
             {
-                Future hedge = GetFuture("XCBT", "YM", quote.MaturityDate);
-                strategy.OnFuture(quote, hedge);
-                return;
-
-            }
-
-            {
-                Future quote = GetFuture("XCBT", "MYM", Clock.Now);
+                Future quote = GetFuture("XCME", "MES", Clock.Now);
                 strategy.OnFuture(quote, quote);
 
-                Future hedge = GetFuture("XCBT", "YM", Clock.Now);
-                strategy.OnFuture(hedge, hedge);
-            }
-            {
-                Future quote = GetFuture("XCME", "M2K", Clock.Now);
-                strategy.OnFuture(quote, quote);
-
-                Future hedge = GetFuture("XCME", "RTY", Clock.Now);
-                strategy.OnFuture(hedge, hedge);
-            }
-
-            {
-                Future quote = GetFuture("XCME", "MNQ", Clock.Now);
-                strategy.OnFuture(quote, quote);
-                Future hedge = GetFuture("XCME", "NQ", Clock.Now);
-                strategy.OnFuture(hedge, hedge);
-            }
-
-            {
-                Future quote = GetFuture("XCME", "MNK", Clock.Now);
-                strategy.OnFuture(quote, quote);
-                Future hedge = GetFuture("XCME", "NKD", Clock.Now);
+                Future hedge = GetFuture("XCME", "ES", Clock.Now);
                 strategy.OnFuture(hedge, hedge);
             }
         }
-        else if (CoreGroupName == CoreGroupId.Equity)
+        else if (CMECoreGroup == CMECoreGroupId.Equity)
         {
 
             {
@@ -155,7 +139,7 @@ public class TestingScenario : Scenario
             }
             
         }
-        else if (CoreGroupName == CoreGroupId.Forex)
+        else if (CMECoreGroup == CMECoreGroupId.Forex)
         {
             {
                 Future quote = GetFuture("XCME", "M6E", Clock.Now, months);
@@ -191,7 +175,7 @@ public class TestingScenario : Scenario
             }
 
         }
-        else if (CoreGroupName == CoreGroupId.Crypto)
+        else if (CMECoreGroup == CMECoreGroupId.Crypto)
         {
             Timestamp thisMonth = new Timestamp(Clock.Now.Year, Clock.Now.Month, 1);
             Future quote = GetFuture("XCME", "MET", thisMonth);
