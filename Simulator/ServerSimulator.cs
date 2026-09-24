@@ -22,9 +22,9 @@ public class InstrumentSimulator
     protected OrderManager Sells { get; }
 
     public InstrumentDetails InstrumentDetails { get; }
-    public SessionManager? SessionManager { get; }
 
-    public bool IsInSession => SessionManager?.IsInSession ?? true;
+    // Set by the exchange's SessionManager in ServerSimulator; Unknown until the first open or close.
+    public TradingStatus TradingStatus { get; private set; } = TradingStatus.Unknown;
 
 
     public int _bidMask = 0;
@@ -66,26 +66,24 @@ public class InstrumentSimulator
 
         _marketByPriceByOrder.Bids.Changed += OnBidChanged;
         _marketByPriceByOrder.Asks.Changed += OnAskChanged;
+    }
 
-        if (instrumentDetails.Sessions.Length > 0)
+    // The exchange's own state changes at once; the server hears it after the exchange-to-NIC latency.
+    public void OnTradingStatus(Timestamp timestamp, TradingStatus tradingStatus)
+    {
+        TradingStatus = tradingStatus;
+        if (tradingStatus == TradingStatus.Closed)
         {
-            SessionManager = new SessionManager(instrumentDetails.Sessions[0]);
-            SessionManager.Changed += instrument =>
-            {
-                if (!SessionManager.IsInSession)
-                {
-                    CancelAllOrders();
-                    Buys.Clear();
-                    Sells.Clear();
-                    _bidMask = 0;
-                    _askMask = 0;
-                    _minMaskBid = int.MaxValue;
-                    _maxMaskAsk = int.MinValue;
-                }
-            };
+            CancelAllOrders();
+            Buys.Clear();
+            Sells.Clear();
+            _bidMask = 0;
+            _askMask = 0;
+            _minMaskBid = int.MaxValue;
+            _maxMaskAsk = int.MinValue;
         }
-
-
+        TradingStatusUpdate tradingStatusUpdate = new TradingStatusUpdate(InstrumentId, timestamp, tradingStatus);
+        ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Tick(ref Unsafe.As<TradingStatusUpdate, Tick>(ref tradingStatusUpdate));
     }
 
     private void OnBidChanged(Level level)
@@ -482,7 +480,7 @@ public class InstrumentSimulator
 
     public void OnTrade(ref Trade trade)
     {
-        if (!IsInSession)
+        if (TradingStatus != TradingStatus.Open)
             return;
 
         ref int mask = ref (trade.Direction > 0 ? ref _askMask : ref _bidMask);
@@ -750,7 +748,7 @@ public class InstrumentSimulator
 
             orderState.OrderHeader.Seq = orderTarget.OrderHeader.Seq;
 
-            if (!IsInSession)
+            if (TradingStatus != TradingStatus.Open)
             {
                 if (orderState.OrderHeader.OrderId == Debug.OrderId)
                 {
@@ -854,7 +852,7 @@ public class InstrumentSimulator
                 Console.WriteLine($"ExecutionSimulator.Target.Missed");
             }
 
-            if (!IsInSession)
+            if (TradingStatus != TradingStatus.Open)
             {
                 if (orderState.OrderHeader.OrderId == Debug.OrderId)
                 {
@@ -992,13 +990,15 @@ public class ExchangeSimulator
     }
 
 
-    public void Allocate(InstrumentDetails details, int instrumentId)
+    // True only when this call built the simulator; the server allocates once per client, so repeats return false.
+    public bool Allocate(InstrumentDetails details, int instrumentId)
     {
         if (_instrumentSimulators[instrumentId] != null)
-            return;
+            return false;
 
         DataSimulator.Subscribe(details.Symbology, instrumentId);
         _instrumentSimulators[instrumentId] = new InstrumentSimulator(this, details, instrumentId);
+        return true;
     }
 
     private void OnInterject(Timestamp timestamp)
@@ -1190,14 +1190,28 @@ public class ServerSimulator
         }
     }
 
+    // One timetable per exchange (XCME, XCBT, ...), made the first time one of its instruments is allocated.
+    public System.Collections.Generic.Dictionary<string, SessionManager> SessionManagerByExchange { get; } = new System.Collections.Generic.Dictionary<string, SessionManager>();
+
     // Server has already allocated the instrument and opened its broadcast ring; all that is left is
-    // to give the exchange sim a matching book to match against.
+    // to give the exchange sim a matching book to match against, and to drive its TradingStatus from its exchange's session.
     private void OnServerAllocateInstrument(AllocateInstrument allocateInstrument)
     {
-        if (_instrumentDetailsByInstrumentHeaderId.TryGetValue(allocateInstrument.InstrumentHeaderId, out InstrumentDetails details))
+        if (!_instrumentDetailsByInstrumentHeaderId.TryGetValue(allocateInstrument.InstrumentHeaderId, out InstrumentDetails details))
+            return;
+        if (!ExchangeSimulator.Allocate(details, allocateInstrument.InstrumentId))
+            return;   // allocated earlier for another client: already wired to its exchange
+
+        if (!SessionManagerByExchange.TryGetValue(details.Exchange, out SessionManager? sessionManager))
         {
-            ExchangeSimulator.Allocate(details, allocateInstrument.InstrumentId);
+            sessionManager = new SessionManager(details.Sessions[0]);
+            SessionManagerByExchange[details.Exchange] = sessionManager;
         }
+        InstrumentSimulator instrumentSimulator = ExchangeSimulator.GetInstrument(allocateInstrument.InstrumentId);
+        sessionManager.Changed += timestamp => instrumentSimulator.OnTradingStatus(timestamp, sessionManager.IsInSession ? TradingStatus.Open : TradingStatus.Closed);
+        // Before the clock starts, SessionManager's start-of-clock check raises Changed; after, send the current state now.
+        if (Clock.IsRunning)
+            instrumentSimulator.OnTradingStatus(Clock.Now, sessionManager.IsInSession ? TradingStatus.Open : TradingStatus.Closed);
     }
 
     
@@ -1499,6 +1513,10 @@ public class ServerSimulator
                 case (byte)TickType.MarketByPriceUpdate:
                     ref readonly MarketByPrice update = ref MemoryMarshal.AsRef<MarketByPrice>(src);
                     _server.OnMarketByPrice(in update, src);
+                    break;
+                case (byte)TickType.TradingStatus:
+                    ref readonly TradingStatusUpdate tradingStatusUpdate = ref MemoryMarshal.AsRef<TradingStatusUpdate>(src);
+                    _server.OnTradingStatusUpdate(in tradingStatusUpdate);
                     break;
                 case (byte)TickType.Trade:
                 case (byte)TickType.Settlement:

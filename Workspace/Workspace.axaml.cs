@@ -1,11 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -86,6 +88,8 @@ public partial class Workspace : Window, IWidgetHost
         {
             UpdateHeader();
             UpdateModeMenuHeaders();
+            // A standalone Workspace process only follows the server's clock, so its own speed would change nothing.
+            SimulationSpeedButton.IsVisible = Clock.Mode == ClockMode.Simulation && WorkspaceRunner.IsHostedByStrategy;
         };
 
         Closed += OnWorkspaceClosed;
@@ -138,7 +142,50 @@ public partial class Workspace : Window, IWidgetHost
         Dispatcher.UIThread.Post(() =>
         {
             TimestampText.Text = Context.ServerHeader.GetReadonlyRef().Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff");
+            if (SimulationSpeedButton.IsVisible)
+            {
+                // The speed the clock thread has applied, not the one last requested.
+                string simulationSpeedText = FormatSimulationSpeed(Clock.SimulationSpeed);
+                if (!Equals(SimulationSpeedButton.Content, simulationSpeedText))
+                    SimulationSpeedButton.Content = simulationSpeedText;
+            }
         });
+    }
+
+    private static string FormatSimulationSpeed(double simulationSpeed)
+    {
+        return simulationSpeed == double.MaxValue ? "Max" : simulationSpeed.ToString("0.##", CultureInfo.InvariantCulture) + "x";
+    }
+
+    private void OnRealTimeSpeedClick(object? sender, RoutedEventArgs e) => SetSimulationSpeed(1);
+
+    private void OnMaxSpeedClick(object? sender, RoutedEventArgs e) => SetSimulationSpeed(double.MaxValue);
+
+    private void OnCustomSpeedClick(object? sender, RoutedEventArgs e) => SetCustomSimulationSpeed();
+
+    private void OnCustomSpeedKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+            return;
+        SetCustomSimulationSpeed();
+        e.Handled = true;
+    }
+
+    // Accepts "10" or "10x"; anything that is not a positive finite number leaves the speed alone and marks the box red.
+    private void SetCustomSimulationSpeed()
+    {
+        string customSpeedText = (CustomSpeedTextBox.Text ?? "").Trim().TrimEnd('x', 'X');
+        if (double.TryParse(customSpeedText, NumberStyles.Float, CultureInfo.InvariantCulture, out double simulationSpeed) && simulationSpeed > 0 && double.IsFinite(simulationSpeed))
+            SetSimulationSpeed(simulationSpeed);
+        else
+            CustomSpeedTextBox.BorderBrush = Brushes.Red;
+    }
+
+    private void SetSimulationSpeed(double simulationSpeed)
+    {
+        Clock.SimulationSpeed = simulationSpeed;
+        CustomSpeedTextBox.ClearValue(TextBox.BorderBrushProperty);
+        SimulationSpeedButton.Flyout?.Hide();
     }
 
     private void UpdateHeader()

@@ -288,7 +288,7 @@ public abstract class Instrument
 
     public bool TryGetQuote(out Quote quote)
     {
-        if (!IsInSession)
+        if (Header.TradingStatus != TradingStatus.Open)
         {
             quote = default!;
             return false;
@@ -313,7 +313,7 @@ public abstract class Instrument
                 continue;
             }
 
-            if (!IsInSession)
+            if (Header.TradingStatus != TradingStatus.Open)
             {
                 quote = default!;
                 return false;
@@ -345,24 +345,6 @@ public abstract class Instrument
     public string Exchange => Symbology.Exchange;
     public string Root => Symbology.Root;
 
-    public bool IsInSession => SessionManager?.IsInSession ?? true;
-
-    private SessionManager _sessionManager = null!;
-    public SessionManager SessionManager
-    {
-        get => _sessionManager;
-        set
-        {
-            if (_sessionManager == null)
-            {
-                _sessionManager = value;
-                _sessionManager.Changed += OnSessionChanged;
-            }
-            else throw new InvalidOperationException($"Instrument::{Symbol}::SessionManager: can only be set once.");
-        }
-    }
-
-    private void OnSessionChanged(Timestamp timestamp) { }
     public int InstrumentId => Header.InstrumentId;
 
     public double InverseTickSize => Header.InverseTickSize;

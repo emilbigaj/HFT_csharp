@@ -263,6 +263,14 @@ accounting. Port from C# `Provider/RiskLayer.cs` + `OrderRisk` in `Execution/Ord
   strategy thread to the row's `StrategyCoreId`; the C# Testing scenario prompts for one of those four
   names, so the strings in the C++ server's files must match them exactly. The Rate Limits widget
   shows `CoreGroupName` from this row, so a group with no file shows an empty name.
+- **Session state is the header's `TradingStatus` (2026-09-24):** the C# instrument no longer has a
+  `SessionManager` or `IsInSession`. `RiskLayer::ValidateInstrument` rejects a create with
+  `NotInSession` unless `InstrumentHeader.TradingStatus == Open`, and quotes (`TryGetQuote`, the
+  position quote) are empty unless it is `Open`. Unknown counts as not open, so the C++ CME server
+  must publish each instrument's status from the snapshot / SecurityStatus at startup
+  (`OnTradingStatusUpdate`, per the 2026-09-10 report T1–T5), or nothing trades and no client has a
+  quote. Port the same gate into the C++ `RiskLayer`. No wire-shape change. Spec.md "Session state
+  is the exchange's TradingStatus".
 - **PendingNew `QuantityAhead` is provisional, not 0 (2026-09-23):** in the `Create` branch of the
   order-target path the C# server writes the PendingNew `OrderState` with `QuantityAhead` = its own
   `MarketByPrice64` quantity at the order's price on the order's side (`Bids.GetQuantity(ticks)` for

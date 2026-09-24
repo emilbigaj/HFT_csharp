@@ -88,7 +88,7 @@ public class RiskLayer
 
         Instrument instrument = _serverContext.GetInstrument(instrumentId);
 
-        if (!instrument.IsInSession)
+        if (instrument.Header.TradingStatus != TradingStatus.Open)
         {
             orderRejectedReasons.Set((int)OrderRejectedReason.NotInSession);
         }

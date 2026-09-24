@@ -4,6 +4,41 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-09-24 — simulation clock speed control in the Workspace top bar
+
+- `Workspace/Workspace.axaml(.cs)` — a speed drop-down left of the clock: `1x (real time)`, `Max`,
+  or a custom number (`10` or `10x`, Enter or Set; anything not a positive finite number turns the
+  box red and changes nothing). The button shows the speed the clock thread has applied. Visible only
+  in simulation when a running strategy opened the workspace (`WorkspaceRunner.IsHostedByStrategy`):
+  a standalone Workspace process only follows the server's clock, so its own speed would do nothing.
+- `Tools/Clock.cs` — `SimulationSpeed`'s setter raises `s_isSimulationSpeedChanging`, which breaks a
+  pacing wait in progress; the reminder clears it and re-anchors as before. Without it, switching
+  from 1x to Max across a data gap (CME's daily break) waited out the gap in real time first.
+
+## 2026-09-24 — session state comes from the exchange's TradingStatus, not a timetable
+
+- `Data/Instrument.cs` — `SessionManager`, `IsInSession` and the empty `OnSessionChanged` removed.
+  `TryGetQuote` returns nothing unless `Header.TradingStatus == Open`.
+- `Provider/RiskLayer.cs` — `ValidateInstrument` rejects a create with `NotInSession` unless the
+  header's `TradingStatus` is `Open`. `Provider/Position.cs` — the position quote uses the same test.
+- `Provider/Context.cs` — `CreateInstrument` no longer attaches `SessionManager(Session.CME)`.
+  `AllocateProductGroupId` ends the message-efficiency day on `TradingStatusUpdateEvent` with
+  `Closed` instead of the timetable's `Closed`, converting to local time with `Session.CME`; `Reset`
+  itself is unchanged.
+- `Simulator/ServerSimulator.cs` — `SessionManagerByExchange`: one `SessionManager` per exchange,
+  created from the first allocated instrument's `Sessions[0]` (throws if it has none).
+  `OnServerAllocateInstrument` subscribes each newly built `InstrumentSimulator` to its exchange's
+  manager and sends the current state at once if the clock is already running.
+  `InstrumentSimulator.OnTradingStatus` replaces its own `SessionManager`: it sets `TradingStatus`,
+  on `Closed` cancels all orders and clears queues and masks as before, then sends a
+  `TradingStatusUpdate` through the exchange-to-NIC latency queue; `OnTickTock` releases it to
+  `Server.OnTradingStatusUpdate`. The three `IsInSession` gates read `TradingStatus != Open`.
+  `ExchangeSimulator.Allocate` returns whether it built the simulator, because the server raises
+  `AllocateInstrument` once per client and a second subscription would double every status.
+- Behaviour: Unknown counts as closed, so nothing trades and no quote exists until the first status
+  arrives; live, the CME server must publish status at startup. Auction and Halted are not open.
+  Spec.md "Session state is the exchange's TradingStatus"; cpp_alignment.md §5.
+
 ## 2026-09-23 — PendingNew carries the book's quantity at its price as `QuantityAhead`
 
 - `Provider/Server.cs` — the `Create` branch of the order-target path wrote the PendingNew

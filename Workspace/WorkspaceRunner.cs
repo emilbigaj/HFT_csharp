@@ -69,6 +69,9 @@ public static class WorkspaceRunner
     private static readonly System.Collections.Generic.Queue<WorkspaceRequest> s_pendingQueue = new System.Collections.Generic.Queue<WorkspaceRequest>();
     private static bool s_ownsContextManager = false;
 
+    // True when a running strategy opened the workspace (RunOnBackgroundThread): its Clock is the one driving the simulation.
+    internal static bool IsHostedByStrategy => !s_ownsContextManager;
+
     // Starts UI programmatically on the current thread. Blocks thread until closed.
     public static void RunOnThisThread(string serverName, string clientName, ClockMode mode, string? workspacePath = null)
     {

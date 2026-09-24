@@ -226,7 +226,7 @@ public sealed class Position
             sbp.TrySetQuantity(ticks, quantity, out _);
         }
 
-        if (!Instrument.IsInSession || mbp.BidsCount == 0 || mbp.AsksCount == 0)
+        if (Instrument.Header.TradingStatus != TradingStatus.Open || mbp.BidsCount == 0 || mbp.AsksCount == 0)
         {
             quote = default;
             return false;

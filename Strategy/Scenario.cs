@@ -233,7 +233,6 @@ public class Scenario
         using ArrayList<InstrumentDetails> found = InstrumentDetailsSearch.Search(search);
         foreach (InstrumentDetails details in found)
         {
-            details.Sessions = new Session[] { Session.CME };
             ServerSimulator!.OnInstrumentDetails(details);
         }
     }

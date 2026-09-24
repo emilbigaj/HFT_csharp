@@ -27,6 +27,7 @@ public enum AlertType : byte
 public struct Alert
 {
     public Header<AlertType> Header;
+    public Timestamp Timestamp; // Clock.Now at construction, on the raising thread
     public string? Symbol; // OrderRejected only; resolved by AlertManager, carried on the wire as String64
     public object? Object;
     public string? Message;
@@ -34,18 +35,21 @@ public struct Alert
     public Alert(AlertType type, object? obj, string? message)
     {
         Header = new Header<AlertType>(type);
+        Timestamp = Clock.Now;
         Object = obj;
         Message = message;
     }
 
     public override string ToString() => Json.Serialize(this);
 
-    // Wire: Header | [OrderRejected | String64 Symbol] | ASCII Message; ToBytes returns the bytes written, Message truncated to fit.
+    // Wire: Header | Timestamp | [OrderRejected | String64 Symbol] | ASCII Message; ToBytes returns the bytes written, Message truncated to fit.
     public static Alert FromBytes(ReadOnlySpan<byte> rsrc)
     {
         Alert alert = new Alert();
         alert.Header = MemoryMarshal.Read<Header<AlertType>>(rsrc);
         rsrc = rsrc[Unsafe.SizeOf<Header<AlertType>>()..];
+        alert.Timestamp = MemoryMarshal.Read<Timestamp>(rsrc);
+        rsrc = rsrc[Unsafe.SizeOf<Timestamp>()..];
         switch (alert.Header.Type)
         {
             case AlertType.OrderRejected:
@@ -64,6 +68,8 @@ public struct Alert
         int capacity = dst.Length;
         MemoryMarshal.Write(dst, in Header);
         dst = dst[Unsafe.SizeOf<Header<AlertType>>()..];
+        MemoryMarshal.Write(dst, in Timestamp);
+        dst = dst[Unsafe.SizeOf<Timestamp>()..];
         string? message = Message;
         switch (Header.Type)
         {

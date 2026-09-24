@@ -182,14 +182,19 @@ public static class Clock
     private static double s_simulationSpeed = double.MaxValue;
     private static long s_anchorWallTicks;
     private static Timestamp s_anchorSimTime;
+    // Raised by the setter, cleared when the clock thread applies the speed: a pacing wait in progress gives up at once.
+    private static volatile bool s_isSimulationSpeedChanging;
 
     public static double SimulationSpeed
     {
         get => s_simulationSpeed;
         set
         {
+            s_isSimulationSpeedChanging = true;
             AddReminder(new Reminder(Timestamp.MinValue, timestamp =>
             {
+                s_isSimulationSpeedChanging = false;
+
                 // If value hasn't changed, do nothing
                 if (Math.Abs(s_simulationSpeed - value) < 0.001) return;
 
@@ -261,7 +266,7 @@ public static class Clock
             // 3. Wait loop
             while (true)
             {
-                if (IsStopping) break;
+                if (IsStopping || s_isSimulationSpeedChanging) break;
 
                 long currentWallTicks = Stopwatch.GetTimestamp();
                 long ticksToWait = targetWallTicks - currentWallTicks;

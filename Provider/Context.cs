@@ -553,7 +553,6 @@ public abstract class Context
         {
             throw new InvalidOperationException($"{GetType()}.CreateInstrument({instrumentId}), Unknown instrument type: {(int)instrHeader.InstrumentType}");
         }
-        instrument.SessionManager = new SessionManager(Session.CME);
         _instruments[instrumentId] = instrument;
     }
 
@@ -684,7 +683,7 @@ public sealed class ClientContext : Context
                     }
                     loadedMessageEfficiency.ProductGroup = productGroup;
                     loadedMessageEfficiency.ProductGroupId = productGroupId;
-                    DateTime local = instrument.SessionManager.Session.ConvertToLocal(Clock.Now);
+                    DateTime local = Session.CME.ConvertToLocal(Clock.Now);
                     loadedMessageEfficiency.Reset(local);
                     messageEfficiencyEntry.Write(in loadedMessageEfficiency);
                 }
@@ -699,10 +698,13 @@ public sealed class ClientContext : Context
                 }
                 
 
-                instrument.SessionManager.Closed += timestamp =>
+                // The exchange closing the instrument ends its message-efficiency day.
+                instrument.TradingStatusUpdateEvent += (in TradingStatusUpdate tradingStatusUpdate) =>
                 {
+                    if (tradingStatusUpdate.TradingStatus != TradingStatus.Closed)
+                        return;
                     ref MessageEfficiency messageEfficiency = ref _messageEfficiency.GetEntry(instrument.ProductGroupId).GetRef();
-                    DateTime local = instrument.SessionManager.Session.ConvertToLocal(timestamp);
+                    DateTime local = Session.CME.ConvertToLocal(tradingStatusUpdate.TickHeader.ExchangeTimestamp);
                     MessageEfficiency messageEfficiencyCopy = messageEfficiency;
                     if (messageEfficiency.Reset(local) && Clock.Mode == ClockMode.Realtime)
                     {

@@ -303,6 +303,29 @@ strings computed once per headerId for the process lifetime) depends on this; if
 identity rewrites are ever introduced, the cache needs a generation check. Mutable header fields
 (`TradingStatus`, `TickSize`, `InstrumentId`) are outside the cache and always read live.
 
+## Session state is the exchange's TradingStatus
+
+Whether an instrument is trading is what the exchange says, not what a timetable predicts. The
+instrument header's `TradingStatus` byte is the only session state: `RiskLayer.ValidateInstrument`
+rejects a create with `NotInSession` unless it is `Open`, and `Instrument.TryGetQuote` and the
+position's quote return nothing unless it is `Open`. There is no `SessionManager` on the
+instrument any more. Unknown, Closed, Auction and Halted all count as not open, so an instrument
+whose first status has not arrived yet cannot trade and has no quote; a live server must publish
+status from the snapshot at startup. Amends and cancels are not session-checked, as before.
+
+The status reaches every process the same way live and in simulation: `Server.OnTradingStatusUpdate`
+writes the header byte and broadcasts a `TradingStatusUpdate` on the instrument ring, and the client
+raises `Instrument.TradingStatusUpdateEvent` on a change. Message efficiency ends its day on that
+event's `Closed`, converted to local time with `Session.CME`.
+
+The simulator has no exchange feed for status, so it keeps timetables at the exchange:
+`ServerSimulator.SessionManagerByExchange` holds one `SessionManager` per exchange (XCME, XCBT, ...),
+created from the first allocated instrument's `Sessions[0]`. Each allocated `InstrumentSimulator`
+subscribes to its exchange's manager and, on every open or close, sets its own `TradingStatus` at
+once (a close cancels every order and clears the queues first) and sends a `TradingStatusUpdate`
+through the exchange-to-NIC latency queue, so the server hears it when a real one would arrive.
+The simulator produces Open and Closed only; auctions are not modelled.
+
 ## Socket close protocol (server side)
 
 A client's close is two different jobs on two different kinds of thread:
