@@ -29,7 +29,9 @@ namespace Data
         internal int _bestTicks;
 
         public readonly Side Side; // keep public for blittability/debugger hover
-        private fixed byte _reserved[47]; // for alignment and future use]
+        /// <summary>Sum of the quantity at every active level on this side, kept in step by TrySetQuantity.</summary>
+        public int Quantity { get; private set; }   // @17, taken from _reserved so the struct keeps its size
+        private fixed byte _reserved[43]; // for alignment and future use]
 
         /// <summary>Quantities ring buffer (size 64; only first Capacity entries used).</summary>
         private fixed int _quantities[64];
@@ -114,6 +116,7 @@ namespace Data
             _bestIndex = -1;
             _bestTicks = 0;
             _bitset = new Bitset64(0);
+            Quantity = 0;
 
             fixed (int* q = _quantities)
             {
@@ -251,18 +254,22 @@ namespace Data
                 unsafe { fixed (int* q = _quantities) q[_bestIndex] = quantity; }
                 delta = quantity;
                 _bitset.Set(_bestIndex);
+                Quantity = quantity;   // every other level was cleared
 
                 return true;
             }
 
             int ringIndex = MapBestOffsetToRingIndex(bestOffset);
             int isOldNonZero = (!isBetter && _bitset[ringIndex]) ? 1 : 0;
+            // Quantity follows the slot's active quantity, not delta: on a better price an active slot is an aliased worse level that is overwritten.
+            int isSlotActive = _bitset[ringIndex] ? 1 : 0;
 
             unsafe
             {
                 fixed (int* q = _quantities)
                 {
                     delta = quantity - q[ringIndex] * isOldNonZero;
+                    Quantity += quantity - q[ringIndex] * isSlotActive;
                     q[ringIndex] = quantity;
                 }
             }
@@ -301,8 +308,23 @@ namespace Data
             {
                 int oldBestIndex = _bestIndex;
                 _bestTicks = ticks;
+                ulong bitsBefore = _bitset.Raw;
                 _bitset.ClearOutside(_bestIndex, ringIndex);
                 _bestIndex = ringIndex;
+
+                // levels that fell outside the new window drop out of Quantity; their stored quantities are still intact
+                ulong cleared = bitsBefore & ~_bitset.Raw;
+                unsafe
+                {
+                    fixed (int* q = _quantities)
+                    {
+                        while (cleared != 0UL)
+                        {
+                            Quantity -= q[BitOperations.TrailingZeroCount(cleared)];
+                            cleared &= cleared - 1UL;
+                        }
+                    }
+                }
             }
 
             return true;

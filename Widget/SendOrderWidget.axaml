@@ -145,7 +145,7 @@
                                 HorizontalContentAlignment="Center"
                                 VerticalContentAlignment="Center"
                                 Height="40"
-                                IsEnabled="{Binding SelectedOrderToAmend, Converter={x:Static ObjectConverters.IsNotNull}}"
+                                IsEnabled="{Binding SelectedOrderToAmend.IsAmendable, FallbackValue=False}"
                                 Click="OnSendAmendClick"/>
 
 						<Button Grid.Column="1" Grid.ColumnSpan="2"

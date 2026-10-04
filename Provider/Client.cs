@@ -99,18 +99,23 @@ public sealed class ManualClient : Client
     {
     }
 
-    // The id addresses the row globally, so amending someone else's working order needs no second
-    // context — which is what lets a server workspace intervene on any client's order.
+    // The id addresses the row globally, so acting on someone else's working order needs no second
+    // context — which is what lets a server workspace cancel any client's order, and amend a non-algo one.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     protected override bool Amend(ref OrderTarget orderTarget)
     {
         OrderId orderId = orderTarget.OrderHeader.OrderId;
+        // The algo owns its orders' targets: a reduce or replace would be undone on its next tick and is invisible to its RiskLayer. A cancel may still intervene.
+        if (orderTarget.OrderTargetAction != OrderTargetAction.Cancel && orderId.IsAlgoOrder())
+            throw new InvalidOperationException($"ManualClient cannot amend algo order {orderId}: an algo's orders are cancel-only from the GUI.");
         ref readonly OrderTarget existingOrderTarget = ref Context.GetOrderTarget(orderId).GetReadonlyRef();
         if (existingOrderTarget.OrderHeader.OrderId != orderId)
         {
             return false;
         }
-        orderTarget.OrderHeader.Seq = Math.Max(existingOrderTarget.OrderHeader.Seq + 1, orderTarget.OrderHeader.Seq);
+        // A cancel of an algo order jumps far past the algo's own seqs, as Server.CancelAllOrders does, so a racing algo amend never shares its seq.
+        int seq = existingOrderTarget.OrderHeader.Seq + (orderId.IsAlgoOrder() ? 1_000_000 : 1);
+        orderTarget.OrderHeader.Seq = Math.Max(seq, orderTarget.OrderHeader.Seq);
         return Send(ref orderTarget);
     }
 
@@ -244,7 +249,7 @@ public abstract class Client
 
         _instrumentData = new ReadOnlySocket?[Context.ServerHeader.GetReadonlyRef().InstrumentIds.Length];
 
-        RiskLayer = new RiskLayer(ContextManager.ServerContext, OrderRejectedSource.Client);
+        RiskLayer = new RiskLayer(Context, OrderRejectedSource.Client);
     }
 
     public ReadOnlySpan<byte> ReadAdmin()
@@ -276,6 +281,9 @@ public abstract class Client
         if (Context.GetInstrumentHeader(instrumendHeaderId).GetReadonlyRef().AsInstrumentHeader().InstrumentType == InstrumentType.Spread)
         {
             LeggedHeader leggedHeader = Context.GetInstrumentHeader(instrumendHeaderId).GetReadonlyRef().AsLegged();
+            // Only a two-leg +1/-1 calendar is modelled (Spread builds its risk legs that way); refused here so the request never reaches the server.
+            if (leggedHeader.LegCount != 2 || Math.Abs(leggedHeader.Legs[0].Weight) != 1 || leggedHeader.Legs[0].Weight != -leggedHeader.Legs[1].Weight)
+                throw new NotImplementedException($"Spread {instrumendHeaderId}: only a two-leg +1/-1 calendar is supported");
             foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
                 GetInstrument(legHeader.InstrumentHeaderId);
         }
@@ -301,12 +309,35 @@ public abstract class Client
     {
         Instrument instrument = Context.GetInstrument(instrumentId);
         Context.GetPosition(instrument.InstrumentId);
+
+        // A previous process's Active orders would hold room, slots and fills this process never made; the server cancels them when that process closes (see Spec.md).
+        ThrowIfPreviousOrdersActive(instrumentId);
+
+        // RiskLayer starts from this strategy's own position, every process: the region can outlive one (the GUI maps it).
+        // A spread's legs come through here themselves before the spread (GetInstrument onboards them first).
+        Context.GetWorkingRisk(instrumentId).Write(new WorkingRisk { Position = Context.GetPositionHeader(instrumentId).GetReadonlyRef().Quantity });
+
         OpenInstrumentDataSocket(instrumentId, instrument.Symbol.ToString());
         _coreGroupIds.Set(instrument.Header.CoreGroupId);
         Instrument?.Invoke(instrument);
         if (instrument.ProductGroupId < 0)
             Context.AllocateProductGroupId(instrument, instrument.Symbology.Root);
         return instrument;
+    }
+
+    private void ThrowIfPreviousOrdersActive(int instrumentId)
+    {
+        for (int localIndex = 0; localIndex < 64; localIndex++)
+        {
+            OrderId orderId = new OrderId { ClientId = _clientId, LocalIndex = localIndex };
+            ref readonly OrderState orderState = ref Context.GetOrderState(orderId).GetReadonlyRef();
+            if (orderState.OrderHeader.OrderId.InstrumentId != instrumentId)
+                continue;
+            if (orderState.OrderStateStatus == OrderStateStatus.Active)
+                throw new InvalidOperationException($"Order {orderState.OrderHeader.OrderId} from a previous process is still Active on instrument {instrumentId}: start again once the server has cancelled it.");
+            // Done: its risk row is the previous process's, so this process starts from an empty one.
+            Context.GetOrderRisk(orderId).GetRef() = default;
+        }
     }
 
     // Strategy: open the per-instrument ring and seed the replica from the server's authoritative book.
@@ -537,6 +568,8 @@ public abstract class Client
         ref readonly Fill fill = ref MemoryMarshal.AsRef<Fill>(rsrcObj);
         NicTimestamp = fill.OrderHeader.NicTimestamp;
         ExchangeTimestamp = fill.OrderHeader.ExchangeTimestamp;
+        // Every fill on this channel is this strategy's and moves its position; only this client's own orders were reserved here.
+        RiskLayer.OnFill(in fill, fill.OrderHeader.OrderId.ClientId == _clientId);
         Position position = Context.GetPosition(fill.OrderHeader.OrderId.InstrumentId);
         int productGroupId = position.Instrument.ProductGroupId;
         Context.GetMessageEfficiency(productGroupId).GetRef().OnFill(fill.Quantity);
@@ -566,6 +599,17 @@ public abstract class Client
         ref OrderTarget existingOrderTarget = ref Context.GetOrderTarget(orderState.OrderHeader.OrderId).GetRef();
         if (orderState.OrderHeader.OrderId == existingOrderTarget.OrderHeader.OrderId)
         {
+            // RiskLayer applies only what the server applied: an echo repeats a Done or an ack this client already saw.
+            bool isRiskEvent = orderState.OrderHeader.OrderId.IsAlgoOrder() && _isOrderActive[localOrderIndex]
+                && (orderState.OrderStateStatus == OrderStateStatus.Done
+                    || (orderState.OrderStateReason == OrderStateReason.Acked && orderState.OrderHeader.Seq > _ackedSeqs[localOrderIndex]));
+            if (isRiskEvent)
+            {
+                RiskLayer.OnOrderState(in orderState);
+                if (orderState.OrderStateReason == OrderStateReason.Acked)
+                    _ackedSeqs[localOrderIndex] = orderState.OrderHeader.Seq;
+            }
+
             if (orderState.OrderStateStatus == OrderStateStatus.Done)
             {
                 existingOrderTarget.OrderTargetStatus = OrderStateStatus.Done;
@@ -583,6 +627,10 @@ public abstract class Client
     
 
     private Bitset64 _isOrderActive = new Bitset64();
+    // A Create needs one of this client's 64 order slots; a slot frees only on its order's Done.
+    public bool HasFreeOrderSlot => !_isOrderActive.IsFull;
+    // Per local slot: the last seq whose ack RiskLayer applied, so an echoed state is not applied twice.
+    private readonly int[] _ackedSeqs = new int[64];
     CMEGetWeightedMessage CMEGetWeightedMessage = new CMEGetWeightedMessage();
 
     public virtual bool OnOrderTarget(ref OrderTarget orderTarget)
@@ -633,6 +681,7 @@ public abstract class Client
             return false;
         }
         int localOrderIndex = orderTarget.OrderHeader.OrderId.LocalIndex;
+        _ackedSeqs[localOrderIndex] = 0;
 
         if (Send(ref orderTarget))
         {
@@ -685,6 +734,10 @@ public abstract class Client
         bool isTargetDone = orderRejected.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId && orderTarget.OrderHeader.Seq == orderRejected.OrderHeader.Seq;
         if (isTargetDone)
             orderTarget.OrderTargetStatus = OrderStateStatus.Done;
+
+        // RiskLayer releases what this client reserved for the order, discarded rejects included.
+        if (orderRejected.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId && orderRejected.OrderHeader.OrderId.IsAlgoOrder())
+            RiskLayer.OnOrderRejected(in orderRejected);
 
         // Non-discarded rejections raise the event regardless of source, so exchange/server
         // rejections severe enough to pause the algo reach the AlertManager too.

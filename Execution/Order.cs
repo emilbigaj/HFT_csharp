@@ -17,6 +17,7 @@ public enum OrderType : byte
     Position = 14,
     AheadOfOrder = 15,
     RiskLimit = 16,
+    WorkingRisk = 17,
 }
 
 [RegisterJson]
@@ -178,7 +179,7 @@ public struct OrderRejected()
 }
 
 
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[StructLayout(LayoutKind.Sequential, Pack = 1)] // 24 bytes: config only, written on edits
 [RegisterJson]
 public struct RiskLimit(int instrumentId)
 {
@@ -187,16 +188,14 @@ public struct RiskLimit(int instrumentId)
     public Timestamp Timestamp = Timestamp.MinValue;
     public int MaxOrderQuantity = 0;
     public int MaxPositionQuantity = 0;
-    public int WorstLongWorkingQuantity = 0;
-    public int WorstShortWorkingQuantity = 0;
 
-    public int GetLongQuantityAllowance(int position)
+    public readonly int GetLongQuantityAllowance(in WorkingRisk workingRisk)
     {
-        return Math.Max(0, MaxPositionQuantity - position - WorstLongWorkingQuantity);
+        return Math.Max(0, MaxPositionQuantity - workingRisk.Position - workingRisk.WorstLongWorkingQuantity);
     }
-     public int GetShortQuantityAllowance(int position)
+    public readonly int GetShortQuantityAllowance(in WorkingRisk workingRisk)
     {
-        return Math.Min(0, -MaxPositionQuantity - position - WorstShortWorkingQuantity);
+        return Math.Min(0, -MaxPositionQuantity - workingRisk.Position - workingRisk.WorstShortWorkingQuantity);
     }
 
     public static RiskLimit GetMaxLimits(int instrumentId) => new RiskLimit(instrumentId)
@@ -218,15 +217,32 @@ public struct RiskLimit(int instrumentId)
     }
 }
 
+// What RiskLayer has applied for an instrument: its fills and worst-case working reservations. Never persisted.
+[StructLayout(LayoutKind.Sequential, Pack = 1)] // 16 bytes
+[RegisterJson]
+public struct WorkingRisk()
+{
+    public Header<OrderType> Header = new(OrderType.WorkingRisk);   // the TCP mirror dispatches every row on its first byte
+    public int Position = 0;                     // moves in the same RiskLayer.OnFill as the reservation release
+    public int WorstLongWorkingQuantity = 0;     // >= 0
+    public int WorstShortWorkingQuantity = 0;    // <= 0
+
+    public override string ToString()
+    {
+        return Json.Serialize(this);
+    }
+}
+
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct OrderRisk
 {
     public const int MaxOrderQuantity = ushort.MaxValue;
-    public const int MaxActiveTargets = 30;
+    public const int MaxActiveTargets = 29;
 
     private ushort _activeTargetsCount;                 // struct — must NOT be readonly
     private ushort _worstOrderQuantity;                 // max over the active targets, 0 when there are none
-    private Array30<ushort> _absOrderQuantities;        // one abs quantity per active target, indices [0, _activeTargetsCount)
+    private ushort _absAckedOrderQuantity;              // the exchange's acked quantity, 0 until the first ack
+    private Array29<ushort> _absOrderQuantities;        // one abs quantity per active target, indices [0, _activeTargetsCount)
 
     /// <summary>Branchless abs. Returns int.MinValue for int.MinValue (no throw);
     /// callers must range-check with an unsigned compare.</summary>
@@ -238,11 +254,13 @@ public struct OrderRisk
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public readonly int GetAbsWorstOrderQuantity(int ackedOrderQuantity)
+    public readonly int GetAbsWorstOrderQuantity()
     {
-        int absAckedOrderQuantity = Abs(ackedOrderQuantity);
-        return Math.Max(absAckedOrderQuantity, _worstOrderQuantity);
+        return Math.Max(_absAckedOrderQuantity, _worstOrderQuantity);
     }
+
+    // TryAdd refuses another target once this many are in flight.
+    public readonly bool IsFull => _activeTargetsCount == MaxActiveTargets;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool TryAdd(int orderQuantity, out OrderRejectedReason reason)
@@ -270,7 +288,11 @@ public struct OrderRisk
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Ack(int orderQuantity) => Remove(orderQuantity);
+    public void Ack(int orderQuantity)
+    {
+        Remove(orderQuantity);
+        _absAckedOrderQuantity = (ushort)Abs(orderQuantity);   // in range: every acked quantity passed TryAdd
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Reject(int orderQuantity) => Remove(orderQuantity);
@@ -310,8 +332,9 @@ public struct OrderRisk
 public enum OrderTargetAction : byte
 {
     Create = 0,
-    Amend = 1,
+    Replace = 1,   // a new price or more quantity: loses queue priority (was Amend, same wire value)
     Cancel = 2,
+    Reduce = 3,    // less quantity at the same price: keeps queue priority, never adds risk
 }
 
 [Flags]
@@ -361,6 +384,13 @@ public struct OrderProfile(int ticks, int quantity)
     public bool IsThisCrossing(int ticks)
     {
         return (Ticks - ticks) * Sign >= 0;
+    }
+
+    // Less quantity at the same price and side: keeps queue priority and can never add risk.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool IsReduceOf(in OrderProfile orderProfile)
+    {
+        return Ticks == orderProfile.Ticks && Sign == orderProfile.Sign && Math.Abs(Quantity) < Math.Abs(orderProfile.Quantity);
     }
 
     public static OrderProfile Cancel
@@ -414,7 +444,7 @@ public struct Fill()
     public override string ToString() => Json.Serialize(this);
 }
 
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[StructLayout(LayoutKind.Sequential, Pack = 1)] // 64 bytes: no room left
 [RegisterJson]
 public struct OrderState()
 {
@@ -428,19 +458,21 @@ public struct OrderState()
     private unsafe fixed byte _reserved[1];
     public int QuantityFilled;
     public int QuantityAhead;
+    public int QuantityBehind;   // same queue as QuantityAhead; only the simulator reports it
 
     public int WorkingQuantity => OrderProfile.Quantity - QuantityFilled;
     public override string ToString() => Json.Serialize(this);
 }
 
-// 56 bytes total (all 8-byte fields first, small field last; natural packing)
+// 20 bytes
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
-public struct AheadOfOrder(ulong clientOrderid, int quantity)
+public struct AheadOfOrder(ulong clientOrderid, int quantity, int quantityBehind)
 {
     public Header<OrderType> Header = new(OrderType.AheadOfOrder);
     public int Quantity = quantity;
     public ulong ClientOrderId = clientOrderid;
+    public int QuantityBehind = quantityBehind;
 }
 
 
@@ -477,7 +509,6 @@ public struct PositionHeader()
     public double RealizedProfit = 0;
     public int QuantityTraded = 0;
     public AlgoStatus AlgoStatus = AlgoStatus.Paused;
-
     public override string ToString() => Json.Serialize(this);
 
     public void OnFill(in Fill fill, double multiplier)

@@ -109,7 +109,7 @@ public struct Quote
         Ask = ask;
         TickSize = tickSize;
     }
-
+    public double MicroPrice => (Bid.Ticks * Ask.Quantity + Ask.Ticks * Bid.Quantity) * TickSize / (Bid.Quantity + Ask.Quantity) ;
     public double MidPrice => (Bid.Ticks + Ask.Ticks) * 0.5 * TickSize;
     public double BidPrice => Bid.Ticks * TickSize;
     public double AskPrice => Ask.Ticks * TickSize;

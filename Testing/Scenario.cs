@@ -98,11 +98,9 @@ public class TestingScenario : Scenario
         if (CMECoreGroup == CMECoreGroupId.SandP500)
         {
             {
-                Future quote = GetFuture("XCME", "MES", Clock.Now);
-                strategy.OnFuture(quote, quote);
-
+                Future quote = GetFuture("XCME", "ES", Clock.Now);
                 Future hedge = GetFuture("XCME", "ES", Clock.Now);
-                strategy.OnFuture(hedge, hedge);
+                strategy.OnFuture(quote, hedge);
             }
         }
         else if (CMECoreGroup == CMECoreGroupId.Equity)
@@ -185,7 +183,7 @@ public class TestingScenario : Scenario
     }
     public override ServerSimulator BuildSimulation()
     {
-        ServerSimulator server = new ServerSimulator(ServerName);
+        ServerSimulator server = new ServerSimulator(ServerName, true);
         ContextManager.Initialize(ServerName);
 
         server.OverrideNicTimestamp = false;

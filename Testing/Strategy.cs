@@ -128,6 +128,7 @@ public class TestingStrategy : Strategy.Strategy
         Position longPosition = GetPosition(@long);
         OnPosition(longPosition);
         Position shortPosition = GetPosition(@short);
+        
         OnPosition(shortPosition);
 
         MakeSpread make = new MakeSpread(spreadPosition, Client, @long, @short);

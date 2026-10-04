@@ -26,6 +26,7 @@ public sealed class WidgetOrder : INotifyPropertyChanged
     public int StateTicks => _orderState.OrderProfile.Ticks;
     public string StatePriceStr => _instrument.TicksToPrice(StateTicks).ToString(_priceFormat);
     public int StateQuantityAhead => _orderState.QuantityAhead;
+    public int StateQuantityBehind => _orderState.QuantityBehind;
 
     public int StateQuantity => _orderState.OrderProfile.Quantity;
     public int StateFilled => _orderState.QuantityFilled;
@@ -294,9 +295,13 @@ public sealed partial class OrdersWidget : UserControl, IWidget, IDisposable
             cancelItem.Click += (_, _) => PerformCancel(order);
             menu.Items.Add(cancelItem);
 
-            var amendItem = new MenuItem { Header = "Amend Order", Icon = new TextBlock { Text = "📝" } };
-            amendItem.Click += (_, _) => PerformAmend(order);
-            menu.Items.Add(amendItem);
+            // The algo owns its orders' targets; the GUI may only cancel them.
+            if (!order.OrderState.OrderHeader.OrderId.IsAlgoOrder())
+            {
+                var amendItem = new MenuItem { Header = "Amend Order", Icon = new TextBlock { Text = "📝" } };
+                amendItem.Click += (_, _) => PerformAmend(order);
+                menu.Items.Add(amendItem);
+            }
         }
         else
         {
@@ -326,8 +331,6 @@ public sealed partial class OrdersWidget : UserControl, IWidget, IDisposable
             OrderProfile = orderState.OrderProfile,
             OrderTargetAction = OrderTargetAction.Cancel,
         };
-        Duration duration = Clock.Now - orderState.OrderHeader.NicTimestamp;
-        target.OrderHeader.Seq = orderState.OrderHeader.Seq + 10_000 + (int)duration.TotalSeconds;
         _context.Manual.OnOrderTarget(ref target);
     }
 

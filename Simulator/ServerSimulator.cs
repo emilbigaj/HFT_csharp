@@ -146,6 +146,13 @@ public class InstrumentSimulator
         _inOnMarketByOrder = true;
         if (mbo.TickHeader.TickType == TickType.MarketByOrderSnapshot)
         {
+            // Each snapshot starts a new PriorityId sequence: both sides restart from its highest id and re-stamp their live queues (see spec.txt).
+            ulong snapshotPriorityId = 0;
+            foreach (Order order in mbo.BidsAsSpan(src)) snapshotPriorityId = Math.Max(snapshotPriorityId, order.PriorityId);
+            foreach (Order order in mbo.AsksAsSpan(src)) snapshotPriorityId = Math.Max(snapshotPriorityId, order.PriorityId);
+            Buys.OnMarketByOrderSnapshot(mbo.BidsAsSpan(src), snapshotPriorityId);
+            Sells.OnMarketByOrderSnapshot(mbo.AsksAsSpan(src), snapshotPriorityId);
+
             // hooks stay silent (Clear does not report removals); the derived snapshot diffs through the MBP path instead
             _marketByPriceByOrder.ApplySnapshot(src);
 
@@ -157,9 +164,12 @@ public class InstrumentSimulator
         }
         else
         {
-            // events first: marker -> trades -> exact queue deltas; the level update publishes last so AddGhost reads pre-trade totals
-            OnMarketByOrder(in mbo, mbo.BidsAsSpan(src), Buys);
-            OnMarketByOrder(in mbo, mbo.AsksAsSpan(src), Sells);
+            // Trades from both arrays before any queue delta: a trade rides its aggressor's array, its fill-removals the resting side's (see spec.txt).
+            // The level update publishes last so AddGhost reads pre-trade totals.
+            OnMarketByOrderTrades(in mbo, mbo.BidsAsSpan(src));
+            OnMarketByOrderTrades(in mbo, mbo.AsksAsSpan(src));
+            OnMarketByOrder(mbo.BidsAsSpan(src), Buys);
+            OnMarketByOrder(mbo.AsksAsSpan(src), Sells);
 
             _marketByPriceByOrderBidsChanged.Clear();
             _marketByPriceByOrderAsksChanged.Clear();
@@ -183,7 +193,21 @@ public class InstrumentSimulator
         OnMarketByPrice(in update, span);
     }
 
-    private void OnMarketByOrder(in MarketByOrder mbo, ReadOnlySpan<Order> orders, OrderManager orderManager)
+    // Pass 1 of an MBO update: the trades, in stream order within the array.
+    private void OnMarketByOrderTrades(in MarketByOrder mbo, ReadOnlySpan<Order> orders)
+    {
+        for (int i = 0; i < orders.Length; i++)
+        {
+            ref readonly Order order = ref orders[i];
+            if (order.OrderAction != MarketByOrderAction.Trade)
+                continue;
+            Trade trade = new Trade(InstrumentId, mbo.TickHeader.ExchangeTimestamp, mbo.TickHeader.SendingTimestamp, mbo.TickHeader.NicTimestamp, order.Level.Ticks, order.Level.Quantity, (sbyte)order.Side);
+            OnTrade(ref trade);   // masks + opposite-side queue fills + trade prints to clients, unchanged
+        }
+    }
+
+    // Pass 2 of an MBO update: the exact queue deltas, in stream order within the array; trades were handled in pass 1.
+    private void OnMarketByOrder(ReadOnlySpan<Order> orders, OrderManager orderManager)
     {
         for (int i = 0; i < orders.Length; i++)
         {
@@ -199,10 +223,6 @@ public class InstrumentSimulator
                 case MarketByOrderAction.Reduce:
                 case MarketByOrderAction.Cancel:
                     orderManager.OnMarketByPriceByOrderDelta(order.PriorityId, order.Level.Ticks, -order.Level.Quantity);
-                    break;
-                case MarketByOrderAction.Trade:
-                    Trade trade = new Trade(InstrumentId, mbo.TickHeader.ExchangeTimestamp, mbo.TickHeader.SendingTimestamp, mbo.TickHeader.NicTimestamp, order.Level.Ticks, order.Level.Quantity, (sbyte)order.Side);
-                    OnTrade(ref trade);   // masks + opposite-side queue fills + trade prints to clients, unchanged
                     break;
             }
         }
@@ -566,6 +586,18 @@ public class InstrumentSimulator
     }
 
 
+    // Keeps our copy of the order state in step with the server's row, and sends only a real change. The row follows only
+    // AheadOfOrder (WriteOrderState never copies the pair), so every change to the copy must come through here.
+    public void OnQueuePosition(ulong clientOrderId, int quantityAhead, int quantityBehind)
+    {
+        ref OrderState orderState = ref TryGetOrderState(clientOrderId, out bool found);
+        if (!found || (orderState.QuantityAhead == quantityAhead && orderState.QuantityBehind == quantityBehind))
+            return;
+        orderState.QuantityAhead = quantityAhead;
+        orderState.QuantityBehind = quantityBehind;
+        ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_AheadOfOrder(new AheadOfOrder(clientOrderId, quantityAhead, quantityBehind));
+    }
+
     public void Make(ulong clientOrderId, int ticks, int quantityFilled)
     {
         if (clientOrderId == Debug.OrderId)
@@ -614,8 +646,25 @@ public class InstrumentSimulator
         // A marketable order is at the front of whatever it sweeps, so nothing is ahead of it; a resting
         // one takes its place in the book first so the ack carries its real queue position.
         bool isMarketable = IsMarketable(orderProfile, workingQuantity);
-        orderState.QuantityAhead = isMarketable ? 0 : orderManager.Enqeue(orderState.OrderHeader.OrderId, orderProfile.Ticks, workingQuantity);
+        bool isImmediateOrCancel = orderState.TimeInForce == TimeInForce.ImmediateOrCancel;
+        // A taking order is at the front of whatever it sweeps. Published through OnQueuePosition, never written into the
+        // copy: a direct write would leave the server's row stale and suppress the next publish.
+        if (isMarketable || isImmediateOrCancel)
+            OnQueuePosition(orderState.OrderHeader.OrderId, 0, 0);
+        else
+            orderState.QuantityAhead = orderManager.Enqeue(orderState.OrderHeader.OrderId, orderProfile.Ticks, workingQuantity);
+        orderState.QuantityBehind = 0;   // a joining order is at the back of its level
         Update(ref orderState, orderProfile, 0, OrderStateReason.Acked);
+
+        // An IOC never rests: it takes what it can, and the exchange eliminates the remainder right after the fills.
+        if (isImmediateOrCancel)
+        {
+            if (isMarketable)
+                Take(ref orderState, orderProfile, ref workingQuantity);
+            if (workingQuantity != 0)
+                Update(ref orderState, orderProfile, 0, OrderStateReason.Eliminated);
+            return;
+        }
 
         if (!isMarketable)
             return;
@@ -629,6 +678,7 @@ public class InstrumentSimulator
             }
             // Whatever survives the sweep rests at the limit. CME sends no second ack for it, so neither do we.
             orderState.QuantityAhead = orderManager.Enqeue(orderState.OrderHeader.OrderId, orderProfile.Ticks, workingQuantity);
+            orderState.QuantityBehind = 0;
         }
     }
 
@@ -746,8 +796,6 @@ public class InstrumentSimulator
             }
 
 
-            orderState.OrderHeader.Seq = orderTarget.OrderHeader.Seq;
-
             if (TradingStatus != TradingStatus.Open)
             {
                 if (orderState.OrderHeader.OrderId == Debug.OrderId)
@@ -775,6 +823,12 @@ public class InstrumentSimulator
                 orderRejectedReasons.Set((int)OrderRejectedReason.InstrumentIdNotValid);
             }
 
+            // A refused target changes nothing, a cancel included: an exchange rejects or applies, never both.
+            if (!orderRejectedReasons.IsEmpty)
+                return orderState;
+
+            orderState.OrderHeader.Seq = orderTarget.OrderHeader.Seq;
+
             OrderManager orderManager = orderState.OrderProfile.Side == Side.Sell ? Sells : Buys;
             OrderProfile stateProfile = orderState.OrderProfile;
 
@@ -792,7 +846,7 @@ public class InstrumentSimulator
                 return orderState;
             }
 
-            //orderTargetAction == Amend
+            // Reduce or Replace: the simulator tells the two apart from its own state below.
 
 
             if (stateProfile == targetProfile)
@@ -903,7 +957,9 @@ public class InstrumentSimulator
             orderState = new OrderState()
             {
                 OrderHeader = orderTarget.OrderHeader,
+                TimeInForce = orderTarget.TimeInForce,
                 QuantityFilled = 0,
+                QuantityAhead = -1,   // no real position: OnQueuePosition always sends the first one, since the server's PendingNew seed is the book quantity, not ours
                 OrderStateStatus = OrderStateStatus.Active,
                 OrderStateReason = OrderStateReason.Acked,
                 OrderProfile = targetProfile,
@@ -928,6 +984,8 @@ public class ExchangeSimulator
 {
     public bool MaskCrossed { get; set; } = true;
     public bool MaskTaken { get; set; } = true;
+    // A user maker fill leaves the market queue it displaced as Ghost; false = the feed removes what really filled (see spec.txt).
+    public bool MaskMade { get; set; } = true;
     internal FastArrayPool<byte> ByteArrayPool = new FastArrayPool<byte>();
 
     private readonly InstrumentSimulator[] _instrumentSimulators;
@@ -1083,12 +1141,16 @@ public class ServerSimulator
     public FileSystemPath ServerName { get; }
     public ref readonly ServerHeader ServerHeader => ref _server.Context.ServerHeader.GetRef();
 
-    private readonly ByteQueue _byClientTimestamp;
+    // One FIFO per instrument per channel, indexed by instrumentId: market data (MDP) and execution reports (iLink) travel separate paths; see spec.txt.
+    private readonly ByteQueue[] _marketDataByClientTimestamp;
+    private readonly ByteQueue[] _executionByClientTimestamp;
+    private Bitset64 _hasMarketData;   // instruments with an entry in _marketDataByClientTimestamp
+    private Bitset64 _hasExecution;    // instruments with an entry in _executionByClientTimestamp
 
     // Everything the server does — sockets, context, risk, instrument rings, audit — lives in Server
     // and is shared with the realtime C++ build. This class only supplies the timing around it:
     //
-    //   exchange -> _byClientTimestamp -> ServerSimulator -> Server -> socket -> client
+    //   exchange -> _marketDataByClientTimestamp / _executionByClientTimestamp -> ServerSimulator -> Server -> socket -> client
     //   client   -> socket -> Server -> ServerSimulator -> _byExchangeTimestamp -> exchange
     //
     // so the client->server leg is instant (Server.ReadExecution/ReadAdmin are called directly) and
@@ -1145,7 +1207,13 @@ public class ServerSimulator
 
         ExchangeSimulator = new ExchangeSimulator(this);
 
-        _byClientTimestamp = new ByteQueue(64 * 4096);
+        _marketDataByClientTimestamp = new ByteQueue[ServerHeader.InstrumentIds.Length];
+        _executionByClientTimestamp = new ByteQueue[ServerHeader.InstrumentIds.Length];
+        for (int instrumentId = 0; instrumentId < ServerHeader.InstrumentIds.Length; instrumentId++)
+        {
+            _marketDataByClientTimestamp[instrumentId] = new ByteQueue(16 * 4096);
+            _executionByClientTimestamp[instrumentId] = new ByteQueue(16 * 4096);
+        }
 
         // Outbound leg: Server validates, and only a target that passes risk reaches the exchange —
         // where ExchangeSimulator applies ExchangeOrderQueueLatency in its own queue.
@@ -1175,7 +1243,7 @@ public class ServerSimulator
 
         Init();
     }
-    public bool OpenConsoleForLogger { get; set; } = true;
+    public bool OpenConsoleForLogger { get; set; } = false;
     private void StartLoggingServer(string loggingName)
     {
         try
@@ -1204,7 +1272,7 @@ public class ServerSimulator
 
         if (!SessionManagerByExchange.TryGetValue(details.Exchange, out SessionManager? sessionManager))
         {
-            sessionManager = new SessionManager(details.Sessions[0]);
+            sessionManager = new SessionManager(Session.CME);
             SessionManagerByExchange[details.Exchange] = sessionManager;
         }
         InstrumentSimulator instrumentSimulator = ExchangeSimulator.GetInstrument(allocateInstrument.InstrumentId);
@@ -1216,6 +1284,13 @@ public class ServerSimulator
 
     
 
+
+    // Enqueues on the instrument's channel and marks the instrument for OnInterject/OnTickTock.
+    private static Span<byte> Enqueue(ByteQueue[] byClientTimestamp, ref Bitset64 hasClientTimestamp, int instrumentId, int length)
+    {
+        hasClientTimestamp.Set(instrumentId);
+        return byClientTimestamp[instrumentId].Enqueue(length);
+    }
 
     public void FromExchangeToNicToClient_Fill(in OrderState orderState, ulong fillId, int ticks, int quantity, FillType fillType)
     {
@@ -1235,7 +1310,7 @@ public class ServerSimulator
         // release site dispatches on it; its OrderStateReason.Fill says trailing fills follow, and
         // the entry length gives their count. Server.OnFill applies the whole set atomically.
         Timestamp exchangeTimestamp = Clock.Now;
-        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<Timestamp>() + Unsafe.SizeOf<OrderState>() + fillCount * Unsafe.SizeOf<Fill>());
+        Span<byte> dst = Enqueue(_executionByClientTimestamp, ref _hasExecution, instrumentId, Unsafe.SizeOf<Timestamp>() + Unsafe.SizeOf<OrderState>() + fillCount * Unsafe.SizeOf<Fill>());
         Timestamp nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
         MemoryMarshal.AsRef<Timestamp>(dst) = nicTimestamp;
         dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
@@ -1306,7 +1381,7 @@ public class ServerSimulator
         }
 
         ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in orderState, 1));
-        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<OrderState>() + Unsafe.SizeOf<Timestamp>());
+        Span<byte> dst = Enqueue(_executionByClientTimestamp, ref _hasExecution, orderState.OrderHeader.OrderId.InstrumentId, Unsafe.SizeOf<OrderState>() + Unsafe.SizeOf<Timestamp>());
         ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
         nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
         dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
@@ -1322,7 +1397,7 @@ public class ServerSimulator
         }
 
         ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in orderRejected, 1));
-        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<OrderRejected>() + Unsafe.SizeOf<Timestamp>());
+        Span<byte> dst = Enqueue(_executionByClientTimestamp, ref _hasExecution, orderRejected.OrderHeader.OrderId.InstrumentId, Unsafe.SizeOf<OrderRejected>() + Unsafe.SizeOf<Timestamp>());
         ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
         nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
         dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
@@ -1335,7 +1410,8 @@ public class ServerSimulator
     public void FromExchangeToNicToClient_AheadOfOrder(AheadOfOrder aheadOfOrder)
     {
         ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in aheadOfOrder, 1));
-        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<AheadOfOrder>() + Unsafe.SizeOf<Timestamp>());
+        OrderId orderId = aheadOfOrder.ClientOrderId;
+        Span<byte> dst = Enqueue(_executionByClientTimestamp, ref _hasExecution, orderId.InstrumentId, Unsafe.SizeOf<AheadOfOrder>() + Unsafe.SizeOf<Timestamp>());
         ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
         nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
         dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
@@ -1347,7 +1423,7 @@ public class ServerSimulator
         Timestamp nicTimestamp = OverrideNicTimestamp ? mbp.TickHeader.ExchangeTimestamp.AddMicroseconds(FromExchangeToNicToClientLatency) : mbp.TickHeader.NicTimestamp.AddMicroseconds(FromNicToClientLatency);
         mbp.TickHeader.NicTimestamp = nicTimestamp;
 
-        Span<byte> dst = _byClientTimestamp.Enqueue(src.Length + Unsafe.SizeOf<Timestamp>());
+        Span<byte> dst = Enqueue(_marketDataByClientTimestamp, ref _hasMarketData, mbp.TickHeader.InstrumentId, src.Length + Unsafe.SizeOf<Timestamp>());
         ref Timestamp queueTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
         queueTimestamp = mbp.TickHeader.NicTimestamp;
 
@@ -1359,7 +1435,7 @@ public class ServerSimulator
         Timestamp nicTimestamp = OverrideNicTimestamp ? tick.TickHeader.ExchangeTimestamp.AddMicroseconds(FromExchangeToNicToClientLatency) : tick.TickHeader.NicTimestamp.AddMicroseconds(FromNicToClientLatency);
         tick.TickHeader.NicTimestamp = nicTimestamp;
 
-        Span<byte> dst = _byClientTimestamp.Enqueue(Unsafe.SizeOf<Tick>() + Unsafe.SizeOf<Timestamp>());
+        Span<byte> dst = Enqueue(_marketDataByClientTimestamp, ref _hasMarketData, tick.TickHeader.InstrumentId, Unsafe.SizeOf<Tick>() + Unsafe.SizeOf<Timestamp>());
         ref Timestamp queueTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
         queueTimestamp = tick.TickHeader.NicTimestamp;
 
@@ -1456,7 +1532,14 @@ public class ServerSimulator
             {
                 // Clients allocate their instruments before the clock starts, so this is the same
                 // admin drain the run loop uses — unthrottled, because nothing else is happening yet.
-                _server.ReadAdmin();
+                try
+                {
+                    _server.ReadAdmin();
+                }
+                catch (Exception exception)
+                {
+                    Clock.OnException(exception);   // simulation: the Clock's exceptions are wired into the AlertManager
+                }
                 X86BaseWrapper.Pause();
             }
             OnInterject(Timestamp.MinValue);
@@ -1487,9 +1570,17 @@ public class ServerSimulator
             _server.ReadAdmin();
         }
 
-        if (_byClientTimestamp.TryPeek(out Span<byte> nicSrc))
+        Interject(_marketDataByClientTimestamp, _hasMarketData);
+        Interject(_executionByClientTimestamp, _hasExecution);
+    }
+
+    // Clock keeps the minimum, so offering every head wakes it at the earliest NIC across all channels.
+    private static void Interject(ByteQueue[] byClientTimestamp, Bitset64 hasClientTimestamp)
+    {
+        foreach (int instrumentId in hasClientTimestamp)
         {
-            Clock.OnInterject(MemoryMarshal.Read<Timestamp>(nicSrc));
+            if (byClientTimestamp[instrumentId].TryPeek(out Span<byte> src))
+                Clock.OnInterject(MemoryMarshal.Read<Timestamp>(src));
         }
     }
 
@@ -1501,10 +1592,26 @@ public class ServerSimulator
         serverHeaderEntry.AcquireLock();
         _server.Context.ServerHeader.GetRef().Timestamp = now;
         serverHeaderEntry.ReleaseLock();
-        Timestamp timestamp = Timestamp.MinValue;
         // Release everything the exchange sent whose NIC timestamp has now arrived. This is the only
         // delayed leg: from here on it is plain Server work, identical to what the realtime build does.
-        while (_byClientTimestamp.TryPeek(out Span<byte> src) && (timestamp = MemoryMarshal.AsRef<Timestamp>(src)) <= now)
+        ReleaseToServer(_marketDataByClientTimestamp, ref _hasMarketData, now);
+        ReleaseToServer(_executionByClientTimestamp, ref _hasExecution, now);
+    }
+
+    // Drains each marked instrument's channel up to now, in FIFO order: an entry stamped earlier than one ahead of it waits for it, as on the wire.
+    private void ReleaseToServer(ByteQueue[] byClientTimestamp, ref Bitset64 hasClientTimestamp, Timestamp now)
+    {
+        foreach (int instrumentId in hasClientTimestamp)
+        {
+            ReleaseToServer(byClientTimestamp[instrumentId], now);
+            if (byClientTimestamp[instrumentId].IsEmpty)
+                hasClientTimestamp.Clear(instrumentId);
+        }
+    }
+
+    private void ReleaseToServer(ByteQueue byClientTimestamp, Timestamp now)
+    {
+        while (byClientTimestamp.TryPeek(out Span<byte> src) && MemoryMarshal.AsRef<Timestamp>(src) <= now)
         {
             src = src.Slice(Unsafe.SizeOf<Timestamp>());
             byte type = src[0];
@@ -1525,7 +1632,7 @@ public class ServerSimulator
                     break;
                 case (byte)OrderType.AheadOfOrder:
                     ref readonly AheadOfOrder aheadOfOrder = ref MemoryMarshal.AsRef<AheadOfOrder>(src);
-                    _server.OnQuantityAhead(aheadOfOrder.ClientOrderId, aheadOfOrder.Quantity);
+                    _server.OnQuantityAhead(aheadOfOrder.ClientOrderId, aheadOfOrder.Quantity, aheadOfOrder.QuantityBehind);
                     break;
                 case (byte)OrderType.OrderState:
                     OrderState orderState = MemoryMarshal.Read<OrderState>(src);
@@ -1549,7 +1656,7 @@ public class ServerSimulator
                          // handle/skip
                     break;
             }
-            _byClientTimestamp.Dequeue();
+            byClientTimestamp.Dequeue();
         }
     }
 

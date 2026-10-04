@@ -40,6 +40,7 @@ public sealed class WidgetPosition : INotifyPropertyChanged
     public double Realized => _profit.Realized;
     public int Quantity => _profit.Quantity;
     public int QuantityTraded => _position.PositionHeader.GetReadonlyRef().QuantityTraded;
+    public double ProfitPerSide => QuantityTraded == 0 ? 0 : Profit / QuantityTraded;
 
     public Timestamp Timestamp => _profit.Timestamp;
 

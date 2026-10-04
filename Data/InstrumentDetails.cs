@@ -100,7 +100,6 @@ public class InstrumentDetailsSearch
             try
             {
                 instrumentDetails = InstrumentDetails.FromFile(filePath);
-                Console.WriteLine(filePath);
             }
             catch (Exception ex)
             {

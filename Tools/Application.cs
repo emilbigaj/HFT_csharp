@@ -12,15 +12,22 @@ namespace Tools
         public sealed class ExitAction
         {
             public string Name { get; }
-            public Action Action { get; }
             public int Priority { get; }
+            private Action? _action;
+            public Action? Action => Volatile.Read(ref _action);
+            public bool IsCancelled => Action == null;
 
             public ExitAction(string name, int priority, Action action)
             {
                 Name = name;
-                Action = action;
+                _action = action;
                 Priority = priority;
             }
+
+            // The owner already cleaned up: drop the delegate so the queue no longer keeps it alive.
+            // A short-lived owner (a writer per file per day) would otherwise be retained, with
+            // everything it holds, for the life of the process.
+            public void Cancel() => Volatile.Write(ref _action, null);
         }
 
         public static ConcurrentQueue<ExitAction> Actions { get; } = new ConcurrentQueue<ExitAction>();
@@ -40,6 +47,9 @@ namespace Tools
         // Keep a reference to the delegate to prevent GC collection
         private static readonly ConsoleCtrlDelegate _ctrlHandler = ConsoleCtrlHandler;
 
+        // Keep a reference to the registration: once collected, the SIGHUP handler is unregistered
+        private static PosixSignalRegistration? s_hangUpRegistration;
+
         static Application()
         {
             // Windows-specific: Handles X button, logoff, etc.
@@ -47,6 +57,18 @@ namespace Tools
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 SetConsoleCtrlHandler(_ctrlHandler, true);
+            }
+            else
+            {
+                // Linux: a closed terminal or dropped ssh session sends SIGHUP, whose default action kills the process without the exit actions
+                s_hangUpRegistration = PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =>
+                {
+                    Console.WriteLine("Hang-up Signal (SIGHUP) Captured. Shutting down...");
+                    OnExit(null, null);
+
+                    // Allow the process to terminate naturally after cleanup
+                    context.Cancel = false;
+                });
             }
 
             // Cross-Platform: Handles Ctrl+C
@@ -68,14 +90,14 @@ namespace Tools
             };
         }
 
-        /// <summary>Adds an action that will run once on application exit.</summary>
-        public static void AddExitAction(string name, Action action)
+        /// <summary>Adds an action that will run once on application exit. Cancel the returned action once it is no longer needed.</summary>
+        public static ExitAction AddExitAction(string name, Action action)
         {
-            AddExitAction(name, 0, action);
+            return AddExitAction(name, 0, action);
         }
 
         /// <summary>Adds an action that will run once on application exit. Order by priority (higher values occur earlier)</summary>
-        public static void AddExitAction(string name, int priority, Action action)
+        public static ExitAction AddExitAction(string name, int priority, Action action)
         {
             if (string.IsNullOrWhiteSpace(name))
                 throw new ArgumentException("Name cannot be null or whitespace.", nameof(name));
@@ -83,7 +105,9 @@ namespace Tools
             if (action == null)
                 throw new ArgumentNullException(nameof(action));
 
-            Actions.Enqueue(new ExitAction(name, priority, action));
+            ExitAction exitAction = new ExitAction(name, priority, action);
+            Actions.Enqueue(exitAction);
+            return exitAction;
         }
 
         /// <summary>Runs all exit actions exactly once.</summary>
@@ -106,10 +130,13 @@ namespace Tools
 
             foreach (ExitAction act in ordered)
             {
+                Action? action = act.Action;
+                if (action == null)
+                    continue;   // cancelled: its owner already cleaned up
                 try
                 {
                     Console.WriteLine($"Application::Executing exit action '{act.Name}' with priority {act.Priority}...");
-                    act.Action();
+                    action();
                 }
                 catch (Exception ex)
                 {

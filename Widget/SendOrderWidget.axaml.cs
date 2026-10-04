@@ -41,6 +41,7 @@ public class AmendOrderWrapper : INotifyPropertyChanged
 
     public Side Side => _orderState.OrderProfile.Side;
     public ulong ClientOrderId => _orderState.OrderHeader.OrderId;
+    public bool IsAmendable => !_orderState.OrderHeader.OrderId.IsAlgoOrder();   // the algo owns its orders' targets
 
     public AmendOrderWrapper(OrderState state, Instrument inst)
     {
@@ -892,7 +893,7 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
 
     private void OnSendAmendClick(object? sender, RoutedEventArgs e)
     {
-        if (_viewModel.SelectedOrderToAmend == null || _viewModel.TicksInput == null || _viewModel.QuantityInput == null)
+        if (_viewModel.SelectedOrderToAmend == null || !_viewModel.SelectedOrderToAmend.IsAmendable || _viewModel.TicksInput == null || _viewModel.QuantityInput == null)
             return;
 
         var state = _viewModel.SelectedOrderToAmend.OrderState;
@@ -900,13 +901,13 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
         int workingQuantity = _viewModel.QuantityInput.Value;
         int newQuantity = state.QuantityFilled + workingQuantity;
 
+        OrderProfile orderProfile = new OrderProfile(_viewModel.TicksInput.Value, newQuantity);
         OrderTarget target = new OrderTarget
         {
             OrderHeader = state.OrderHeader,
-            OrderProfile = new OrderProfile(_viewModel.TicksInput.Value, newQuantity),
-            OrderTargetAction = OrderTargetAction.Amend
+            OrderProfile = orderProfile,
+            OrderTargetAction = orderProfile.IsReduceOf(in state.OrderProfile) ? OrderTargetAction.Reduce : OrderTargetAction.Replace
         };
-        target.OrderHeader.Seq += 1;
         _context.Manual.OnOrderTarget(ref target);
     }
 
@@ -920,7 +921,6 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
             OrderProfile = state.OrderProfile,
             OrderTargetAction = OrderTargetAction.Cancel
         };
-        target.OrderHeader.Seq += 1000; // make sure algo cant overwrite the seq with an amend
         _context.Manual.OnOrderTarget(ref target);
     }
 

@@ -42,6 +42,9 @@ public static class Clock
 
     // Events
     public static event Action<Exception>? Exception;
+
+    // Reports an exception caught outside the Clock's own callbacks; Scenario wires these into the AlertManager.
+    public static void OnException(Exception exception) => Exception?.Invoke(exception);
     public static event Action<Timestamp>? TickTock;
     public static event Action<Timestamp>? Started;
     public static event Action<Timestamp>? Stopped;

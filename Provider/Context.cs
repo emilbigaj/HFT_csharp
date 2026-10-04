@@ -177,6 +177,7 @@ public abstract class Context
 
     // execution
     protected readonly SharedArray<RiskLimit> _riskLimits;
+    protected readonly SharedArray<WorkingRisk> _workingRisks;
     protected readonly SharedArray<MessageEfficiency> _messageEfficiency;
     protected readonly SharedArray<RollingRateLimit> _rateLimits;
     protected readonly SharedArray<CoreGroup> _coreGroups;
@@ -259,10 +260,14 @@ public abstract class Context
         _coreGroups = NewSharedArray<CoreGroup>(serverName / "CoreGroups", serverHeader.CoreGroupIds.Length, ServerAccess);
 
         _orderStates = NewSharedArray<OrderState>(serverName / "OrderStates", serverHeader.OrdersCapacity, ServerAccess, false);
-        _orderRisks = NewSharedArray<OrderRisk>(serverName / "OrderRisks", serverHeader.OrdersCapacity, ServerAccess, false);
+        // Per context like the book: the server's covers every order, a client's only its own.
+        _orderRisks = NewSharedArray<OrderRisk>(directoryPath / "OrderRisks", serverHeader.OrdersCapacity, this is ServerContext ? serverAccess : clientAccess, false);
         _orderTargets = NewSharedArray<OrderTarget>(serverName / "OrderTargets", serverHeader.OrdersCapacity, ClientAccess, false);
 
         _localPositionHeaders = NewSharedArray<PositionHeader>(serverName / "LocalPositionHeaders", serverHeader.LocalPositionsCapacity, ServerAccess, false);
+
+        // Last of the base arrays so the ids before it keep their mirror order. Per context like the book: the server's covers every order on the instrument, a client's only its own.
+        _workingRisks = NewSharedArray<WorkingRisk>(directoryPath / "WorkingRisks", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
 
         _instruments = new Instrument[serverHeader.InstrumentIds.Length];
         _positions = new Position[serverHeader.InstrumentIds.Length];
@@ -338,6 +343,14 @@ public abstract class Context
     public ref SharedArrayEntry<OrderRisk> GetOrderRisk(OrderId orderId) => ref _orderRisks.GetEntry(orderId.GlobalIndex);
 
     public abstract ref SharedArrayEntry<PositionHeader> GetPositionHeader(int instrumentId);
+
+    // Any strategy's row on the instrument; read-only on a client.
+    public ref SharedArrayEntry<PositionHeader> GetPositionHeader(int clientId, int instrumentId)
+    {
+        int localPositionIndex = GetLocalPositionIndex(clientId, instrumentId);
+        return ref _localPositionHeaders.GetEntry(localPositionIndex);
+    }
+
     public abstract bool TryGetInstrumentId(int instrumentHeaderId, out int instrumentId);
     public abstract Bitset64 InstrumentIds { get; }
 
@@ -349,6 +362,14 @@ public abstract class Context
     {
         ThrowIfInstrumentIdOutOfRange(instrumentId);
         return ref _riskLimits.GetEntry(instrumentId);
+    }
+
+    // This context's own: the server's or this client's (see _workingRisks).
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref SharedArrayEntry<WorkingRisk> GetWorkingRisk(int instrumentId)
+    {
+        ThrowIfInstrumentIdOutOfRange(instrumentId);
+        return ref _workingRisks.GetEntry(instrumentId);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -531,7 +552,7 @@ public abstract class Context
         {
             ref readonly LeggedHeader leggedHeader = ref header128Entry.GetReadonlyRef().AsLegged();
 
-            // Legs reference sibling headers; long = the positive-weight leg (2-leg spreads for now).
+            // Legs reference sibling headers; long = the positive-weight leg (2-leg spreads only: Client.GetInstrument refuses any other shape).
             Future longLeg = null!;
             Future shortLeg = null!;
             foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
@@ -911,12 +932,6 @@ public sealed class ServerContext : Context
     }
 
     // --- Specific Server Expositions ---
-    public ref SharedArrayEntry<PositionHeader> GetPositionHeader(int clientId, int instrumentId)
-    {
-        int localPositionIndex = GetLocalPositionIndex(clientId, instrumentId);
-        return ref _localPositionHeaders.GetEntry(localPositionIndex);
-    }
-
     public ref readonly SharedArrayEntry<SocketHeader> GetSocketHeader(int clientId)
     {
         ThrowIfClientIdOutOfRange(clientId);
@@ -1039,8 +1054,6 @@ public sealed class ServerContext : Context
         string? riskLimitLine = Tools.Tools.ReadLastLine(riskLimitPath);
         RiskLimit riskLimit = riskLimitLine != null ? Json.Deserialize<RiskLimit>(riskLimitLine) : Clock.Mode == ClockMode.Simulation ? RiskLimit.GetMaxLimits(instrumentId) : RiskLimit.GetMinLimits(instrumentId);
         riskLimit.InstrumentId = instrumentId;
-        riskLimit.WorstShortWorkingQuantity = 0;
-        riskLimit.WorstLongWorkingQuantity = 0;
         _riskLimits.GetEntry(instrumentId).Write(riskLimit);
 
 
@@ -1050,6 +1063,7 @@ public sealed class ServerContext : Context
         // Server-wide row: no owning order; template id carries the ids (clientId 0 stands in for the old -1 sentinel)
         positionHeader.OrderHeader.OrderId = new OrderId { InstrumentId = instrumentId };
         _serverPositionHeaders.GetEntry(instrumentId).Write(positionHeader);
+        _workingRisks.GetEntry(instrumentId).Write(new WorkingRisk { Position = positionHeader.Quantity });
 
         header.InstrumentId = instrumentId;
         serverHeader.InstrumentIds.Set(instrumentId);
@@ -1149,6 +1163,7 @@ public sealed class ServerContext : Context
         }
 
         PrintSharedArray(_riskLimits, "RiskLimits [instrumentId]");
+        PrintSharedArray(_workingRisks, "WorkingRisks [instrumentId]");
         PrintSharedArray(_serverPositionHeaders, "ServerPositionHeaders [instrumentId]");
 
         Console.WriteLine();
@@ -1173,7 +1188,7 @@ public sealed class ServerContext : Context
             OrderRisk orderRisk = riskEntry.GetReadonlyRef();
             Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} target seq={targetEntry.GetSeq()} {targetEntry.GetReadonlyRef()}");
             Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} state  seq={stateEntry.GetSeq()} {stateEntry.GetReadonlyRef()}");
-            Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} risk   seq={riskEntry.GetSeq()} absWorstOrderQuantity={orderRisk.GetAbsWorstOrderQuantity(0)}");
+            Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} risk   seq={riskEntry.GetSeq()} absWorstOrderQuantity={orderRisk.GetAbsWorstOrderQuantity()}");
         }
 
         PrintSharedArray(_marketsByPrice, "MarketsByPrice [instrumentId]");

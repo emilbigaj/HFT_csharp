@@ -93,6 +93,7 @@
 					</DataGridTemplateColumn.CellTemplate>
 				</DataGridTemplateColumn>
 				<DataGridTextColumn Header="QuantityTraded" Binding="{Binding QuantityTraded, StringFormat={}{0:N0}}" Width="Auto"/>
+				<DataGridTextColumn Header="ProfitPerSide" Binding="{Binding ProfitPerSide, StringFormat={}{0:N2}}" Width="Auto"/>
 			</DataGrid.Columns>
 		</DataGrid>
 	</Grid>

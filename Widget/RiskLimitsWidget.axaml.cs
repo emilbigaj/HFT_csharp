@@ -26,6 +26,7 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
 
     private readonly Instrument _instrument;
     private RiskLimit _riskLimit;
+    private WorkingRisk _workingRisk;
     private int _positionQuantity;
 
     public string Symbol => _instrument.Symbol;
@@ -37,18 +38,19 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
     public int MaxOrderQuantity => _riskLimit.MaxOrderQuantity;
     public int MaxPositionQuantity => _riskLimit.MaxPositionQuantity;
 
-    public int LongQuantityAllowance => _riskLimit.GetLongQuantityAllowance(_positionQuantity);
-    public int ShortQuantityAllowance => _riskLimit.GetShortQuantityAllowance(_positionQuantity);
+    public int LongQuantityAllowance => _riskLimit.GetLongQuantityAllowance(in _workingRisk);
+    public int ShortQuantityAllowance => _riskLimit.GetShortQuantityAllowance(in _workingRisk);
 
-    public int WorstLongWorkingQuantity => _riskLimit.WorstLongWorkingQuantity;
-    public int WorstShortWorkingQuantity => _riskLimit.WorstShortWorkingQuantity;
+    public int WorstLongWorkingQuantity => _workingRisk.WorstLongWorkingQuantity;
+    public int WorstShortWorkingQuantity => _workingRisk.WorstShortWorkingQuantity;
 
     public string Timestamp => _riskLimit.Timestamp == Tools.Timestamp.MinValue ? "—" : _riskLimit.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
 
-    public WidgetRiskLimit(Instrument instrument, int positionQuantity, RiskLimit riskLimit)
+    public WidgetRiskLimit(Instrument instrument, int positionQuantity, RiskLimit riskLimit, WorkingRisk workingRisk)
     {
         _instrument = instrument;
         _riskLimit = riskLimit;
+        _workingRisk = workingRisk;
         _positionQuantity = positionQuantity;
     }
 
@@ -56,13 +58,15 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
     /// Pull current values from shared memory + position.
     /// Returns true if anything changed and bindings should be re-evaluated.
     /// </summary>
-    public bool Refresh(in RiskLimit newRiskLimit, int newPositionQuantity)
+    public bool Refresh(in RiskLimit newRiskLimit, in WorkingRisk newWorkingRisk, int newPositionQuantity)
     {
         bool changed =
             !RiskLimitEquals(_riskLimit, newRiskLimit) ||
+            !WorkingRiskEquals(_workingRisk, newWorkingRisk) ||
             _positionQuantity != newPositionQuantity;
 
         _riskLimit = newRiskLimit;
+        _workingRisk = newWorkingRisk;
         _positionQuantity = newPositionQuantity;
 
         if (changed)
@@ -78,7 +82,12 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
     {
         return a.MaxOrderQuantity == b.MaxOrderQuantity
             && a.MaxPositionQuantity == b.MaxPositionQuantity
-            && a.Timestamp == b.Timestamp
+            && a.Timestamp == b.Timestamp;
+    }
+
+    private static bool WorkingRiskEquals(in WorkingRisk a, in WorkingRisk b)
+    {
+        return a.Position == b.Position
             && a.WorstLongWorkingQuantity == b.WorstLongWorkingQuantity
             && a.WorstShortWorkingQuantity == b.WorstShortWorkingQuantity;
     }
@@ -154,6 +163,8 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
     // Both read the server row, never Primary: limits are server-wide and RiskLayer gates them on the server position.
     private static RiskLimit GetRiskLimit(int instrumentId) => ContextManager.ServerContext.GetRiskLimit(instrumentId).Read();
 
+    private static WorkingRisk GetWorkingRisk(int instrumentId) => ContextManager.ServerContext.GetWorkingRisk(instrumentId).Read();
+
     private static int GetPositionQuantity(int instrumentId) => ContextManager.ServerContext.GetPosition(instrumentId).Profit.Quantity;
 
     private void OnRefresh(object? sender, ElapsedEventArgs e)
@@ -174,7 +185,8 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
                         Instrument instrument = _context.Primary.GetInstrument(instrumentId);
                         int positionQuantity = GetPositionQuantity(instrumentId);
                         RiskLimit riskLimit = GetRiskLimit(instrumentId);
-                        _rowsByInstrumentId[instrumentId] = new WidgetRiskLimit(instrument, positionQuantity, riskLimit);
+                        WorkingRisk workingRisk = GetWorkingRisk(instrumentId);
+                        _rowsByInstrumentId[instrumentId] = new WidgetRiskLimit(instrument, positionQuantity, riskLimit, workingRisk);
                     }
                     catch
                     {
@@ -194,8 +206,9 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
                 try
                 {
                     RiskLimit current = GetRiskLimit(instrumentId);
+                    WorkingRisk workingRisk = GetWorkingRisk(instrumentId);
                     int positionQty = GetPositionQuantity(instrumentId);
-                    row.Refresh(in current, positionQty);
+                    row.Refresh(in current, in workingRisk, positionQty);
                 }
                 catch
                 {

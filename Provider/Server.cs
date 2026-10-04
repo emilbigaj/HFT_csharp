@@ -183,6 +183,7 @@ public class Server : IDisposable
     // for THIS segment apply on the same thread — every row the segment owns has exactly one writer.
     // One reader thread per (client, channel) => SPSC-safe; different segments touch different
     // ReadOnlySockets. It also drains the injection queue first (off-thread cancels).
+    // Realtime: the caller wraps this in try/catch -> AlertManager.OnException (as Scenario's ReadSocket loop); simulation: the Clock's exceptions go to the AlertManager.
     public void ReadExecution(int coreGroupId)
     {
         // Drain injected OrderTargets first (off-thread cancels): sole reader, no lock. Copy out and
@@ -218,7 +219,9 @@ public class Server : IDisposable
                     case (byte)OrderType.OrderRejected:
                     {
                         ref readonly OrderRejected orderRejected = ref MemoryMarshal.AsRef<OrderRejected>(rdst);
-                        OnControlAlgoStatus(orderRejected.OrderHeader.OrderId.StrategyId, orderRejected.OrderHeader.OrderId.InstrumentId, AlgoStatus.Paused);
+                        // A manual order is not the algo's: its refusal never pauses the strategy it books to (see Spec.md).
+                        if (orderRejected.OrderHeader.OrderId.IsAlgoOrder())
+                            OnControlAlgoStatus(orderRejected.OrderHeader.OrderId.StrategyId, orderRejected.OrderHeader.OrderId.InstrumentId, AlgoStatus.Paused);
                         break;
                     }
                     case (byte)ControlType.RiskLimit:
@@ -240,6 +243,7 @@ public class Server : IDisposable
         }
     }
 
+    // Realtime: the caller wraps this in try/catch -> AlertManager.OnException (as Scenario's ReadSocket loop); simulation: the Clock's exceptions go to the AlertManager.
     public void ReadAdmin()
     {
         foreach (int clientId in _serverSocket.ClientIds())
@@ -266,7 +270,7 @@ public class Server : IDisposable
     }
 
     // CoreGroup thread only — the row's sole writer. Config fields in place under the seq bump; the
-    // working quantities are never touched, so an edit cannot rewind a reservation (see Spec.md).
+    // working quantities live on WorkingRisk, so an edit cannot rewind a reservation (see Spec.md).
     public void OnControlRiskLimit(in ControlRiskLimit controlRiskLimit)
     {
         ref SharedArrayEntry<RiskLimit> riskLimitEntry = ref _serverContext.GetRiskLimit(controlRiskLimit.InstrumentId);
@@ -330,13 +334,14 @@ public class Server : IDisposable
         _serverContext.OnInstrumentHeader(in instrumentHeader128);
     }
 
-    public void OnQuantityAhead(OrderId clientOrderId, int quantityAhead)
+    public void OnQuantityAhead(OrderId clientOrderId, int quantityAhead, int quantityBehind)
     {
         ref OrderState orderState = ref _serverContext.GetOrderState(clientOrderId).GetRef();
         if (orderState.OrderHeader.OrderId == clientOrderId)
         {
-            // Quick write, its atomic, do not lock, it would contend with OnOrderState
-            orderState.QuantityAhead = quantityAhead;
+            // One 64-bit store, no lock (it would contend with OnOrderState): QuantityAhead @56 and QuantityBehind @60 are
+            // adjacent and 8-aligned, so a reader never sees one updated without the other. Keep the two fields together.
+            Unsafe.As<int, long>(ref orderState.QuantityAhead) = (uint)quantityAhead | ((long)quantityBehind << 32);
         }
     }
 
@@ -362,7 +367,6 @@ public class Server : IDisposable
 
         if (isSafeToOverwrite)
         {
-            int beforeAckedOrderQuantity = existingOrderState.OrderProfile.Quantity;
             int quantityFilled = Math.Abs(existingOrderState.QuantityFilled) > Math.Abs(orderState.QuantityFilled) ? existingOrderState.QuantityFilled : orderState.QuantityFilled;
             orderStateEntry.AcquireLock();
             existingOrderState.OrderHeader.Seq = orderState.OrderHeader.Seq;
@@ -374,7 +378,7 @@ public class Server : IDisposable
             existingOrderState.OrderHeader.ExchangeTimestamp = orderState.OrderHeader.ExchangeTimestamp;
             existingOrderState.OrderHeader.NicTimestamp = orderState.OrderHeader.NicTimestamp;
             orderStateEntry.ReleaseLock();
-            _riskLayer.OnOrderState(in existingOrderState, beforeAckedOrderQuantity);
+            _riskLayer.OnOrderState(in existingOrderState);
         }
         return ref existingOrderState;
     }
@@ -404,7 +408,9 @@ public class Server : IDisposable
         WriteToExecution(in orderRejected.OrderHeader, in orderRejected);
         if (Client.IsDiscarded(in orderRejected))
             return;
-        OnControlAlgoStatus(orderRejected.OrderHeader.OrderId.StrategyId, orderRejected.OrderHeader.OrderId.InstrumentId, AlgoStatus.Paused);
+        // A manual order is not the algo's: its refusal is reported but never pauses the strategy it books to (see Spec.md).
+        if (orderRejected.OrderHeader.OrderId.IsAlgoOrder())
+            OnControlAlgoStatus(orderRejected.OrderHeader.OrderId.StrategyId, orderRejected.OrderHeader.OrderId.InstrumentId, AlgoStatus.Paused);
         OrderRejected?.Invoke(orderRejected, message);
     }
 
@@ -542,6 +548,10 @@ public class Server : IDisposable
         if (existingOrderState.OrderHeader.OrderId != orderState.OrderHeader.OrderId)
             throw new ArgumentOutOfRangeException(nameof(orderState), "Server.OnFill: unknown clientOrderId");
 
+        // A resent fill (iLink PossRetransFlag) repeats a cumulative filled quantity the row already holds: drop it whole (see Spec.md).
+        if (Math.Abs(orderState.QuantityFilled) <= Math.Abs(existingOrderState.QuantityFilled))
+            return;
+
         Timestamp now = Clock.Now;
         orderState.OrderHeader.NicTimestamp = now;   // same stamp as its fills: equal NIC keeps ring order (state, fill, position) in the audit
         foreach (ref Fill fill in fills)
@@ -578,11 +588,7 @@ public class Server : IDisposable
             Instrument instrument = _serverContext.GetInstrument(instrumentId);
             _serverContext.GetPositionHeader(instrumentId).GetRef().OnFill(in fill, instrument.Multiplier);
             _serverContext.GetPositionHeader(strategyId, instrumentId).GetRef().OnFill(in fill, instrument.Multiplier);
-            // A legged instrument's own fill is accounting only (volume/position view on the spread
-            // row); risk lives on the legs, so releasing it here would double-release the legs the
-            // leg fills already covered. Risk is an outright concept.
-            if (!instrument.IsLegged)
-                _riskLayer.OnFill(in fill);
+            _riskLayer.OnFill(in fill);
         }
 
         for (int i = fills.Length - 1; i >= 0; i--)

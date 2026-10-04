@@ -175,11 +175,17 @@ public class TickHistoryWriter : IDisposable
     private TickHistoryHeader _today = default;
     public long Count { get; private set; } = 0;
 
+    // One past the highest Add PriorityId written; each day header carries it as its base, so the footer seeds the next id to issue (see Spec.md).
+    private ulong _nextPriorityId = 0;
+
+    // Cancelled on Dispose: left registered, the exit queue keeps every writer ever opened (and its book) alive for the life of the process.
+    private readonly Application.ExitAction _exitAction;
+
     public TickHistoryWriter(TickHistory tickHistory)
     {
         TickHistory = tickHistory;
         _ = tickHistory.Compressor; // init compressor
-        Application.AddExitAction($"Dispose {this}", Dispose);
+        _exitAction = Application.AddExitAction($"Dispose {this}", Dispose);
         Directory.CreateDirectory(Path.GetDirectoryName(tickHistory.FilePath)!);
         _fileStream = new FileStream(tickHistory.FilePath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, 4096, FileOptions.SequentialScan);
         SetHeaders();
@@ -190,6 +196,7 @@ public class TickHistoryWriter : IDisposable
         if (_fileStream.Length > 0)
         {
             TickHistory.Navigate(_fileStream, ref _tomorrow, Timestamp.MaxValue);
+            _nextPriorityId = _tomorrow.PriorityId;   // the footer carries the next id to issue
             if (TickHistory.TickType == TickType.MarketByPrice)
             {
                 LimitedStream limitedStream = new LimitedStream(_fileStream, _fileStream.Length - _fileStream.Position);
@@ -285,6 +292,10 @@ public class TickHistoryWriter : IDisposable
 
         _mbob.Apply(copy);
 
+        // Before the ids become deltas: only an Add issues an id; trades (id 0) and removals of older orders never lower it.
+        foreach (Order order in mbo.BidsAsSpan(copy)) if (order.OrderAction == MarketByOrderAction.Add) _nextPriorityId = Math.Max(_nextPriorityId, order.PriorityId + 1);
+        foreach (Order order in mbo.AsksAsSpan(copy)) if (order.OrderAction == MarketByOrderAction.Add) _nextPriorityId = Math.Max(_nextPriorityId, order.PriorityId + 1);
+
         TickHistory.DeltaMarketByOrder(ref _tomorrow, copy);
         _compressionStream.Write(copy);
         _byteArrayPool.Return(rented);
@@ -360,6 +371,7 @@ public class TickHistoryWriter : IDisposable
         _tomorrow.Position = _fileStream.Position;
         _tomorrow.PositionOfYesterday = _today.Position;
         _tomorrow.PositionOfTomorrow = -1;
+        _tomorrow.PriorityId = _nextPriorityId;   // the day's delta base: the reader decodes from the header, so the writer may pick it
         TickHistory.WriteHeader(_fileStream, in _tomorrow);
 
         _today = _tomorrow;
@@ -377,6 +389,7 @@ public class TickHistoryWriter : IDisposable
             if (!_isDisposed)
             {
                 _isDisposed = true;
+                _exitAction.Cancel();
                 bool deleteFile = _fileStream.Length == 0;
 
                 if (Count > 0)

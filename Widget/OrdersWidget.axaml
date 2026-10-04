@@ -55,6 +55,7 @@
                 <DataGridTextColumn Header="StateTicks" Binding="{Binding StateTicks}" IsVisible="False" Width="Auto"/>
 				<DataGridTextColumn Header="StateQuantity" Binding="{Binding StateQuantity}" Width="Auto"/>
 				<DataGridTextColumn Header="StateQuantityAhead" Binding="{Binding StateQuantityAhead}" Width="Auto"/>
+				<DataGridTextColumn Header="StateQuantityBehind" Binding="{Binding StateQuantityBehind}" Width="Auto"/>
                 <DataGridTextColumn Header="StateFilled" Binding="{Binding StateFilled}" Width="Auto"/>
                 <DataGridTextColumn Header="StateWorking" Binding="{Binding StateWorking}" Width="Auto"/>
 

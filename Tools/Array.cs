@@ -72,6 +72,14 @@ public struct Array16<T> where T : struct
 }
 
 [JsonConverter(typeof(InlineArrayConverterFactory))]
+[InlineArray(29)]
+public struct Array29<T> where T : struct
+{
+    public const int Length = 29;
+    private T _element0;
+}
+
+[JsonConverter(typeof(InlineArrayConverterFactory))]
 [InlineArray(30)]
 public struct Array30<T> where T : struct
 {

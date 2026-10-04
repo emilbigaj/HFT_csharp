@@ -250,9 +250,13 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
                         cancelItem.Click += (_, _) => PerformCancel(clickedOrderId, orderState);
                         menu.Items.Add(cancelItem);
 
-                        MenuItem amendItem = new MenuItem { Header = "Amend Order", Icon = new TextBlock { Text = "📝" } };
-                        amendItem.Click += (_, _) => PerformAmend(clickedOrderId);
-                        menu.Items.Add(amendItem);
+                        // The algo owns its orders' targets; the GUI may only cancel them.
+                        if (!orderState.OrderHeader.OrderId.IsAlgoOrder())
+                        {
+                            MenuItem amendItem = new MenuItem { Header = "Amend Order", Icon = new TextBlock { Text = "📝" } };
+                            amendItem.Click += (_, _) => PerformAmend(clickedOrderId);
+                            menu.Items.Add(amendItem);
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -274,7 +278,6 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
             OrderProfile = state.OrderProfile,
             OrderTargetAction = OrderTargetAction.Cancel,
         };
-        target.OrderHeader.Seq = state.OrderHeader.Seq + 1_000_000;
         _context.Manual.OnOrderTarget(ref target);
     }
 

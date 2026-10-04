@@ -4,6 +4,424 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-04 — risk layer runs on every client; RiskLimit split into config + WorkingRisk; Reduce/Replace
+
+All 2026-10-04 entries are one uncommitted piece of work. They change the wire and the shared-memory
+array ids, so the server, every client, the GUI, the LoggingServer and the C++ side must all be
+rebuilt together. cpp_alignment.md has the C++ handoff.
+
+- `Execution/Order.cs` — **WIRE CHANGE:** `RiskLimit` 32 → 24 bytes and is config only: `Header` @0,
+  `InstrumentId` @4, `Timestamp` @8, `MaxOrderQuantity` @16, `MaxPositionQuantity` @20.
+  `WorstLong/ShortWorkingQuantity` are gone from it. `GetLong/ShortQuantityAllowance` now take
+  `in WorkingRisk` instead of a position. The `.risklimit` JSON lines lose the two Worst* properties.
+  Older lines that carry them still parse, because unknown members are skipped. Any audit reader keyed
+  on the record size must use 24.
+- `Execution/Order.cs` — **WIRE CHANGE:** new `OrderType.WorkingRisk = 17` and new 16-byte row
+  `WorkingRisk`: `Header<OrderType>` @0, `int Position` @4, `int WorstLongWorkingQuantity` @8 (>= 0),
+  `int WorstShortWorkingQuantity` @12 (<= 0). It holds what one RiskLayer has applied for an
+  instrument: fills and worst-case working reservations. Never persisted. It carries its own
+  `Position`, copied from the position row at allocation and moved by `RiskLayer.OnFill`, so position
+  and reservations change in one row together with the order event that caused them. With two sources
+  they would be out of step between a Fill and its OrderState.
+- `Execution/Order.cs` — **WIRE CHANGE (shared memory):** `OrderRisk` stays 64 bytes but now stores
+  the acked quantity: `ushort count` @0, `ushort worst in flight` @2, **new** `ushort
+  _absAckedOrderQuantity` @4, `Array29<ushort>` @6..63. `MaxActiveTargets` 30 → 29, so `TryAdd` refuses
+  the 30th in-flight target (`TooManyActiveTargets`, still discarded). `GetAbsWorstOrderQuantity()`
+  takes no argument and returns max(acked, worst in flight). `Ack(q)` removes the entry, then records
+  |q| as acked. `Reject(q)` only removes. New `IsFull` (29 in flight). Each RiskLayer copy is now
+  self-contained: worst comes from the acks it applied itself, not from the shared OrderState row,
+  which a client sees at a different time and which may still hold the slot's previous order.
+  `Tools/Array.cs` gains `Array29<T>`. `Array30<T>` has no users left.
+- `Execution/Order.cs` — **WIRE CHANGE:** `OrderTargetAction.Amend` renamed `Replace` (same value 1),
+  new `Reduce = 3`. A Reduce is less quantity at the same price: it keeps queue priority and never adds
+  risk. New `OrderProfile.IsReduceOf(in other)`: same `Ticks`, same `Sign`, strictly smaller |Quantity|.
+  Every check that applied to Amend now applies to both Replace and Reduce (`isReduceOrReplace` in
+  `ValidateOrder`). The JSON enum name changes from "Amend" to "Replace". The simulator and
+  `Server.cs` compare only to Create/Cancel, so values 1 and 3 both take the amend path there.
+- `Provider/Context.cs` — **WIRE CHANGE (array ids):** new per-context shared array
+  `<directoryPath>/WorkingRisks`, one row per instrument id. It is created last among the base arrays,
+  right after `LocalPositionHeaders`, and takes array id 15. The server-only `ServerPositionHeaders`
+  moves from id 15 to **16**. Ids 0..14 are unchanged. The TCP mirror writes by array id, so a mixed
+  old/new build breaks it. Old → new is silent: the old peer's position rows under id 15 land,
+  truncated, in WorkingRisks. New → old throws on a C# receiver: a 16-byte WorkingRisk row is too short
+  for the old `PositionHeader` array, and id 16 does not exist there. A C++ receiver without those
+  checks corrupts memory (cpp_alignment.md §1.10). `OrderRisks` (id 12) is
+  now keyed per context directory too (it was `serverName`): the server's covers every order, a
+  client's only its own. New `GetWorkingRisk(instrumentId)`, which returns this context's own row.
+  `GetPositionHeader(clientId, instrumentId)` moved from ServerContext to the base Context (read-only
+  on a client): the client's `RiskLayer.ValidateOrder` reads it for the AlgoIsPaused check. `ServerContext.AllocateInstrument` writes
+  `WorkingRisk { Position = server-wide position }` and no longer zeroes the removed RiskLimit fields.
+  `PrintDebug` dumps WorkingRisks.
+- `Provider/RiskLayer.cs` — built on the base `Context`. The same code runs on the server
+  (`ServerContext`, source Server) and on every client (`ClientContext`, source Client), and the
+  server-only early returns in the hooks are gone. The worst-case aggregates are written to each leg's
+  `WorkingRisk` row with a seq bump (AcquireLock/ReleaseLock). Before, they went to RiskLimit by plain
+  ref. The hooks:
+  - `OnOrderState(in state)`: the `beforeAckedOrderQuantity` parameter is gone. On Acked it applies
+    the worst delta around `Ack`. On Done it releases `worst − |QuantityFilled|` and zeroes the row.
+    An ack that rides inside a Fill or Done no longer leaks: its target stays in flight, over-reserving
+    until Done, which then releases exactly what the order holds.
+  - `OnFill(in fill, isReserved = true)`: every fill moves `WorkingRisk.Position`. The release happens
+    only when `isReserved` is true and the instrument is not legged. The IsLegged check moved here
+    from `Server.OnFill`.
+  - `OnOrderRejected`: returns early when the reject came from its own side or the rejected action is
+    a Cancel (a cancel never reserves, and its profile could match an in-flight entry). It no longer
+    reads the OrderState row.
+- `Provider/RiskLayer.cs` — the position check is now pure, check-then-commit. The order is: per-leg
+  `MaxOrderQuantity` on the working quantity, then `IsWithinRiskLimit`, then reset on Create, then
+  `TryAdd`, then apply. Before, it was TryAdd, a tentative per-leg check, and `Reject` to back out.
+  New `GetAbsAllowedOrderQuantity(target, isWithinLimit)`: per leg, the order's worst plus `room / |w|`,
+  minimum over legs. Past the limit it allows the order to keep its worst. Two consequences:
+  - A zero-delta target on an over-limit side now passes. Before, an over-limit long side refused it.
+  - `PositionExceedsRiskLimit` (pauses) is now reported before `TooManyActiveTargets` (discarded).
+  The client's `ValidateOrder` now runs the risk block for its own **algo** orders. Manual orders still
+  return after the header checks, and the rate limit stays server-only. On the server, a Cancel or a
+  **verified** Reduce (`IsReduceOf` the current OrderState profile) is counted with `SendOrder` and
+  never refused. A Reduce behind an unacked Replace fails that test and is throttled like any amend.
+  The unused `Exposure` struct was deleted.
+- `Provider/Client.cs` — `RiskLayer = new RiskLayer(Context, OrderRejectedSource.Client)`, built over
+  the client's own context (it was the server's). The hooks that feed this copy:
+  - `OnOrderState` calls it once per real risk event: a Done, or an Acked with a seq above
+    `_ackedSeqs[slot]`, for active algo orders only. It runs before the Done/Free handling.
+    `_ackedSeqs[64]` is reset in `Create`. This gate stops an echoed Done or ack from releasing twice.
+  - `OnFill` calls `RiskLayer.OnFill(fill, fill.ClientId == own)`. A manual (GUI) order booked to the
+    strategy moves the position but releases nothing.
+  - `OnOrderRejected` releases for the slot's current algo order **before** the IsDiscarded check, so
+    discarded rejects still release.
+  - `OnInstrumentAllocated` writes `WorkingRisk { Position = this strategy's own position row }` on
+    every process start.
+  By timing, the client is never looser than the server for this strategy's own orders: it counts its
+  own sends before the server reads them, and it learns of reductions (acks, Dones, server or exchange
+  rejects) after the server. It does not see other strategies, manual orders booked to the strategy,
+  the house book or the server rate limit, so "never looser" holds exactly when this strategy's own
+  orders are all that is on the instrument (Spec.md "The client copy is never looser than the server —
+  and where it can be").
+- `Provider/Position.cs` — `Target(Ticks, WorkingQuantity, TimeInForce = Day)`.
+  `ActiveTarget(..., QuantityAhead, QuantityBehind, QuantityFilled, ...)`: the positional order
+  changed. `ActiveTargetsEnumerator` changes:
+  - IOCs are never active targets. They never rest, and they stay reserved until Done.
+  - An order whose cancel has been sent is hidden even before the server has read its Create. Until
+    the state row belongs to this order, the cancel test uses filled = 0, because the row still holds
+    the slot's previous order.
+  - `IsPendingBuyCancel` / `IsPendingSellCancel` are removed. A cancel-pending order stays reserved in
+    the client's WorkingRisk until its Done.
+  - Only an explicit `Reduce` one seq ahead of the state keeps the confirmed queue position. Before, it
+    was inferred from |target| <= |state|, which ignored price.
+  - An unconfirmed order reports the client book's quantity at its price as `QuantityAhead` (and 0
+    behind) instead of `int.MaxValue`.
+  - Ahead/behind are read with one 64-bit load, matching `Server.OnQuantityAhead`'s single store
+    (2026-09-26).
+- Evidence (C# harness in the scratchpad, not in the repo): layout test PASS for RiskLimit 24,
+  WorkingRisk 16 (offsets 4/8/12) and OrderRisk 64. For OrderRisk the check is: after TryAdd 7,
+  TryAdd −9, Ack 7, the u16s are count 1, worst 9, acked 7, entry 9, and worst = 9. The sweep and
+  scripted results are under the robustness entry below.
+
+## 2026-10-04 — Algo: strict Target and best-effort TryTarget
+
+- `Strategy/Algo.cs` — the single public `Target` is split into two entry points over one private
+  `Target(ref targets, bool isBestEffort)`. Entry sets `_isBestEffort` and `_isTargetAchieved = true`.
+  - `Target(ref targets)` (void), **strict**: sends exactly what was asked. `Send` skips the
+    session/slot/risk checks. Anything the client, server or exchange refuses for a non-discarded
+    reason comes back as a reject and pauses the algo, so a strategy bug fails loudly. The self-cross guard still applies.
+  - `TryTarget(ref targets)` → bool, **best effort**: never sends anything it can see would be
+    refused. While `TradingStatus` is not Open it sends nothing at all, cancels included. A Create needs
+    `Client.HasFreeOrderSlot` (new). Every non-cancel goes through `RiskLayer.TryClipToRiskLimit`. It
+    returns false when any target was not sent exactly as asked (dropped or clipped), or when the algo
+    is paused. Policy drops under `IsOneOrderPerPrice` do not count as misses. The server rate limit
+    (`TooManyOrdersPerSecond`, discarded) is invisible to it, which is accepted.
+- `Provider/RiskLayer.cs` — new `TryClipToRiskLimit(ref target)`, used only by TryTarget. It lowers a
+  create or amend to the largest quantity within every limit:
+  - position room with `isWithinLimit: true`;
+  - 65535;
+  - per leg `MaxOrderQuantity / |w|` plus filled.
+  It returns false when that size is <= filled, or for an amend whose OrderRisk `IsFull`. It is
+  idempotent, so the Algo clips in Phase 2 and again in Send.
+- `Strategy/Algo.cs` — `Send` and `CancelAllOrders` became private. `NewAmend` labels a non-cancel
+  amend `Reduce` when `IsReduceOf` the active's profile, otherwise `Replace`. `NewAmend` and `NewOrder`
+  both copy `TimeInForce` onto the OrderTarget.
+- Phase order within one call: Phase 1 reduces, Phase 2 passive reprices, Phase 5 cancels, Phase 7
+  creates, Phase 6 delayed orders, then the **new Phase 8**, which sends every IOC target as a Create.
+  IOCs are not aggregated, not zippered and not clamped. They go last, so this tick's cancels and
+  amends reach the exchange first.
+- No caller uses `TryTarget` yet. Every strategy in the repo still calls strict `Target`
+  (`Proxy/Strategy.cs` and the `Testing/` scenarios).
+
+## 2026-10-04 — Algo fixes from the harness report (B4, B5, B7, B9, B10, B11, B12, B15)
+
+- **B4** `CancelAllOrders` (the paused branch) now builds each cancel as
+  `NewAmend(active, active ticks, 0)`. That is the Phase 5 shape: quantity = working + filled at the
+  active's price (acked, or the in-flight amend's). It sends through `Send`, in the mode of the calling Target. Before, the cancel quantity
+  was the filled quantity, so with nothing filled it had no side. A cancel racing the last fill came
+  back `OrderNotFound|QuantityNotValid|SideNotValid` and re-paused the algo.
+- **B5** TryTarget clips to the largest size **within** the limit. Past the limit (room < 0), the clip
+  cuts by the overshoot rounded up to whole orders per leg (ceil(overshoot / |w|)), instead of letting the
+  order keep its worst. The server accepts a size within the limit whenever the client's room is no
+  larger than the server's. By timing that holds for this strategy's own orders, but not when others
+  use room on the instrument, and the server rate limit or a limit lowered in flight can still refuse
+  it (Spec.md "The position check, and the within-limit clip"). `ValidateOrder` (both sides)
+  is unchanged: past the limit an order may keep its worst, so a cut always passes and strict Target can
+  still keep. Accepted cost: when several orders are cut in one call, each is cut by the whole
+  overshoot.
+- **B7** Phase 2 reprices the **largest** active at one price first (new
+  `GetLargestActiveKeyIndexAtPrice`; ties go to the earliest in sort order). Across prices it keeps
+  price order. A reprice forfeits the old queue anyway, and the largest active carries the most within
+  its own reservation. Example (F9/F10): limit 12, a 1-lot ahead of a 10-lot, target 11 at a new
+  price. The Algo now Replaces the 10 to 11 and cancels the 1. Before, it moved the 1-lot, which the
+  clip let grow only to 2 because the 10-lot still held its reservation. With `IsOneOrderPerPrice`
+  false, the remaining 9 went to the 10-lot, repriced to 9 as a second order at the new price; with it
+  true, the 10 was cancelled and the level fell from 11 to 2. Related changes:
+  - The delayed buffer grew to targets + actives.
+  - A target can now consume several actives, with remainder tracking when `IsOneOrderPerPrice` is
+    false.
+  - In best effort, an active that nothing fits is left for the Phase 5 cancel. The target then tries
+    the next same-side active before it becomes a Phase 7 Create.
+- **B9** see `ActiveTargetsEnumerator` in the first entry: an order whose cancel has been sent is hidden
+  before its Create is read. The Phase 5/7 per-side cancel lock (`_isPendingBuyCancel` /
+  `_isPendingSellCancel`) is deleted. The client's RiskLayer copy now enforces capacity exactly,
+  counting a cancel-pending order until its Done. This also closes the old known limit: an amend-up
+  while another order's cancel was pending used to be double-counted at the server.
+  Behaviour change for strict Target, which every current caller uses: a same-side Create sent while a
+  cancel is pending used to be withheld by the Phase 7 lock, so the strategy waited a tick. It is now
+  sent. The client's own `ValidateOrder` (new for algo orders, see the first entry) counts the
+  cancel-pending order's reservation until its Done, so it refuses the Create with
+  `PositionExceedsRiskLimit` when that leaves no room. The same applies to an amend-up, and to any
+  other refusal by the client copy, which counts sends earlier and releases later than the server.
+  That reject has source Client and is not discarded: `Client.Reject` writes it to the server on the
+  CoreGroup channel, and `Server.ReadExecution` pauses the algo. TryTarget clips or drops the order
+  instead.
+- **B10** With 29 targets in flight on an order (an unacked Create counts), `TryClipToRiskLimit`
+  returns false for an amend. For a Phase 2 reprice, TryTarget leaves the order for the Phase 5 cancel,
+  and the target tries the next unmatched same-side active. With none left it becomes a Phase 7
+  Create, which `Send` clips or drops. For a Phase 1 reduce, the order is cancelled in Phase 1 instead,
+  the target is not placed in that call, and TryTarget returns false. Strict Target is unchanged: the
+  30th amend is refused and discarded silently. The user's decision: it must never pause on this.
+- **B11** In best effort, a Phase 1 reduce that nothing workable fits becomes a cancel, so a level never
+  stays above its target. A reduce that is cut further, or turned into a cancel, marks the call missed.
+- **B12** `Target` reads and clears `_hasSnapshot` at entry, before the paused return and before any
+  validation throw, so a stale snapshot is never zippered by a later call.
+- **B15** Validation is now one pass over the targets. It drops zero quantities, moves IOC targets to a
+  separate list and compacts Day targets in place. Any other `TimeInForce` throws
+  `NotImplementedException` before anything is sent. The self-cross bounds cover Day and IOC targets
+  together. The protected `ThrowIfSelfCrossingTargets(ref targets)` is deleted. It classified a
+  zero-quantity target as a sell, which could raise a false self-cross. The caller's StackList is
+  mutated: zeros and IOCs are removed.
+
+## 2026-10-04 — server/client robustness: restart refusal, manual rejects, spread shape, seq numbering, duplicate fills, read-loop guard
+
+- **B2** `Provider/Client.cs` — `OnInstrumentAllocated` → `ThrowIfPreviousOrdersActive` scans this
+  client's 64 slots. It throws `InvalidOperationException` while any slot still holds an **Active**
+  order on the instrument from a previous process. That happens when a restart beats the server's
+  cancel-on-close round trip, during an iLink outage, or in a no-cancel phase. For slots whose last
+  order on the instrument is Done, it zeroes the client's OrderRisk row, so the new process inherits
+  nothing. Then it rewrites WorkingRisk with zero reservations, which is exact because nothing is
+  Active.
+  Accepted residuals:
+  - A fill landing between socket connect and the check could be counted twice.
+  - The check reads only the OrderState row, so a previous process's Create the server has not read
+    yet is not seen.
+  - It also runs for the ManualClient: a GUI restarted before the server cancels its manual orders
+    throws.
+  - Because ManualClient never opens an instrument data socket (`OpenInstrumentDataSocket` is a
+    no-op), `GetInstrument` re-runs `OnInstrumentAllocated` on every allocate request. A GUI that
+    re-allocates an instrument while one of its own manual orders is live there throws
+    `InvalidOperationException`, which is reported to the AlertManager. PositionsWidget and
+    RiskLimitsWidget guard with `Context.InstrumentIds`; the InstrumentHeadersWidget allocate menu does
+    not. C#-only.
+- **B6** `Provider/Server.cs` — a manual order's reject never pauses the algo it books to. Both pause
+  sites now gate the pause on `OrderId.IsAlgoOrder()` (ClientId == StrategyId):
+  - `Server.Reject` (a server or exchange refusal) always forwards the reject, returns if it is
+    discarded, pauses only an algo order, then raises `OrderRejected`, for manual orders too.
+  - The `ReadExecution` OrderRejected case (a reject a client wrote to the server) only pauses an algo
+    order. It forwards and raises nothing: the client already raised it in `Client.Reject`, which
+    writes only non-discarded rejects.
+  The other half of B6 is accepted: manual orders can use room the algo's client copy cannot
+  see, so the algo may be refused and paused. That is the user's responsibility.
+- **B8** `Provider/Client.cs` — `GetInstrument` throws `NotImplementedException` for any spread that is
+  not a two-leg +1/−1 calendar (`LegCount == 2 && |w0| == 1 && w0 == −w1`). It throws before onboarding
+  legs or sending the allocate request, because `Spread` builds its risk legs as +1/−1 and would
+  mis-risk a butterfly. The check was first put in `Context.CreateInstrument`, but that runs on the
+  server's admin thread, and the unhandled exception killed the whole server process. The server does
+  not check, so a C++ client must mirror the check. Only the comment in `Context.CreateInstrument`
+  changed.
+- **B13** `Provider/Client.cs` — `ManualClient.Amend` owns seq numbering:
+  - A cancel of an algo order is numbered existing target seq + 1,000,000, as `Server.CancelAllOrders`
+    does, so it never collides with a racing algo amend.
+  - A manual order's amend is existing seq + 1.
+  - The caller's seq wins only if it is larger.
+  The four widget-side offsets are removed: cancels at +1,000,000 (Ladder), +10,000 + age in seconds
+  (Orders) and +1000 (SendOrder), and SendOrder's amend +1. `ManualClient.Amend` throws `InvalidOperationException` for any non-cancel
+  on an algo order, so an algo's orders are cancel-only from the GUI.
+- **B13** `Simulator/ServerSimulator.cs` — a refused target changes nothing. The reasons
+  (SeqOutOfOrder, NotInSession, StrategyIdNotValid, InstrumentIdNotValid) are evaluated before the
+  cancel path, and the order's Seq is overwritten only after those checks pass. Before, a stale target
+  rewound the seq, and a refused cancel deleted the order **and** was rejected. TargetIsActive and
+  SideNotValid still run after the seq assignment, so such a refused amend still advances the
+  simulator's stored Seq (the order itself is unchanged).
+- **Duplicate fill drop** `Provider/Server.cs` — `OnFill` drops a fill event whole when
+  |QuantityFilled| does not exceed the order row's, treating it as an iLink resend (PossRetransFlag).
+  The drop happens before stamping, locks, position, risk, forwarding and audit, and is not counted or
+  logged. Before, a resent fill moved both position rows and released risk a second time.
+  - The rule rests on two assumptions, which still need CME's confirmation: the session delivers an
+    order's fills in order, and the adapter always sets the cumulative quantity (CumQty).
+  - If either assumption fails, the fallback is a recent-set keyed by FillId (ExecID).
+  - Also in `OnFill`, `_riskLayer.OnFill` is now called for every fill, legged instruments included, so
+    the spread row's `WorkingRisk.Position` moves. Only the release is skipped for legged instruments.
+- `Provider/Server.cs` — `WriteOrderState` no longer captures the pre-write acked quantity. It calls
+  `_riskLayer.OnOrderState(in row)`. The `OnControlRiskLimit` comment now says the working quantities
+  live on WorkingRisk.
+- **Read-loop guard** — `Server.ReadAdmin` and `ReadExecution` document their contract: in realtime
+  the caller wraps each call in try/catch → `AlertManager.OnException`, as Scenario's `ReadSocket`
+  loop does. In simulation, the Clock's exceptions go to the AlertManager. `ServerSimulator.Init`'s
+  pre-clock admin loop now wraps `ReadAdmin` and reports through the new `Clock.OnException`
+  (`Tools/Clock.cs`), so a failed allocation is alerted instead of the process exiting. Nothing in the
+  harness makes allocation throw any more, so the guard itself was not exercised.
+- `Simulator/ServerSimulator.cs` — IOCs:
+  - The Create's simulator state copies `TimeInForce`. Before, every order defaulted to Day, so an IOC
+    rested.
+  - A marketable order or an IOC publishes queue position 0/0 through `OnQueuePosition`, replacing
+    the direct write of 0 to the copy. That direct write left the server at its PendingNew seed.
+  - An IOC is acked, takes what it can if marketable, and the remainder is `Eliminated` (Done) at once.
+- Open with CME, pending the user's call:
+  - Can the session deliver a rejected new order without a terminal state? A proposal is on hold to
+    move `ServerSimulator.OnExchangeOrderRejected`'s Done/Rejected synthesis into
+    `Server.OnOrderRejected`.
+  - The duplicate-fill assumptions above.
+  - That an amend is never acked only inside a fill.
+- Declined or accepted, not fixed:
+  - Session-close race: orders in flight get `NotInSession` and pause even under TryTarget (G1b/G8).
+  - B16: a limit lowered between the client's check and the server's read pauses the algo.
+  - Near-vs-far room priority: Phase 7 creates go before delayed aggressive reprices.
+  - The multi-order over-cut from B5.
+- Evidence (C# harness in the scratchpad):
+  - Final 137-job sweep: **137/137 PASS**, 0 invariant failures. Known findings appear only in the 8
+    manual-order jobs, which is accepted behaviour.
+  - Scripted 40/40 PASS.
+  - Findings F1, F3–F12 PASS. There is no F2: the harness defines no case with that number, so
+    nothing failed or was dropped under it.
+  - Gap cases PASS: G1a, G2a, G2c (refused manual order never pauses), G5a–c, G5e (duplicate fill
+    counted once), G6a, G7a/b, G9 (butterfly refused client-side, server keeps trading), G14, G15a/b,
+    R1a/b/c.
+  - Accepted: G1b/G8 and G2b/G6b. Parked for CME: G5d.
+  - Fuzz presets with 1.4k–3.4k fills each, and two calendar-spread runs, PASS.
+
+## 2026-10-04 — GUI: an algo's orders are cancel-only; widgets read WorkingRisk
+
+- `Widget/LadderWidget.axaml.cs`, `Widget/OrdersWidget.axaml.cs` — "Amend Order" is offered only for
+  non-algo orders. "Cancel Order" (and Cancel All) still covers every order. A GUI amend of an algo
+  order would be undone on the algo's next tick, and the algo's RiskLayer copy cannot see it.
+- `Widget/SendOrderWidget.axaml(.cs)` — new `AmendOrderWrapper.IsAmendable`. The Amend button binds to
+  it (`FallbackValue=False`), and `OnSendAmendClick` returns early when it is false. A GUI amend is
+  labelled `Reduce` when the new profile `IsReduceOf` the order's state profile, otherwise `Replace`.
+  The widget seq offsets are removed (see B13).
+- `Widget/RiskLimitsWidget.axaml.cs` — allowances and the worst working quantities come from the
+  server's `WorkingRisk` row (`ContextManager.ServerContext.GetWorkingRisk`), since RiskLimit is config
+  only. `RiskLimitEquals` compares config only, and the new `WorkingRiskEquals` compares the live
+  numbers. A C# GUI on a C++ server that publishes no WorkingRisk rows does not list the instrument at
+  all: `Read()` of an Empty row throws and the widget skips it. Zeros appear only if the rows are
+  written but never maintained.
+
+## 2026-09-26 — simulator: MaskMade switches Ghost on and off
+
+- `Simulator/ServerSimulator.cs` — `ExchangeSimulator.MaskMade` (default true), beside `MaskCrossed`
+  and `MaskTaken`.
+- `Simulator/OrderManager.cs` — `QueueManager.OnTrade`: with `MaskMade` on, unchanged (the whole trade
+  quantity goes into `_traded`, every fill-removal is skipped, the market queue our fill displaced stays
+  as Ghost). With it off, only the market quantity the simulator removed at that level goes into
+  `_traded`, so the feed's remaining fill-removals take out, by PriorityId, exactly the orders that
+  really filled; no Ghost is created and the queue tracks the real book. Optimistic by design: our
+  fills cost no historical maker its fill. Exact for MBO data only (MBP folds `_traded` into the level
+  delta). Set per scenario, e.g. `server.ExchangeSimulator.MaskMade = false;`.
+  `Simulator/spec.txt` "MaskMade (Ghost on or off)". Built, not yet run.
+
+## 2026-09-26 — OrderState carries QuantityBehind (queue behind the order, simulator only)
+
+- `Execution/Order.cs` — **wire change:** `OrderState` gains `int QuantityBehind` @60 after
+  `QuantityAhead`, 60 → 64 bytes, now full. `AheadOfOrder` gains `QuantityBehind` @16 (20 bytes; its
+  stale "56 bytes" comment corrected). Every process that maps `OrderStates` or reads the audit must be
+  rebuilt together, the LoggingServer included (a stale logger misreads `OrderState` the way it misread
+  `OrderTarget` on 2026-09-24). cpp_alignment.md §5.
+- `Simulator/OrderManager.cs` — `QueueManager.PublishQuantityAhead` totals the level first and reports
+  each user order's ahead and behind (behind = total − ahead − own quantity).
+- `Simulator/ServerSimulator.cs` — `InstrumentSimulator.OnQueuePosition` stores both on the simulator's
+  own copy of the order state, then sends `AheadOfOrder`. The release switch passes behind on. (Not a
+  bug fix: `Server.WriteOrderState` copies selected fields only and never `QuantityAhead` or
+  `QuantityBehind`, so fills and acks never touched the client's queue position. A day's run with and
+  without `OnQueuePosition` gave identical output for all 6,807 fills.)
+- `Provider/Server.cs` — `OnQuantityAhead(clientOrderId, quantityAhead, quantityBehind)` writes both.
+- `Widget/OrdersWidget.axaml(.cs)` — StateQuantityBehind column beside StateQuantityAhead.
+- `ServerSimulator` (user) — `OpenConsoleForLogger` defaults to false; the per-exchange session is
+  `Session.CME` for every exchange instead of `details.Sessions[0]`.
+- Review fixes (same day): `PublishQuantityAhead` drops the `PriorityId >= p` filter and reports every
+  user order at the level, because any change moves either ahead or behind for each of them; market
+  Adds (both the MBO and the MBP path) and a user order joining now publish too, so behind tracks the
+  level's growth. `InstrumentSimulator.OnQueuePosition` (restored; it had dropped out of the working
+  tree) is the single path and the store for skipping: it drops a pair equal to what the simulator's
+  copy already holds. That is safe only while the copy matches the server's value, because the server
+  changes these two fields in exactly two places, its PendingNew seed in `Server.OnOrderTarget` (ahead
+  = book quantity at our price) and `AheadOfOrder`; fills and acks do not carry them. The one gap is a
+  new order: the simulator's state starts at ahead 0 while the server's starts at the book quantity, so
+  a first position of 0 ahead is dropped as unchanged and the server keeps the book quantity until the
+  level next changes. Closed: the simulator's new order state for a Create now starts at
+  `QuantityAhead = -1`, which no real position equals, so the first position always goes out.
+  `Enqueue` also sets `QuantityBehind = 0` on the ack and on a resting remainder, which is harmless but
+  redundant: `EnqueueUserOrder` has already published behind 0 for a joining order, and the server
+  ignores the ack's value. `Server.OnQuantityAhead` writes both as one 64-bit store (the fields are
+  adjacent at 56/60 and must stay so), so a reader never sees one without the other. Every add or cancel
+  at a level holding our orders now sends up to one message per order there; skipping saves little
+  because each add changes behind for all of them. Not yet run: Markout Claude to rerun the day and
+  compare behind with the earlier run.
+
+## 2026-09-26 — TickHistoryWriter: day headers carry the next PriorityId to issue
+
+- `Data/TickHistory.cs` — `TickHistoryWriter._nextPriorityId` tracks one past the highest `Add` id
+  written (trades and removals never lower it). `WriteTomorrowHeader` writes it as the new day header's
+  `PriorityId` (the day's delta base) instead of the last order's id, so the footer is a correct seed for
+  a resumed converter; `SetHeaders` restores it from the footer. Reader and file format unchanged.
+  Round-trip test (5 days, a resume at every day boundary, cancels of old orders, days ending on a
+  trade): 10,005 orders decode exactly, footer = next id. Existing MBO files still carry the old
+  meaning and need rebuilding. Spec.md "TickHistoryWriter crash safety"; `priorityid_report_2026-09-26.md`.
+- `Widget/PositionsWidget.axaml(.cs)` — ProfitPerSide column (Profit / QuantityTraded).
+
+## 2026-09-25 — simulator: queue position no longer collapses to zero after the first day
+
+- Root cause of the ladder showing 0 ahead on thick books: `OrderManager.PriorityId` was a running
+  maximum that never reset, but MBO PriorityIds restart at every snapshot — the parser renumbers the
+  book at each daily R snapshot, and the 6E Sep26 tick-history file stitches conversion runs with
+  different bases (1.26e14 on 08-21, 2.64e14 on Sunday 08-23, 1.72e14 on 08-24, 1.18e14 on 08-25; two
+  snapshots per midnight). After Sunday every user order was stamped above every real id, so
+  `ReduceMarketBy`'s "first blob whose id >= p" took every cancel at the level off the blob in front
+  of the user, including cancels of orders queued behind it.
+- `Simulator/OrderManager.cs` — `OrderManager.OnMarketByOrderSnapshot(orders, snapshotPriorityId)`
+  restarts the baseline from the snapshot's highest id and re-stamps every live queue;
+  `QueueManager.RestampPriorityIds` gives each market blob the id of the snapshot order where its
+  cumulative quantity lands and each user order the id of the blobs in front of it.
+- `Simulator/ServerSimulator.cs` — the MBO snapshot branch computes the highest id across both sides
+  and calls it for `Buys` and `Sells`.
+- Verified with a replay of the real 6E order-by-order book (scratchpad `QueueAheadTruth`: true
+  arrival-order queue vs the simulator's rules for virtual 1-lots at the touch, 3 and 10 ticks deep):
+  unfilled-at-zero-ahead at 3 ticks after 5 min was 28-30% with the old baseline vs 0-1% in reality;
+  with the fix the simulator matches reality in every row, in-session and across the midnight
+  snapshot. The same replay showed the id-based delete routing and the trade/skip handling are exact
+  once the baseline is right. `Simulator/spec.txt` "PriorityId Baseline (MBO)".
+- Data note: the tick-history PriorityIds are not continuous across days (see above). The simulator
+  no longer depends on it, but anything else that assumes a global id order would.
+
+## 2026-09-25 — simulator: sell-aggressor trades no longer drain the bid queue twice
+
+- `Simulator/ServerSimulator.cs` — `InstrumentSimulator.OnMarketByOrder` runs an MBO update in two
+  passes: every `Trade` in the bid and ask arrays first (`OnMarketByOrderTrades`), then the
+  Add/Reduce/Cancel deltas of both arrays (`OnMarketByOrder`, which no longer handles trades). The
+  Databento parser puts a trade in its aggressor's array and the removals of the orders it filled in
+  the resting side's, and the old bids-then-asks walk ran a sell-aggressor trade after its bid-side
+  removals. The bid queue then lost the traded quantity twice (once as the exact removals, once as
+  `QueueManager.OnTrade` filling from the front again), user bids within that distance of the front
+  were filled on volume that went to the orders ahead of them, and `_traded` swallowed the next
+  genuine cancels at the level. Buy-aggressor trades were already right. Effect on earlier backtests:
+  bid-side queue positions too short and bid fills too generous at every traded bid level.
+  `Simulator/spec.txt` "Trade Timing Assumption" extended to the MBO path.
+- `Testing/Test.cs` — test algo: when flat, one bid of 1 lot 10 ticks under the best bid, repriced
+  only once it is 5 or more ticks from there.
+
 ## 2026-09-24 — simulation clock speed control in the Workspace top bar
 
 - `Workspace/Workspace.axaml(.cs)` — a speed drop-down left of the clock: `1x (real time)`, `Max`,
@@ -416,15 +834,12 @@ picks it up. `RiskLimit` gained `Timestamp` and `StrategyId`.
 
 ## Open / known incomplete
 
-- **`RiskLayer` reservation throws client-side.** `Client.cs` builds it on the read-only
-  `ContextManager.ServerContext` while `ValidateOrder` takes `GetRiskLimit(...).GetRef()`. Every
-  client order is rejected with `ExceptionThrownByRiskLayer`. Gating the reservation block on
-  `_orderRejectedSource == Server` fixes it and stops the client double-counting exposure.
-- **Acked amend-down releases nothing.** `OnOrderState` computes `before` and `after` from the same
-  new acked quantity, so `acked 10, amend to 3` yields a delta of 0 instead of −7. Needs the hook to
-  run before `Server.OnOrderState` overwrites the stored state.
-- **Rate limits are enforced nowhere.** `MaxOrdersPerSecond`/`MaxOrdersPerSession` are gone from
-  `RiskLimit` and `RiskLayer` has no rate-limit members in either language. Deferred deliberately.
+- ~~**`RiskLayer` reservation throws client-side.**~~ — resolved 2026-10-04: the client's RiskLayer
+  runs over the client's own writable context and reserves for its algo orders (see the top entry).
+- ~~**Acked amend-down releases nothing.**~~ — resolved 2026-10-04: `OrderRisk` records the acked
+  quantity, so an acked amend-down releases at the ack.
+- ~~**Rate limits are enforced nowhere.**~~ — resolved: order entry is rate-limited per CoreGroup by
+  `RollingRateLimit` (`TooManyOrdersPerSecond`), server-side only.
 - ~~**`OrderRisk` caps order quantity at 55**~~ — resolved 2026-09-09: ceiling is 65535 (compact
   array layout, see the top entry and Spec.md).
 - **Order.hpp is not yet mirrored** for `RiskLimit`'s new fields. C++ `RiskLimit` is 40 bytes; C# has

@@ -9,7 +9,7 @@ using Tools;
 namespace Provider;
 
 [RegisterJson]
-public record struct ActiveTarget(ulong ClientOrderId, int QuantityAhead, int QuantityFilled, int Seq, Target Target)
+public record struct ActiveTarget(ulong ClientOrderId, int QuantityAhead, int QuantityBehind, int QuantityFilled, int Seq, Target Target)
 {
     public override string ToString()
     {
@@ -18,7 +18,7 @@ public record struct ActiveTarget(ulong ClientOrderId, int QuantityAhead, int Qu
 }
 
 [RegisterJson]
-public record struct Target(int Ticks, int WorkingQuantity)
+public record struct Target(int Ticks, int WorkingQuantity, TimeInForce TimeInForce = TimeInForce.Day)
 {
     public readonly static Target Cancel = new Target(0, 0);
 
@@ -267,9 +267,6 @@ public sealed class Position
         private Context _context;
         private ActiveTarget _current;
         private Position _position;
-        // Set when an order was skipped because its cancel is sent but the exchange has not confirmed Done (see Spec.md).
-        public bool IsPendingBuyCancel { get; private set; }
-        public bool IsPendingSellCancel { get; private set; }
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ActiveTargetsEnumerator(Position position)
         {
@@ -278,8 +275,6 @@ public sealed class Position
             _context = position._context;
             _isOrderActive = position._isOrderActive;
             _current = default;
-            IsPendingBuyCancel = false;
-            IsPendingSellCancel = false;
         }
 
         public readonly ActiveTarget Current
@@ -305,6 +300,10 @@ public sealed class Position
                 ref readonly OrderState state = ref stateEntry.GetReadonlyRef();
                 ref readonly OrderTarget target = ref _context.GetOrderTarget(orderId).GetReadonlyRef();
 
+                // An IOC never rests, so it is never an active target; it stays reserved in the client's WorkingRisk until its Done.
+                if (target.TimeInForce == TimeInForce.ImmediateOrCancel)
+                    goto NextOrder;
+
                 ulong seq0, seq1 = 0;
                 while(true)
                 {
@@ -321,36 +320,48 @@ public sealed class Position
                     // might be false if New not set yet by server, OrderTargetAction.Create must be inflight
                     bool sameOrder = state.OrderHeader.OrderId == target.OrderHeader.OrderId;
 
-                    bool targetIsCancel = !targetRejected && (target.OrderTargetAction == OrderTargetAction.Cancel || target.OrderProfile.Sign * (target.OrderProfile.Quantity - state.QuantityFilled) <= 0);
+                    // Until the server reads the Create, the state row still holds the slot's previous order: its fills are not ours.
+                    int quantityFilled = sameOrder ? state.QuantityFilled : 0;
+
+                    bool targetIsCancel = !targetRejected && (target.OrderTargetAction == OrderTargetAction.Cancel || target.OrderProfile.Sign * (target.OrderProfile.Quantity - quantityFilled) <= 0);
 
                     bool stateIsTruth = targetRejected || (sameOrder && state.OrderHeader.Seq >= target.OrderHeader.Seq);
 
-                    // if its the same order and state says done (if its not the same order that suggest create still inflight)
-                    bool isOrderDone = sameOrder && (state.OrderStateStatus == OrderStateStatus.Done || targetIsCancel);
+                    // Done once the state says so, or as soon as a cancel is sent, even before the server has read the Create.
+                    bool isOrderDone = (sameOrder && state.OrderStateStatus == OrderStateStatus.Done) || targetIsCancel;
 
                     if (isOrderDone)
                     {
-                        bool isCancelPending = state.OrderStateStatus != OrderStateStatus.Done;
-                        int sign = state.OrderProfile.Sign;
                         seq1 = stateEntry.GetSeq();
                         if (seq0 != seq1)
                             continue; // Retry inner loop if torn read
-                        // Still resting at the exchange and still reserved by the server: not free capacity (see Spec.md).
-                        IsPendingBuyCancel |= isCancelPending && sign > 0;
-                        IsPendingSellCancel |= isCancelPending && sign < 0;
+                        // A cancel-pending order stays reserved in the client's WorkingRisk until its Done (see Spec.md).
                         goto NextOrder;
                     }
 
-                    // if the 
-                    bool reduceOnly = !targetRejected && sameOrder && target.OrderHeader.Seq == state.OrderHeader.Seq + 1 && Math.Abs(target.OrderProfile.Quantity) <= Math.Abs(state.OrderProfile.Quantity);
+                    // An in-flight reduce keeps the order's place in the queue; a new price or more size does not.
+                    bool reduceOnly = !targetRejected && sameOrder && target.OrderTargetAction == OrderTargetAction.Reduce && target.OrderHeader.Seq == state.OrderHeader.Seq + 1;
 
-                    int quantityFilled = sameOrder ? state.QuantityFilled : 0;
-                    int quantityAhead = stateIsTruth || reduceOnly ? state.QuantityAhead : int.MaxValue;
                     OrderProfile orderProfile = stateIsTruth ? state.OrderProfile : target.OrderProfile;
+                    int quantityAhead;
+                    int quantityBehind;
+                    if (stateIsTruth || reduceOnly)
+                    {
+                        long queuePosition = Unsafe.As<int, long>(ref Unsafe.AsRef(in state.QuantityAhead));   // one load: Server.OnQuantityAhead writes the pair with one store
+                        quantityAhead = (int)queuePosition;
+                        quantityBehind = (int)(queuePosition >> 32);
+                    }
+                    else
+                    {
+                        // Unconfirmed: it joins behind everything resting at its price, as Server's PendingNew seed assumes.
+                        ref readonly MarketByPrice64 mbp64 = ref _position.Instrument.MarketByPrice;
+                        quantityAhead = orderProfile.Side == Side.Buy ? mbp64.Bids.GetQuantity(orderProfile.Ticks) : mbp64.Asks.GetQuantity(orderProfile.Ticks);
+                        quantityBehind = 0;
+                    }
                     seq1 = stateEntry.GetSeq();
 
                     int workingQuantity = orderProfile.Quantity - quantityFilled;
-                    _current = new ActiveTarget(target.OrderHeader.OrderId, quantityAhead, quantityFilled, target.OrderHeader.Seq, new Target(orderProfile.Ticks, workingQuantity));
+                    _current = new ActiveTarget(target.OrderHeader.OrderId, quantityAhead, quantityBehind, quantityFilled, target.OrderHeader.Seq, new Target(orderProfile.Ticks, workingQuantity, target.TimeInForce));
 
                     if (seq0 == seq1)
                         break;
