@@ -91,6 +91,10 @@ public static class ProcessId
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool IsAlive(int pid)
     {
+        // 0 and below are not process ids: kill(0|-1, 0) targets a process group and would read as alive, so a client that never set its pid would never be closed (see Spec.md).
+        if (pid <= 0)
+            return false;
+
         if (OperatingSystem.IsWindows())
         {
             return IsAlive_Windows(pid);

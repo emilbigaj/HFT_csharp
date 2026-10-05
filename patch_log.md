@@ -4,6 +4,14 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-05 — ProcessId.IsAlive: a pid of 0 or below is dead
+
+- `Tools/ProcessId.cs` — `IsAlive` returns false for `pid <= 0` before the platform call. On Linux
+  `kill(0, 0)` and `kill(-1, 0)` succeed, so a client slot with `ClientProcessId == 0` read as alive
+  and the listen thread's dead-client sweep (`Socket.cs` `PollPids`) never closed it or cancelled its
+  orders; Windows already treated it as dead. Raised by the C++ side, which keeps the same guard in
+  `IsProcessAlive`. Spec.md "Socket close protocol".
+
 ## 2026-10-05 — a refused Create: the server publishes Done first, then the reject
 
 - `Provider/Server.cs` — `OnOrderRejected` (the exchange adapter's entry point for a refused target),

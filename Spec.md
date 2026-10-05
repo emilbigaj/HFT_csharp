@@ -869,6 +869,13 @@ Consequences kept deliberately:
 - **Recover-on-reconnect skips the dead client's unread backlog** (`Socket.Recover` parks readers
   at the writer's head). Consistent with the persist design — the client is gone and its orders get
   cancelled — but it is a choice, not a neutral fact.
+- **A pid of 0 or below is dead.** `PollPids` closes an `Open` client whose process
+  `ProcessId.IsAlive` reports dead, and closing is what cancels its orders. On Linux `IsAlive` is
+  `kill(pid, 0)`, and `kill(0, 0)` (own process group) and `kill(-1, 0)` (every signalable
+  process) both succeed, so without a guard a client whose header never got its `ClientProcessId`
+  would read as alive forever and its orders would never be cancelled; on Windows `OpenProcess(0)`
+  fails, so the two platforms disagreed. `IsAlive` returns false for `pid <= 0` on every platform:
+  the safe direction, because closing cancels. The C++ `IsProcessAlive` keeps the same guard.
 
 ## TickHistoryWriter crash safety (day-boundary resume only)
 

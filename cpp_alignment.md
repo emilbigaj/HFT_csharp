@@ -708,6 +708,10 @@ header/seq validation and the `MaxOrderQuantity` check but no reservation accoun
   - **Client-refused** (source `Client`). It never reserved anything: it is refused before or at
     `TryAdd`. It is written to the server only when it is not discarded, and then pauses only an
     algo order.
+- **`IsProcessAlive(pid <= 0)` is false (2026-10-05, behaviour):** keep the C++ guard. C#
+  `ProcessId.IsAlive` now has it too: `kill(0, 0)` / `kill(-1, 0)` succeed, so without it a client
+  whose `ClientProcessId` was never set reads as alive and the listen thread's dead-client sweep
+  never closes it or cancels its orders. Dead is the safe answer. Spec.md "Socket close protocol".
 - **A refused Create: the server publishes Done first, then the reject (2026-10-05, behaviour):**
   C# `Server.OnOrderRejected` (the adapter's entry point for a refused target), inside the
   same-order check and after the `OrderNotFound` → `StateIsDone` mapping: if
