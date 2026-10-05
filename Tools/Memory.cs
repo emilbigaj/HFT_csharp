@@ -433,26 +433,30 @@ public sealed class Memory : IDisposable
         return GetAlignedLength(length, alignment);
     }
 
-    // ---- mlock (run-once guard) ----
+    // ---- mlock (run-once guard; a failure throws and is retried by the next factory call, like C++ call_once) ----
 
-    private static class MLockGuard
-    {
-        public static readonly bool Done = DoMLock();
-
-        private static bool DoMLock()
-        {
-            if (!OperatingSystem.IsLinux()) return true;
-            int rc = LinuxMlockall(MCL_CURRENT | MCL_FUTURE);
-            if (rc == 0)
-                Console.WriteLine("Tools.Memory: mlockall success.");
-            else
-                Console.WriteLine($"Tools.Memory: mlockall failed (errno={Marshal.GetLastWin32Error()}). Check ulimits.");
-            return true;
-        }
-    }
+    private static readonly object _mlockLock = new object();
+    private static volatile bool _isMLocked;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void EnsureMLocked() => _ = MLockGuard.Done;
+    private static void EnsureMLocked()
+    {
+        if (_isMLocked)
+            return;
+        lock (_mlockLock)
+        {
+            if (_isMLocked)
+                return;
+            if (OperatingSystem.IsLinux())
+            {
+                // An unpinned process takes page faults of several ms on its hot path: a misconfigured memlock limit must stop it (see Spec.md).
+                if (LinuxMlockall(MCL_CURRENT | MCL_FUTURE) != 0)
+                    throw new InvalidOperationException($"mlockall failed (errno={Marshal.GetLastWin32Error()}). Check ulimits.");
+                Console.WriteLine("Tools.Memory: mlockall success.");
+            }
+            _isMLocked = true;
+        }
+    }
 
     // ---- pinvoke (Linux only) ----
 

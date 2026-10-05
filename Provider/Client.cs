@@ -250,6 +250,13 @@ public abstract class Client
         _instrumentData = new ReadOnlySocket?[Context.ServerHeader.GetReadonlyRef().InstrumentIds.Length];
 
         RiskLayer = new RiskLayer(Context, OrderRejectedSource.Client);
+
+        // A previous process's Active order would hold room, slots and fills this process never made (see Spec.md).
+        ThrowIfPreviousOrdersActive();
+        // ensures all messages cleared out
+        Thread.Sleep(100);
+        // Every previous order is Done and already in the position rows WorkingRisk is seeded from: skip what is queued for them.
+        _socket.Recover();
     }
 
     public ReadOnlySpan<byte> ReadAdmin()
@@ -310,9 +317,6 @@ public abstract class Client
         Instrument instrument = Context.GetInstrument(instrumentId);
         Context.GetPosition(instrument.InstrumentId);
 
-        // A previous process's Active orders would hold room, slots and fills this process never made; the server cancels them when that process closes (see Spec.md).
-        ThrowIfPreviousOrdersActive(instrumentId);
-
         // RiskLayer starts from this strategy's own position, every process: the region can outlive one (the GUI maps it).
         // A spread's legs come through here themselves before the spread (GetInstrument onboards them first).
         Context.GetWorkingRisk(instrumentId).Write(new WorkingRisk { Position = Context.GetPositionHeader(instrumentId).GetReadonlyRef().Quantity });
@@ -325,16 +329,14 @@ public abstract class Client
         return instrument;
     }
 
-    private void ThrowIfPreviousOrdersActive(int instrumentId)
+    private void ThrowIfPreviousOrdersActive()
     {
         for (int localIndex = 0; localIndex < 64; localIndex++)
         {
             OrderId orderId = new OrderId { ClientId = _clientId, LocalIndex = localIndex };
             ref readonly OrderState orderState = ref Context.GetOrderState(orderId).GetReadonlyRef();
-            if (orderState.OrderHeader.OrderId.InstrumentId != instrumentId)
-                continue;
             if (orderState.OrderStateStatus == OrderStateStatus.Active)
-                throw new InvalidOperationException($"Order {orderState.OrderHeader.OrderId} from a previous process is still Active on instrument {instrumentId}: start again once the server has cancelled it.");
+                throw new InvalidOperationException($"Order {orderState.OrderHeader.OrderId} from a previous process is still Active: start again once the server has cancelled it.");
             // Done: its risk row is the previous process's, so this process starts from an empty one.
             Context.GetOrderRisk(orderId).GetRef() = default;
         }

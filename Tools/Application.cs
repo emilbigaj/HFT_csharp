@@ -50,6 +50,19 @@ namespace Tools
         // Keep a reference to the registration: once collected, the SIGHUP handler is unregistered
         private static PosixSignalRegistration? s_hangUpRegistration;
 
+        [DllImport("libc", SetLastError = true, EntryPoint = "sigaction")]
+        private static extern unsafe int LinuxSigaction(int signal, void* action, void* oldAction);
+
+        private const int SIGHUP = 1;
+
+        // A process started under nohup inherits SIGHUP ignored and must keep running when the session drops.
+        private static unsafe bool IsHangUpIgnored()
+        {
+            // glibc's struct sigaction (152 bytes on x86-64) starts with sa_handler; SIG_IGN is 1.
+            byte* oldAction = stackalloc byte[256];
+            return LinuxSigaction(SIGHUP, null, oldAction) == 0 && *(nint*)oldAction == 1;
+        }
+
         static Application()
         {
             // Windows-specific: Handles X button, logoff, etc.
@@ -58,7 +71,7 @@ namespace Tools
             {
                 SetConsoleCtrlHandler(_ctrlHandler, true);
             }
-            else
+            else if (!IsHangUpIgnored())
             {
                 // Linux: a closed terminal or dropped ssh session sends SIGHUP, whose default action kills the process without the exit actions
                 s_hangUpRegistration = PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =>

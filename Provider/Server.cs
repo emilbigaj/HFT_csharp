@@ -142,6 +142,8 @@ public class Server : IDisposable
     private string[] _subDirectories = new string[] { "Alerts", "Audit", "Fills", "Positions", "Series", "Clients", "Instruments" };
     private void InitDirectories()
     {
+        // Before anything is deleted: a simulation run against a live server's name must throw here, not after wiping its files.
+        ServerContext.ThrowIfInvalidServerName(ServerName);
         foreach (string subDirectory in _subDirectories)
         {
             string subDirectoryPath = Path.Combine(ServerName, subDirectory);
@@ -384,7 +386,7 @@ public class Server : IDisposable
     }
 
     private const ulong _orderNotFound = 1UL << (int)OrderRejectedReason.OrderNotFound;
-    // The exchange's (iLink adapter's) entry point for a refused target.
+    // The entry point for every refused target, the server's own (OnOrderTarget) and the exchange's (see Spec.md).
     public OrderRejected OnOrderRejected(ref OrderRejected orderRejected, string message)
     {
         ref OrderState orderState = ref _serverContext.GetOrderState(orderRejected.OrderHeader.OrderId).GetRef();
@@ -396,13 +398,11 @@ public class Server : IDisposable
             // A refused Create ends its order: the Done (which releases its risk) is published before the reject that explains it (see Spec.md).
             if (orderRejected.OrderTargetAction == OrderTargetAction.Create)
             {
-                OrderState rejectedState = new OrderState
-                {
-                    OrderHeader = orderRejected.OrderHeader,
-                    OrderProfile = orderRejected.OrderProfile,
-                    OrderStateStatus = OrderStateStatus.Done,
-                    OrderStateReason = OrderStateReason.Rejected,
-                };
+                OrderState rejectedState = orderState;
+                rejectedState.OrderHeader = orderRejected.OrderHeader;
+                rejectedState.OrderProfile = orderRejected.OrderProfile;
+                rejectedState.OrderStateStatus = OrderStateStatus.Done;
+                rejectedState.OrderStateReason = OrderStateReason.Rejected;
                 OnOrderState(ref rejectedState);
             }
             orderRejected.OrderHeader.NicTimestamp = Clock.Now;
@@ -445,10 +445,8 @@ public class Server : IDisposable
                 OrderHeader = orderTarget.OrderHeader,
                 OrderProfile = orderTarget.OrderProfile,
                 TimeInForce = orderTarget.TimeInForce,
-                OrderStateStatus = isValid ? OrderStateStatus.Active : OrderStateStatus.Done,
-                // Seq 0 already means "not acked"; naming it makes the RiskLayer retire hooks able to
-                // tell PendingNew from an ack without inferring it from the sequence.
-                OrderStateReason = isValid ? OrderStateReason.PendingNew : OrderStateReason.Rejected,
+                OrderStateStatus = OrderStateStatus.Active,
+                OrderStateReason = OrderStateReason.PendingNew,
                 QuantityFilled = 0,
                 QuantityAhead = quantityAhead,
             };
@@ -472,8 +470,7 @@ public class Server : IDisposable
                 OrderProfile = orderTarget.OrderProfile,
                 OrderRejectedReasons = orderRejectedReasons,
             };
-            orderRejected.OrderHeader.NicTimestamp = Clock.Now;   // server reply: own stamp, so it sorts after the target it copies
-            Reject(in orderRejected, "Rejected by Server Risk Layer");
+            OnOrderRejected(ref orderRejected, "Rejected by Server Risk Layer");
         }
     }
 
@@ -803,7 +800,10 @@ public class Server : IDisposable
                 Console.WriteLine($"Server.LoadInstruments: {allocateInstrument.Symbol} (exchange instrument id {allocateInstrument.ExchangeInstrumentId}) is no longer listed; not restored.");
                 continue;
             }
-            OnAllocateInstrument(ref allocateInstrument);
+            // The full client path, not the server-only one: it restores the client and house-book
+            // allocations and fires AllocateInstrument, which an exchange adapter needs to rebuild routers
+            // and market data for orders still working at the exchange after a restart.
+            OnAllocateInstrument(allocateInstrument.ClientId, ref allocateInstrument);
         }
     }
 

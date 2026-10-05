@@ -1080,6 +1080,11 @@ These residuals are accepted and not expected to pass "clean":
    `Server::OnOrderRejected`, and drop the router's post-reject Done (`InstrumentRouter.hpp`
    :338-344 and :293-298). A duplicate Done would release nothing twice but is forwarded to the
    client. Spec.md "A refused Create: Done first, then the reject". Harness G5d now passes.
+   The server's own refusals use the same entry point: `Server::OnOrderTarget` writes and publishes a
+   Create's PendingNew row and sends a refusal to `OnOrderRejected` instead of `Reject` (a
+   server-refused Create then sends PendingNew, Done/Rejected at seq 1, reject). The server does not
+   check the slot is free, and the Done needs the client's `OrderTargets` row written before the
+   send: the C++ client must refuse a busy slot itself and write its target row first.
 2. **The duplicate-fill drop's assumptions** (§2.1): fills for one order arrive in order, and
    `QuantityFilled` is always the cumulative `CumQty`, retransmissions included. If either is false,
    both sides switch to an ExecID recent-set.

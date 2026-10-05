@@ -4,6 +4,55 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-05 — aligned with C++ (`csharp_alignment_report_2026-10-05.md`, HFT_cpp `persist-client-sockets`)
+
+The seven "C# to implement" items of the C++ review, each agreed with the user, C++ the reference:
+
+- `Provider/Server.cs` — `LoadInstruments` replays each line through `OnAllocateInstrument(clientId,
+  ref …)` (client, house-book and poll bits, admin reply, `AllocateInstrument` callback), not the
+  server-only overload. `InitDirectories` calls `ServerContext.ThrowIfInvalidServerName` first, so a
+  simulation run against a live server's name throws before deleting any file.
+- `Provider/Client.cs`, `Socket/Socket.cs` — the constructor checks all 64 slots once
+  (`ThrowIfPreviousOrdersActive()`, no instrument filter), clears Done slots' `OrderRisk`, sleeps
+  100 ms, then `_socket.Recover()` (new `ClientSocket.Recover` passthrough) skips the queued backlog;
+  `OnInstrumentAllocated` only seeds `WorkingRisk`. Closes the startup double-count and the GUI
+  re-allocate throw.
+- `Tools/Memory.cs` — `mlockall` failure throws (locked run-once `EnsureMLocked`, retried after a
+  throw like C++ `call_once`; replaces the `MLockGuard` static initialiser).
+- `Tools/Application.cs` — the SIGHUP handler is registered only if SIGHUP was not inherited ignored
+  (`nohup`).
+- `Socket/SharedArray.cs` — a region over `int.MaxValue` bytes throws `OverflowException`.
+- `Tools/Clock.cs`, `Tools/Collections/LockedPriorityQueue.cs` — `Start` clears `s_isRunning` in its
+  `finally`; `ConsumeReminders` uses the new `TryDequeueIfAtMost` (check and pop under one lock).
+- Not changed: the C++ erratum "Spec.md says 400 in 3 seconds" — Spec.md no longer contains that
+  figure.
+- Evidence: R1a/b/c (the harness applies the constructor's predicate before building the restarted
+  client, since an in-process half-built client cannot be closed), G2c, G5d, G9, G14, scripted
+  40/40, findings 14/14, 10 fuzz presets and the GUI fuzz PASS, 0 invariant failures, 0 clock
+  exceptions. Not exercised: `mlockall` failure, SIGHUP/`nohup`, the 2 GiB limit and the Clock
+  races (Windows box; no harness case). Spec.md "Process guards aligned with C++" and "Client
+  restart".
+
+## 2026-10-05 — the server's own refusals go through OnOrderRejected too
+
+- `Provider/Server.cs` — `OnOrderTarget` always writes and publishes a Create's row as
+  Active/PendingNew; a refusal calls `OnOrderRejected` instead of `Reject`, so the Done/Rejected
+  state for a refused Create is built in one place for both the server's and the exchange's
+  refusals. `OnOrderRejected` is unchanged apart from its comment (its same-order check still drops
+  a late exchange reject for a reused slot).
+- Behaviour: a server-refused Create now sends PendingNew, Done/Rejected (seq 1, was a single
+  Done/Rejected at seq 0), then the reject — the same sequence as an exchange-refused Create. The
+  server's `OrderState` event fires for the Done, and the server's `RiskLayer.OnOrderState` runs and
+  releases 0 (the slot's row was reset by its previous order's Done).
+- Not defended, by decision: a Create for a slot whose order is still live (`OrderIndexIsBusy`). The
+  client's own `ValidateCreate` refuses it against the same row; if one ever reached the server it
+  would overwrite the live order's row and release its reservation (before this change it overwrote
+  the row and leaked the reservation). A busy-slot guard was written, tested and removed for
+  simplicity: the platform relies on clients behaving.
+- Evidence: G2c, G5d PASS; G1b/G2b unchanged (accepted); scripted 40/40; 10 fuzz presets PASS; GUI
+  fuzz PASS with ~5,300 server-refused Creates and 0 invariant failures, reject counts identical to
+  before. C++: route `Server::OnOrderTarget`'s refusals into `Server::OnOrderRejected` the same way.
+
 ## 2026-10-05 — ProcessId.IsAlive: a pid of 0 or below is dead
 
 - `Tools/ProcessId.cs` — `IsAlive` returns false for `pid <= 0` before the platform call. On Linux

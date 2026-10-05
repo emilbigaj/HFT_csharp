@@ -118,7 +118,8 @@ public static class Clock
         int count = 0;
         while (s_reminders.TryPeek(out _, out Reminder reminder) && reminder.Timestamp <= now)
         {
-            if (s_reminders.TryDequeue(out _, out reminder))
+            // Peek and pop under one lock: a TryRemoveReminder between them must not make the next, not-yet-due reminder run early.
+            if (s_reminders.TryDequeueIfAtMost(now, out _, out reminder))
             {
                 try
                 {
@@ -172,6 +173,8 @@ public static class Clock
         }
         finally
         {
+            // However Start exits (a Started or Exception handler that throws skips the Run* epilogue), or the "Stop Clock" exit action waits forever.
+            s_isRunning = false;
             Stopped?.Invoke(Now);
         }
     }

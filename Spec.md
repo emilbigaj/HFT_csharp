@@ -538,33 +538,42 @@ Where the label matters:
 The simulator, like CME, decides reduce versus reprice from the price and quantity change itself,
 not from the action byte. An exchange adapter maps Reduce to the venue's quantity-down modify.
 
-### Client restart: refuse while the previous process has Active orders
+### Client restart: refuse while the previous process has Active orders, then skip the backlog
 
-On every instrument allocation the client scans its own 64 order slots. If any slot's `OrderState`
-row is this instrument and `Active`, it throws `InvalidOperationException` and the process does not
-start: "start again once the server has cancelled it". A previous process's Active order would hold
-room, a slot and future fills this process never made, and it can still be live after a restart:
-the restart was faster than the server's cancel-on-close round trip, iLink was down, or the session
-is in a no-cancel phase. For every slot on the instrument whose last order is `Done` it clears the
-client's `OrderRisk` row, so the new process inherits nothing (a Create resets the row anyway; the
-clear makes the starting state explicit). Then it rewrites `WorkingRisk { Position = own strategy
-position row, reservations 0 }`; with no Active orders zero reservations is exact. The region can
-outlive a process (the GUI maps it), so it is rewritten on every start rather than trusted.
+At construction, after its `RiskLayer` is built, a client checks all 64 of its order slots once
+(aligned with C++, 2026-10-05):
 
-The scan reads only the `OrderState` rows. A previous process's Create the server has not read yet
-(its state row still holds an older, Done order) is not detected. The check runs for a
-`ManualClient` too, so a GUI restarted before the server cancels its previous manual orders refuses
-to open.
+1. If any slot's `OrderState` row is `Active`, the constructor throws `InvalidOperationException`
+   and the process does not start: "start again once the server has cancelled it". A previous
+   process's live order holds room, a slot and future fills this process never made, on any
+   instrument. It can still be live after a restart: the restart was faster than the server's
+   cancel-on-close round trip, iLink was down, or the session is in a no-cancel phase.
+2. Every `Done` slot's `OrderRisk` row is cleared: it belongs to the previous process.
+3. The client sleeps 100 ms, so whatever the server is still writing for those finished orders
+   lands in the ring. The server updates the order and position rows under their locks and writes
+   the messages after releasing them, so a row can read Done a few hundred ns before its last
+   messages are in the ring.
+4. `ClientSocket.Recover()` parks every read cursor at the head of the client's rings. Everything
+   queued is about the previous process's finished orders, which are already in the position rows
+   `WorkingRisk` is seeded from; processing them would double-count fills into
+   `WorkingRisk.Position` and replay stale states and rejects.
 
-It also fires inside a running GUI. A `ManualClient` never opens a data ring (its
-`OpenInstrumentDataSocket` is a no-op), so `_instrumentData[instrumentId]` stays null and
-`GetInstrument`'s early return never fires: every allocate request from a GUI re-runs
-`OnInstrumentAllocated` — the scan, the `OrderRisk` clear and the `WorkingRisk` rewrite. A GUI that
-already has a live manual order of its own on the instrument therefore throws
-`InvalidOperationException` on a re-allocate (on the owner thread; the AlertManager reports it). The
-Positions and RiskLimits widgets allocate only when `Context.InstrumentIds` says the GUI is not yet
-allocated, so they avoid it; the InstrumentHeaders grid's Allocate menu does not check. Known; listed
-under Open items.
+Instrument allocation then only rewrites `WorkingRisk { Position = own strategy position row,
+reservations 0 }`; with no Active orders zero reservations is exact. The region can outlive a
+process (the GUI maps it), so it is rewritten on every allocation rather than trusted.
+
+Why at construction and for every slot: a per-instrument check at allocation missed a previous
+order on an instrument not yet allocated, and its fills could already be queued; and the socket's
+own backlog skip runs when the socket is built, before the handshake, so anything the server wrote
+between then and the seed was read after the seed and counted twice.
+
+The scan reads only the `OrderState` rows, so a previous process's Create the server has not read
+yet (its state row still holds an older, Done order) is not detected. It runs for a `ManualClient`
+too, so a GUI restarted before the server cancels its previous manual orders refuses to open; a
+running GUI re-allocating an instrument no longer re-checks. Accepted residual: a manual (GUI) order
+booked to this strategy carries another client's id, so neither the check nor the backlog skip
+covers it; if it fills during the client's startup its fill can be counted twice (an operating rule:
+no manual orders on an algo while it starts).
 
 ## Algo: Target and TryTarget
 
@@ -767,8 +776,15 @@ order that is dead and the algo sees room it cannot account for. With the Done f
 releases the reservation and hides the order together, and the reject after it only explains why:
 the same shape as a fill, where the state carries the risk change and the event explains it.
 
-So the server owns it. `Server.OnOrderRejected` is the exchange's (adapter's) entry point for a
-refused target, and for a refused Create it publishes a `Done`/`Rejected` state through
+So the server owns it. `Server.OnOrderRejected` is the entry point for every refused target: the
+exchange's (the adapter calls it) and the server's own (`OnOrderTarget` calls it when `ValidateOrder`
+refuses, after writing and publishing the Create's PendingNew row, so a server- and an
+exchange-refused Create send the client the same sequence: PendingNew, Done/Rejected, reject).
+`OnOrderTarget` does not check the slot is free: a Create for a slot whose order is still live
+(`OrderIndexIsBusy`) is refused by the client's own `ValidateCreate` against the same row, and the
+platform relies on clients behaving. If one ever reached the server it would overwrite the live
+order's row and release its reservation. For a refused Create it
+publishes a `Done`/`Rejected` state through
 `OnOrderState` before the reject: `WriteOrderState` merges it into the PendingNew row (keeping
 `TimeInForce` and the queue fields), `RiskLayer.OnOrderState` releases everything the order holds,
 and the reject that follows finds nothing left to remove. Adapters send only the reject; the
@@ -778,6 +794,41 @@ but the duplicate is forwarded to the client, so the C++ router should stop send
 synthesis sits after the `OrderNotFound` → `StateIsDone` mapping and inside the same-order check,
 so the mapping sees the row's real status and a reject for a slot reused by another order writes
 nothing. A refused Replace or Cancel gets no state at all: the order is still working, unchanged.
+
+## Process guards aligned with C++ (2026-10-05)
+
+Agreed item by item with the C++ side (C++ `csharp_alignment_report_2026-10-05.md`); C++ was the
+reference for each:
+
+- **`mlockall` failure stops the process.** `Memory.EnsureMLocked` (first shared or anonymous
+  region) throws when `mlockall(MCL_CURRENT | MCL_FUTURE)` fails, typically a memlock limit
+  (`ulimit -l`, `LimitMEMLOCK`) set too low. An unpinned process can take page faults of several ms
+  on its hot path, and a misconfigured live box would otherwise trade with one stdout line as its
+  only warning. It is a locked run-once method, not a static initialiser: a throwing type
+  initialiser would cache its exception for the life of the process, whereas C++ `call_once`
+  retries after a throw.
+- **SIGHUP shuts down cleanly unless the process was started under `nohup`.** `Application` reads
+  the inherited SIGHUP disposition (`sigaction`) before registering its handler; if it is `SIG_IGN`
+  (what `nohup` does) no handler is installed and the process keeps running when the session drops.
+  Otherwise a closed terminal runs the exit actions (a server cancels its orders) and exits.
+- **The server name is validated before `InitDirectories` deletes anything.** In simulation
+  `InitDirectories` wipes the server's sub-directories; it now calls
+  `ServerContext.ThrowIfInvalidServerName` first, so a simulation run pointed at a live server's
+  name throws without touching a file (before, the name was checked only in the `ServerContext`
+  constructor, after the delete).
+- **A `SharedArray` larger than `int.MaxValue` bytes is refused.** C++ memory takes `int32` lengths;
+  both sides throw rather than map or truncate a larger region.
+- **`Clock.Start` clears `IsRunning` however it exits** (in its `finally`, before `Stopped`): a
+  `Started` or `Exception` handler that throws skipped the `Run*` epilogue, and the "Stop Clock"
+  exit action then waited forever. **`ConsumeReminders` pops only a due reminder**:
+  `LockedPriorityQueue.TryDequeueIfAtMost` checks and pops under one write lock, so a
+  `TryRemoveReminder` between the peek and the pop cannot make the next, not-yet-due reminder run
+  early.
+- **Server restart replays allocations through the client path.** `LoadInstruments` calls
+  `OnAllocateInstrument(clientId, ref …)` for every recorded line, restoring the client's and the
+  house book's allocation bits, the CoreGroup poll bit, the admin reply and the `AllocateInstrument`
+  callback an exchange adapter needs to rebuild routers for orders still working after a restart.
+  A host must call `LoadClients` before `LoadInstruments`.
 
 ## Server read loops throw; the caller reports
 
@@ -929,10 +980,8 @@ footer `Navigate`.
   `OnInterject(Timestamp.MinValue)` after the guarded admin drain, outside the Clock and outside any
   try/catch, so an exception from that one `ReadExecution` kills the process (see "Server read loops
   throw; the caller reports"). The C# code is frozen; the fix is to wrap it like the drain.
-- **GUI re-allocate re-runs the restart check:** a `ManualClient` never opens a data ring, so every
-  allocate request re-runs `OnInstrumentAllocated`, and a GUI with its own live manual order on the
-  instrument throws on a re-allocate from the InstrumentHeaders Allocate menu (see "Client restart").
-  Known; whether to accept it or guard the menu is the user's call.
+- ~~**GUI re-allocate re-runs the restart check**~~ — resolved 2026-10-05: the check moved to the
+  client constructor (see "Client restart"), so a re-allocate only reseeds `WorkingRisk`.
 - **TCP mirror dispatches header-less rows by their first byte (latent):** `TCPServer.ReadTCP`
   switches on the first byte of every mirrored row as if it were an `OrderType`/`AllocateType`.
   `OrderRisk` (array id 12, the server's copy) has no `Header`: its first byte is the low byte of

@@ -166,14 +166,21 @@ public sealed class LockedPriorityQueue<TPriority, TValue> : IDisposable
 
     /// <summary>Remove the top (min) item; returns false if empty.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryDequeue(out TPriority priority, out TValue value)
+    public bool TryDequeue(out TPriority priority, out TValue value) => TryDequeue(default!, false, out priority, out value);
+
+    /// <summary>Remove the top (min) item only if its priority is &lt;= maxPriority, checked and popped under one write lock; returns false otherwise.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryDequeueIfAtMost(TPriority maxPriority, out TPriority priority, out TValue value) => TryDequeue(maxPriority, true, out priority, out value);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool TryDequeue(TPriority maxPriority, bool isBounded, out TPriority priority, out TValue value)
     {
         EnsureNotDisposed();
 
         SeqLockWriter.BeginWrite();
         try
         {
-            if (count == 0)
+            if (count == 0 || (isBounded && priorities[0].CompareTo(maxPriority) > 0))
             {
                 priority = default!;
                 value = default!;

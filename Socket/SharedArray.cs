@@ -214,6 +214,8 @@ public sealed class SharedArray<T> : SharedArray where T : unmanaged
         // 2. Calculate Aligned Entry Size
         _entryLength = Protocol.GetAlignedEntryLength(Unsafe.SizeOf<T>());
         long fileLength = checked((long)_entryLength * capacity);
+        if (fileLength > int.MaxValue)
+            throw new OverflowException($"SharedArray({name}): total length {fileLength} exceeds int.MaxValue, the limit shared with C++.");
 
         // 3. Create or Open Backing Shared Memory and View
         _mmf = SharedMemory.CreateOrOpen(name, fileLength);

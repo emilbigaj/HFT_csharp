@@ -7,6 +7,15 @@ the source of truth for every item below; file references name the C# implementa
 **Ordering matters:** §0 first (it may already exist on a local branch), then §1 wire structs
 (everything else depends on them), then the rest in any order.
 
+**Reverse direction, 2026-10-05:** the seven "C# to implement" items of HFT_cpp
+`persist-client-sockets` `csharp_alignment_report_2026-10-05.md` are done in C# (restart replay
+through the client path, constructor-time startup check + 100 ms + backlog skip, `mlockall` throws,
+SIGHUP honours `nohup`, server name checked before `InitDirectories`, `SharedArray` > `int.MaxValue`
+throws, the two `Clock` fixes) — see patch_log.md 2026-10-05. Also on the C# side the same day: the
+refused-Create Done-first path through `OnOrderRejected` for both server and exchange refusals
+(§5), and `ProcessId.IsAlive(pid <= 0) == false` (§5). Note the C++ `main` branch is stale; all
+C++ alignment work is on `persist-client-sockets`.
+
 **Latest batch: 2026-10-04, the risk-layer / order-flow rework.** The full port note is
 `cpp_alignment_report_2026-10-04.md`: rationale, code excerpts and the C++ checklist. This list
 carries the binding shapes and rules. The 2026-10-04 items are §1.1 and §1.7–§1.10 (wire), §3
@@ -722,6 +731,12 @@ header/seq validation and the `MaxOrderQuantity` check but no reservation accoun
   kept sending it, nothing is released twice (`WriteOrderState` ignores a second Done) but the
   duplicate reaches the client. A refused Replace/Cancel still gets no state. Spec.md "A refused
   Create: Done first, then the reject"; closes harness case G5d.
+  The server's own refusals use the same entry point: `Server::OnOrderTarget` writes and publishes a
+  Create's row as Active/PendingNew, and on a refusal calls `OnOrderRejected` (not `Reject`). A
+  server-refused Create then sends PendingNew, Done/Rejected (seq 1), reject. The server does not
+  check that the slot is free (the client's `ValidateCreate` does), and the Done relies on the
+  client having written its `OrderTargets` row before sending (`WriteOrderState` only writes a row
+  whose target row names the order): the C++ client must do both.
 - **GUI cancels of an algo order jump the seq by 1,000,000 (2026-10-04, behaviour):** C#
   `ManualClient::Amend` owns all manual numbering.
   - A cancel of an algo order uses `max(existing target seq + 1,000,000, caller seq)`, the same

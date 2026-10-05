@@ -809,6 +809,12 @@ public sealed class ClientSocket : IDisposable
     public void Close() => _socket?.Close();
     public void Dispose() => _socket?.Dispose();
 
+    // Park every cursor at the head of the ring: whatever is queued is skipped.
+    public void Recover()
+    {
+        _socket.Recover();
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Write(ReadOnlySpan<byte> src) => Write(0, src);
 
