@@ -384,6 +384,7 @@ public class Server : IDisposable
     }
 
     private const ulong _orderNotFound = 1UL << (int)OrderRejectedReason.OrderNotFound;
+    // The exchange's (iLink adapter's) entry point for a refused target.
     public OrderRejected OnOrderRejected(ref OrderRejected orderRejected, string message)
     {
         ref OrderState orderState = ref _serverContext.GetOrderState(orderRejected.OrderHeader.OrderId).GetRef();
@@ -392,6 +393,18 @@ public class Server : IDisposable
 
         if (orderState.OrderHeader.OrderId == orderRejected.OrderHeader.OrderId)
         {
+            // A refused Create ends its order: the Done (which releases its risk) is published before the reject that explains it (see Spec.md).
+            if (orderRejected.OrderTargetAction == OrderTargetAction.Create)
+            {
+                OrderState rejectedState = new OrderState
+                {
+                    OrderHeader = orderRejected.OrderHeader,
+                    OrderProfile = orderRejected.OrderProfile,
+                    OrderStateStatus = OrderStateStatus.Done,
+                    OrderStateReason = OrderStateReason.Rejected,
+                };
+                OnOrderState(ref rejectedState);
+            }
             orderRejected.OrderHeader.NicTimestamp = Clock.Now;
             _riskLayer.OnOrderRejected(in orderRejected);
             Reject(in orderRejected, message);

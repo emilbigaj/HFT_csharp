@@ -708,12 +708,16 @@ header/seq validation and the `MaxOrderQuantity` check but no reservation accoun
   - **Client-refused** (source `Client`). It never reserved anything: it is refused before or at
     `TryAdd`. It is written to the server only when it is not discarded, and then pauses only an
     algo order.
-  - **Open (CME follow-up).** Can iLink deliver a rejected *new* order without a terminal state?
-    Today only the C# simulator synthesises the Done/Rejected state. If CME confirms it can, that
-    synthesis moves into `Server::OnOrderRejected` on both sides together. Until CME answers, the
-    C++ adapter must make sure a rejected Create reaches the server as a Done (`Rejected`)
-    `OrderState`, as the C# simulator does in `OnExchangeOrderRejected`. Otherwise the slot and its
-    `OrderRisk`/`WorkingRisk` reservation are never released (harness case G5d, parked).
+- **A refused Create: the server publishes Done first, then the reject (2026-10-05, behaviour):**
+  C# `Server.OnOrderRejected` (the adapter's entry point for a refused target), inside the
+  same-order check and after the `OrderNotFound` → `StateIsDone` mapping: if
+  `OrderTargetAction == Create`, build `OrderState { OrderHeader, OrderProfile from the reject,
+  Done, Rejected }` and call `OnOrderState` with it, then run the existing reject path. Mirror it in
+  C++ `Server::OnOrderRejected`, and remove the post-reject Done/Rejected state from
+  `InstrumentRouter.hpp` (:338-344 and :293-298): the router sends only the reject. If the router
+  kept sending it, nothing is released twice (`WriteOrderState` ignores a second Done) but the
+  duplicate reaches the client. A refused Replace/Cancel still gets no state. Spec.md "A refused
+  Create: Done first, then the reject"; closes harness case G5d.
 - **GUI cancels of an algo order jump the seq by 1,000,000 (2026-10-04, behaviour):** C#
   `ManualClient::Amend` owns all manual numbering.
   - A cancel of an algo order uses `max(existing target seq + 1,000,000, caller seq)`, the same

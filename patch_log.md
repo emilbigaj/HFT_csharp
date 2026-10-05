@@ -4,6 +4,22 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-05 — a refused Create: the server publishes Done first, then the reject
+
+- `Provider/Server.cs` — `OnOrderRejected` (the exchange adapter's entry point for a refused target),
+  for `OrderTargetAction.Create`, inside the same-order check and after the `OrderNotFound` →
+  `StateIsDone` mapping, publishes a `Done`/`Rejected` `OrderState` through `OnOrderState` before the
+  reject. One message now releases the reservation and hides the order; the reject only explains why.
+  Before, the C++ router sent reject-then-Done, so for a tick the algo saw room released while
+  `ActiveTargets` still showed the dead order.
+- `Simulator/ServerSimulator.cs` — `OnExchangeOrderRejected` forwards only the reject (its own
+  Done/Rejected synthesis is gone; the server does it now).
+- C++: mirror in `Server::OnOrderRejected` and drop the router's post-reject Done
+  (`InstrumentRouter.hpp` :338-344, :293-298). Closes the parked CME question and harness G5d.
+- Evidence: G5d, G5a, G5c, G8 PASS (G8 now passes outright, reservations zero at the end); scripted
+  40/40; 10 fuzz presets PASS. G1b unchanged (accepted session-close race, refused by the server).
+  Spec.md "A refused Create: Done first, then the reject".
+
 ## 2026-10-04 — risk layer runs on every client; RiskLimit split into config + WorkingRisk; Reduce/Replace
 
 All 2026-10-04 entries are one uncommitted piece of work. They change the wire and the shared-memory

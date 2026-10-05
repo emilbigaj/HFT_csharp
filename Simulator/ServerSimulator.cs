@@ -1660,23 +1660,9 @@ public class ServerSimulator
         }
     }
 
-    // The exchange refusing a Create leaves the slot with no terminal state — in production the
-    // vendor session delivers that separately, so synthesise it here before routing the reject.
+    // Only the reject: Server.OnOrderRejected publishes a refused Create's Done/Rejected state itself, before the reject.
     private void OnExchangeOrderRejected(ref OrderRejected orderRejected)
     {
-        if (orderRejected.OrderTargetAction == OrderTargetAction.Create)
-        {
-            OrderState orderState = new OrderState()
-            {
-                OrderHeader = orderRejected.OrderHeader,
-                OrderProfile = orderRejected.OrderProfile,
-                QuantityFilled = 0,
-                QuantityAhead = 0,
-                OrderStateStatus = OrderStateStatus.Done,
-                OrderStateReason = OrderStateReason.Rejected,
-            };
-            _server.OnOrderState(ref orderState);
-        }
         _server.OnOrderRejected(ref orderRejected, "Rejected by Exchange");
     }
 

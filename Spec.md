@@ -757,6 +757,28 @@ would make that fill look like a resend. In-order delivery rules that out. If CM
 assumption does not hold, the fallback is a recent-set keyed by `FillId` (ExecID), on both the C#
 and the C++ server. Drops are not counted or logged.
 
+## A refused Create: Done first, then the reject
+
+CME answers a refused new order with one report; the C++ InstrumentRouter turned it into two
+messages, reject then Done/Rejected state, and the C# simulator synthesised the same pair the other
+way round. The order matters to the algo. With the reject first, the reject releases the in-flight
+reservation while the state row still says PendingNew, so for a tick `ActiveTargets` still shows an
+order that is dead and the algo sees room it cannot account for. With the Done first, one message
+releases the reservation and hides the order together, and the reject after it only explains why:
+the same shape as a fill, where the state carries the risk change and the event explains it.
+
+So the server owns it. `Server.OnOrderRejected` is the exchange's (adapter's) entry point for a
+refused target, and for a refused Create it publishes a `Done`/`Rejected` state through
+`OnOrderState` before the reject: `WriteOrderState` merges it into the PendingNew row (keeping
+`TimeInForce` and the queue fields), `RiskLayer.OnOrderState` releases everything the order holds,
+and the reject that follows finds nothing left to remove. Adapters send only the reject; the
+simulator's `OnExchangeOrderRejected` now does exactly that. An adapter that still sends its own
+Done afterwards is harmless (`WriteOrderState` ignores a second Done, so nothing is released twice)
+but the duplicate is forwarded to the client, so the C++ router should stop sending it. The
+synthesis sits after the `OrderNotFound` → `StateIsDone` mapping and inside the same-order check,
+so the mapping sees the row's real status and a reject for a slot reused by another order writes
+nothing. A refused Replace or Cancel gets no state at all: the order is still working, unchanged.
+
 ## Server read loops throw; the caller reports
 
 `Server.ReadAdmin` and `Server.ReadExecution` may throw (for example an allocation request whose
@@ -944,10 +966,7 @@ Each of these was seen in the harness or reasoned through and left as is on purp
   within-limit clip"): a strategy that targets more than its limits is the bigger problem, and the
   fix belongs there.
 - **CME confirmations pending** (the user is asking CME):
-  1. Can the session deliver a rejected new order without a terminal state? The simulator
-     synthesises a `Done`/`Rejected` state for a rejected Create in
-     `ServerSimulator.OnExchangeOrderRejected`; if CME can leave the slot without one, that
-     synthesis moves into `Server.OnOrderRejected` (C# and C++ together). On hold until the answer.
+  1. Resolved 2026-10-05, see "A refused Create: Done first, then the reject".
   2. The duplicate-fill drop's two assumptions: in-order fills per order, and cumulative `CumQty`
      on every fill event (see "Duplicate fills are dropped by cumulative quantity").
   3. An amend acknowledged only inside a fill does not occur: CME (as we understand it) and the

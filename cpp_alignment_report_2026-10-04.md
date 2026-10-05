@@ -1072,12 +1072,14 @@ These residuals are accepted and not expected to pass "clean":
 ## 7. Open items
 
 **CME confirmations (the user is calling CME):**
-1. **Can a rejected new order arrive with no terminal state?** The C# simulator synthesises a
-   `Done/Rejected` `OrderState` before routing an exchange reject of a `Create`
-   (`ServerSimulator.cs:1665-1681`). The proposal on hold is to move that synthesis into
-   `Server::OnOrderRejected`, on both sides together. Until CME answers, the C++ adapter must make
-   sure a rejected `Create` reaches the server as a `Done` state. Otherwise the slot and its
-   reservation are held for good. This is harness case G5d, parked.
+1. **Resolved 2026-10-05 — a refused Create: Done first, then the reject.** C#
+   `Server.OnOrderRejected` now publishes a `Done`/`Rejected` `OrderState` (header and profile from
+   the reject) through `OnOrderState` before the reject, for `OrderTargetAction == Create`, inside
+   the same-order check and after the `OrderNotFound` → `StateIsDone` mapping. The simulator's
+   `OnExchangeOrderRejected` now forwards only the reject. C++: mirror it in
+   `Server::OnOrderRejected`, and drop the router's post-reject Done (`InstrumentRouter.hpp`
+   :338-344 and :293-298). A duplicate Done would release nothing twice but is forwarded to the
+   client. Spec.md "A refused Create: Done first, then the reject". Harness G5d now passes.
 2. **The duplicate-fill drop's assumptions** (§2.1): fills for one order arrive in order, and
    `QuantityFilled` is always the cumulative `CumQty`, retransmissions included. If either is false,
    both sides switch to an ExecID recent-set.
