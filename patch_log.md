@@ -4,6 +4,51 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-13 — Logging polls every 100 ms live
+
+- `Logging/LoggingServer.cs` — `PollerLoop` sleeps 100 ms after each pass in `Realtime` (was a continuous spin). Why:
+  each poll reads the line a writer writes next, so nearly every message write on the trading server paid about +330 ns
+  to take that line back from Logging's cores; now at most the first one or two writes per ring per 100 ms do.
+  `Simulation` keeps the continuous poll (a backtest at Max speed could lap a 2 MB ring in 100 ms). The redundant
+  empty-set branch is folded into the pass (same behaviour). The `WatermarkMargin` comment is corrected: the margin covers
+  one pass's drain, not the poll interval, so it stays 10 ms.
+- Costs: audit, alerts and strategy logs land up to 100 ms later; a crash can lose up to 100 ms of unappended lines.
+  Not measured yet on the CME box. See Spec.md "Logging polls every 100 ms live".
+
+---
+
+## 2026-10-13 — `ServerHeader.ServerProcessId`; the Local Mirror exits with the server; a restart names why it cannot start
+
+- `Provider/Allocate.cs` — `ServerHeader` gains `int ServerProcessId` at offset 173, after `Persistance`; every earlier
+  offset is unchanged and the size check is now 177 bytes. Why: nothing in shared memory said which server process wrote
+  the header, so nothing could tell a dead server from a live one.
+- `Provider/Context.cs` — `ServerContext.Connect` stamps it with `Environment.ProcessId` beside the house-book reservation,
+  so every host (Server, ServerSimulator, tests) gets it without setting it. When the post is refused (the previous run's
+  header is still there because some process maps it) it now says which case: "already running as process N" or
+  "previous server (process N) has exited, but other processes still map its shared memory; stop its clients…" (was
+  "Failed to write ServerHeader to shared memory"), and disposes its handle first, so an in-process retry is not blocked
+  by it. Overwriting a dead run's header was declined: the server would start on that run's rows and rings (Spec.md).
+- `Mirror/Program.cs` — `RunLocal` runs while the server's process is alive (`ProcessId.IsAlive(ServerProcessId)`, every
+  pass) and then exits. Why: a dead server's stand-ins are read by no one, and the server cannot restart while the Local
+  Mirror maps its header. It checks once right after attaching, before its `AlertManager`: started on a dead run's header,
+  it exits at once instead of waiting forever in the `AlertManager`'s connect to that server's Logging, which had exited
+  with it (the test's one failure). Started before any server, it waits for one. Each server run needs its own Local
+  Mirror (the C++ server's main will start it). Residuals in Spec.md: a server dying during that connect, and a reused
+  process id.
+- `Mirror/RemoteMirror.cs` — `GetLatency` returns -1 ns as soon as the link is down, not only after 10 s without a pong,
+  so a remote Workspace shows "Connection broken" within one network trip of the Local end exiting.
+- `Mirror/RemoteMirror.cs` — when a restarted Local end makes the Remote exit, it first writes -1 ns into `Latency[0]`.
+  Why: the test showed it froze a positive value there (2,687 ms, a link up but no pong yet), so the desk's Workspaces
+  showed a climbing number for up to 10 s instead of "Connection broken".
+- `Workspace/Workspace.axaml.cs` — a Workspace beside the server (its manual client is not a `RemoteClient`) shows
+  "Disconnected – server stopped, close this Workspace" beside the clock once the server's process has exited (checked
+  each refresh). Why: its clock just froze before, and while it stays open it blocks the server's restart.
+- Breaks: the header layout. The C++ `Provider/Allocate.hpp` must add the field and stamp `getpid()` in the same deploy
+  (cpp_alignment_report_2026-10-12.md P22, L9); without it a Local Mirror reads process 0 and exits at once. Both Mirror
+  ends and every Workspace deploy with it (the server-header packet grew 4 bytes).
+
+---
+
 ## 2026-10-12 — remote desks: a `RemoteClient` passes every call to the Local end's ManualClient; the remote copy has one writer
 
 - `Provider/RemoteClient.cs` (new) and `IManualClient` — a remote Workspace's manual client is a pass-through: each call

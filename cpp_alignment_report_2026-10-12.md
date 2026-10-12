@@ -51,13 +51,15 @@ Words used throughout:
 | P19 | `AheadOfOrder` | PORT-IF | no | Field `Quantity` renamed `QuantityAhead` (layout unchanged, 20 bytes) |
 | P20 | `LeggedHeader` | PORT-IF | no | `GetLegHeader` is set by the first `ServerContext` only and cleared by its `Dispose` |
 | P21 | Client names | PORT-IF | no | GUI names are `<principal>_GUI<n>`, and on a remote desk `<principal>_GUI<n>@<machine>`; the C++ server must accept them |
+| P22 | `ServerHeader` | PORT | **yes** | New field `int32 ServerProcessId` at offset 173 (size 173 → 177), stamped when the header is posted; a refused post names "already running" or "previous server exited"; never overwrite |
 | C1-C14 | Mirror, Workspace, widgets, harness | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
 **Kinds.** PORT: change the C++ code. PORT-IF: change it only if C++ has the same construct (the item says what to look
 for). C#-ONLY: nothing to port. REVERTED: an earlier instruction that must not be ported, or must be undone if it was.
 
-**No row layout changed in this set.** `SocketHeader` is still 344 bytes, `OrderState` 64, `OrderTarget` 52, `Fill` 64,
+**One layout changed: `ServerHeader`** grew 4 bytes, from 173 to 177, for `ServerProcessId` at offset 173 (P22). No row layout changed.
+`SocketHeader` is still 344 bytes, `OrderState` 64, `OrderTarget` 52, `Fill` 64,
 `AheadOfOrder` 20, with every offset the same. What changed is the **meaning** of some values, one enum **name**, one new
 **message on an existing channel**, and server and client **behaviour**.
 
@@ -700,6 +702,42 @@ outside `[A-Za-z0-9_.-]` becomes `_` (C# `Tools.Sanitize`, written to match C++ 
 to `_`. Consequence to know about (no action): `X_GUI0@DESK` and a client literally named `X_GUI0_DESK` would map to the
 same shared-memory regions. The reserved-name check (P10) is unaffected: `<server>_GUI<n>` is not the server's leaf.
 
+### P22. `ServerHeader.ServerProcessId` (C# `Provider/Allocate.cs`, `Provider/Context.cs`; C++ `Provider/Allocate.hpp`)
+
+```
+struct ServerHeader (Pack = 1, 177 bytes; was 173):
+  ... every field up to Persistance unchanged (Persistance: uint8 @172)
+  int32 ServerProcessId   @173   // new: the process id of the server that published this header
+```
+
+- **Who sets it:** the code that publishes the header into its `LetterBox` (C# `ServerContext::Connect`, which already
+  reserves the house book's client id there), with the current process id (`getpid()`), so no host can forget it. A host
+  that builds the header leaves it 0.
+- **Update the size check** (C# throws unless `sizeof(ServerHeader) == 177`; a C++ `static_assert` should match).
+- **Who reads it:** the C# Local Mirror reads it once at startup and exits as soon as that process has exited
+  (`ProcessId::IsAlive`, every pass), and a C# Workspace on the CME box shows "Disconnected – server stopped" once it has
+  exited. **A C++ header that leaves it 0 makes the Local Mirror exit the moment it starts, and every Workspace on the box
+  show "Disconnected".**
+  The C++ server's `main` is to start the Local Mirror, after the header is posted: one started earlier waits until a
+  header is posted, and one started on a dead run's header exits at once. On a remote desk's copy the field holds the CME
+  box's process id, so it must never be tested against local processes.
+- **Accepted residual: a bare process id.** If a dead server's id has been given to another process by the time of the
+  restart, the refusal below reads it as alive and names that process as "already running". C# accepts this (Linux ids
+  wrap slowly: the CME box passed 3.4 million since its July boot). The fix, if ever needed, is the start time stamped
+  beside the id, a further layout change.
+- **The refused post names its case** (C# `ServerContext::Connect`; port it to wherever C++ posts the header). The post
+  fails while the previous run's header is still in the `LetterBox` (nothing empties it, and it stays while any process maps
+  the region). Read the posted `ServerProcessId` with a plain read (no seqlock wait), dispose the box, and throw:
+  `"ServerContext.Connect: <server> is already running as process <pid>; stop it before starting another"` when that pid
+  is alive, otherwise `"ServerContext.Connect: <server>'s previous server (process <pid>) has exited, but other processes
+  still map its shared memory; stop its clients (Local Mirror, algos, Workspaces) and start again"`. **Never overwrite a
+  dead run's header** (declined 2026-10-13): the server would start on that run's order rows, rings and allocations, and
+  every client still running would be read by no one.
+- **Why:** nothing in shared memory identified the server run, so nothing could tell a dead server from a live one: a
+  Local Mirror outliving the server kept the regions mapped, which blocked the restart with an unexplained error.
+
+**Verify:** §11 scenario 18.
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -827,7 +865,7 @@ listed.
   `NotImplementedException("Unknown message type")` on its read thread.
 - **L4. `InFlight` (P16): the C++ writer and the C# readers together.** Audit JSON writes enums by name; the C# Audit Trail
   silently skips lines it cannot parse.
-- **L5. Shared-memory layout: no lockstep from this set.** No row layout changed. The new region `<server>/Latency` is
+- **L5. Shared-memory rows: no lockstep from this set** (the header is L9). No row layout changed. The new region `<server>/Latency` is
   created and written by C# only. The C# array-id shift (C3) matters only between the two C# Mirror ends, and the layout
   hash (C4) refuses a mismatch at startup.
 - **L6. C#-only, for completeness:** both Mirror ends and the remote Workspaces deploy together (the server-header packet
@@ -839,6 +877,9 @@ listed.
   every remote desk freezes with it.
 - **L8. Within the C++ change: P14 with or before P6.** This is not a cross-process lockstep, but `TryCloseOutOrders` reads
   the server's lock-edited `OrderState` rows through the seqlock, and those rows read `Empty` without the stamp (P6).
+- **L9. `ServerHeader` grew to 177 bytes (P22): the C++ server and every C# process in one deploy.** The C# static check
+  throws on any other size, and a 173-byte header posted by an old C++ server leaves the C# readers' last 4 bytes
+  unwritten (or the reverse). Both Mirror ends deploy with it too: the server-header packet carries the whole header.
 
 ---
 
@@ -896,6 +937,11 @@ server reader has seen its close message (answered, not hung).
     and parses in the C# Audit Trail (P16, L4).
 17. **Remote-desk name.** A C# stand-in named `<strategy>_GUI0@<machine>` connects to the C++ server, trades, and is
     cancelled out on close like any client; its regions are named with `_` for `@` on both sides (P21, C1).
+18. **Server process id.** A C# process reading the header of a running C++ server sees `ServerProcessId` equal to the
+    server's pid. Kill the server with a C# Local Mirror attached: the Local Mirror exits within a pass and its remote shows
+    "Connection broken" at once. Start a second server under a live one's name: it throws "already running as process
+    <pid>". Kill the server while an algo still maps its regions and restart it: it throws "previous server … has exited";
+    close the algo and it starts (P22, L9).
 
 ---
 
@@ -913,8 +959,10 @@ server reader has seen its close message (answered, not hung).
 - **Accepted, not capped:** each refused reconnect re-sends the cancels and lifts the target's `Seq` by 1,000,000 again
   (P5).
 - **Measure first, then consider:** a server idle-loop prefetch of hot lines (would cut the Local Mirror's per-pass recall
-  cost of about 330 ns per hot line); the C# logging server's always-on poll of every execution ring costs the server a
-  recall per message (a backed-off poll may help).
+  cost of about 330 ns per hot line, and the recall a writer pays when it comes round to a ring line the C# logging server
+  read on the previous lap). The C# logging server now polls each ring once per 100 ms live instead of continuously
+  (2026-10-13, C#-only, nothing to port), so the server pays that recall on at most one or two writes per ring per 100 ms
+  instead of on nearly every message.
 - **C#-only, for context:** Mirror links are not yet encrypted or authenticated (an `IPWhitelist` and a firewall rule
   only); a reject does not show on a remote Workspace's screen (it reaches Telegram from the CME box).
 - **Not planned** (decided 2026-10-07): a workspace registering a strategy whose algo has not connected, or adding

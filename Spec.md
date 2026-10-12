@@ -373,7 +373,7 @@ place under the row's seq bump and stamps `Timestamp`. The server never writes `
 its audit channel and the logging server appends it through the same path helper the server reads
 back at allocation. A crash between the post and the append can lose that one line — the row in
 shared memory is the truth while the server is up, and the logging server flushes its writers
-after every batch it drains, so the window is one poll pass. A `.risklimit` line now has no
+after every batch it drains, so the window is one poll pass (100 ms live). A `.risklimit` line now has no
 `WorstLong/ShortWorkingQuantity` properties; older lines that carry them (or the removed
 `StrategyId`) still parse, because unknown JSON members are skipped.
 
@@ -1011,6 +1011,24 @@ Consequences kept deliberately:
   fails, so the two platforms disagreed. `IsAlive` returns false for `pid <= 0` on every platform:
   the safe direction, because closing cancels. The C++ `IsProcessAlive` keeps the same guard.
 
+**Logging polls every 100 ms live.** `LoggingServer.PollerLoop` checks every reader once and then, in `Realtime`, sleeps
+100 ms; a worker then drains each reader with news to its writer's head. Why: to learn whether a ring has news a poll reads
+the line the writer will write next, and the writer's next write must then take that line back from Logging's cores
+(about +330 ns measured on the CME box, cross-chiplet). Polled continuously, nearly every message write paid that; polled
+every 100 ms, at most the first one or two writes per ring after each pass do. Everything else a pass reads is lines the
+writer has finished with. What it costs: the audit, alerts and strategy logs reach their files up to 100 ms later (plus
+the 10 ms ordering margin), a newly announced client is tapped up to 100 ms later (no loss: a tap reads its rings from
+the start), and a crash can lose up to 100 ms of not-yet-appended lines. The rings are 2 MB per channel and writers never
+wait for a reader, so a live channel would have to write more than 2 MB in 100 ms before the tap lost records.
+`Simulation` keeps the continuous poll: no live latency is at stake there, and a backtest at Max speed could lap a ring
+in 100 ms. The ordering margin (`WatermarkMargin`, 10 ms) does not depend on the poll interval: every pass drains every
+channel, so a record read in a later pass was written after this pass read its channel; the margin must cover one
+pass's drain and how stale a timestamp can be when written. Not fixed by this: when a writer comes round its ring, its
+first write to each line the tap read on the previous lap still pays to take it back (a writer-side prefetch ahead of
+its cursor would hide that; not done). Considered and not done: a per-ring letterbox where each writer publishes the
+sequence the tap may read up to, which removes the last one or two penalties per pass at the cost of work on every
+writer's hot thread; worth it only if a measurement shows those remaining penalties.
+
 ### Connect: every request is answered
 
 - The server's reply carries `ClientId`: the client's id when 0 or more, otherwise a `ConnectRefusal`
@@ -1096,13 +1114,16 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
   its own monotonic clock (`Timestamp.StopwatchNow`, the machine's `Stopwatch` as a `Timestamp`); the Local end queues it back as a `Pong`, so it goes out after the publish it triggers on that same pass (rows, then the pong): the round trip then covers the Local loop and a publish too, and a Local end that answers but no longer publishes reads as a stall, not as a healthy number over a frozen screen; the
   Remote times it on that same clock (no clocks need to agree) and writes `Latency[0]` every pass: the worst of the last
   10 round trips, or, when longer, the age of the oldest unanswered ping (the newest answered one's age less one interval),
-  so it climbs through a stall; -1 ns from 10 s without a pong (`RemoteClient.s_silenceTimeout`, also `TcpLink`'s silence
+  so it climbs through a stall; -1 ns at once when the link drops, and from 10 s without a pong (`RemoteClient.s_silenceTimeout`, also `TcpLink`'s silence
   limit). A remote Workspace shows it beside its clock, or how long since the row last changed when longer, so a dead or
   frozen Remote Mirror (which stops rewriting it) climbs the same way; below 0, or unchanged for 10 s, it reads "Connection
   broken – reconnecting…". The Workspace reads the value plainly, not through the seqlock: one aligned 8-byte `Duration`
   cannot tear, and a seqlocked read would spin forever on a row a killed Remote Mirror left mid-write (the unchanged-for-10 s
   rule then shows it broken), and would throw on an unwritten row. The Local end never writes the array (the server's rows are unwritten, so they are never
-  published over the copy's). The ping is also the link's keep-alive. A Workspace beside the real server shows no number.
+  published over the copy's). The ping is also the link's keep-alive. A Workspace beside the real server shows no number;
+  once the server's process has exited (`ProcessId.IsAlive(ServerHeader.ServerProcessId)`, each refresh) it shows
+  "Disconnected – server stopped, close this Workspace" there instead: it cannot reconnect by itself, and while it maps the
+  dead run's header the server cannot restart (see "A server never starts on a previous run's memory").
   Clicks while the link is down are dropped, with no refusal: the display is the signal. The clock beside it is the
   copy's `ServerHeader.Timestamp`, which the server rewrites every pass and the Local end sends at the start of every
   publish, so it moves only while the server is alive. Read together: a moving clock and a healthy latency mean all is
@@ -1116,7 +1137,40 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
   again is dropped (a residual: the latency is the link's, not that GUI's, so it does not show this). Nothing is reconciled: the remote holds no order state, and every
   order's end is in the copied rows. A restarted Local end (a new start time in the heartbeat) ends the Remote: client ids
   may differ, so the Workspaces must be reopened, and the Remote waits for the last run's Workspaces to close before it
-  starts. The copy's header is left as it was (a simulation Workspace's clock holds there).
+  starts. The copy's header is left as it was (a simulation Workspace's clock holds there). Before it exits the Remote
+  writes -1 ns into `Latency[0]`, so every Workspace reads "Connection broken" at once instead of a frozen number until
+  its 10 s age check. A Remote stopped any other way (killed, closed) leaves its last value, and that check catches it.
+- **The Local Mirror lives and dies with the server.** It reads `ServerHeader.ServerProcessId` once at startup and stops
+  when that process has exited (`ProcessId.IsAlive`, every pass): a dead server's stand-ins would be read by no one, and
+  the server cannot restart while this process maps its header (next bullet). Its exit closes its TCP links, so a remote
+  sees the link end within one network trip and shows "Connection broken" at once; once the server is back, a new Local end's start time ends
+  the Remote and the Workspaces are reopened. Each server run needs its own Local Mirror (on the CME box the C++ server's
+  main starts it after posting its header). One started before any server waits in `EnsureConnected` until a header is
+  posted, which blocks nothing (an empty box takes the server's post). One started on a dead run's header (still posted
+  because some process maps it), or on a `ServerProcessId` of 0, exits at once: it checks right after attaching, before
+  its `AlertManager`, whose connect would wait forever for the dead server's Logging (that Logging exits with its
+  server). Residual: a server that dies while a starting Local Mirror is inside that connect leaves it waiting there, and
+  it must be killed by hand (the restart's refusal names "Local Mirror"). Residual: the check trusts a bare process id, so
+  if the dead server's id has been given to another process, that process reads as the server. The refusal then names
+  it as "already running", and a Local Mirror started on that header keeps running until it exits. Not fixed: the CME
+  box's ids exceed 3.4 million since its July boot, so they wrap about every four months and one coming back within a
+  restart window is unlikely; Windows reuses ids sooner, but only the simulation runs there. The fix, if ever needed, is
+  the server's start time stamped beside its id (a header layout change). Only the whole box going dark sends no close;
+  the 10 s silence catches that.
+- **A server never starts on a previous run's memory.** `ServerContext.Connect` posts the header into a `LetterBox`, which
+  refuses a post while a value is there, and nothing ever empties it. So while any process still maps the dead run's
+  header (a Local Mirror, an algo, a Workspace) a restart throws, naming the case: "already running as process N" when
+  that process is alive, otherwise "previous server (process N) has exited, but other processes still map its shared
+  memory; stop its clients…". Once nothing maps them the regions are unlinked, and the restart starts on empty memory.
+  Declined (2026-10-13): overwriting a dead run's header. The server would start on that run's order rows, rings and
+  allocations (a state row still `Active` for an order CME may already have cancelled), and every client left running
+  would be read by no one, silently: a restarted server reads only clients that connected to it. Residual: a server that
+  dies inside the header's lock (`AllocateClientId`, nanoseconds) leaves its sequence odd, and the restart's post then
+  spins in `AcquireLock` instead of throwing.
+- **`ServerHeader.ServerProcessId`** (offset 173; the header is now 177 bytes): the publishing server's process id, stamped
+  by `ServerContext.Connect`, the one place that publishes the header, so no host sets it. Read by the Local Mirror's
+  liveness check and by `Connect`'s refusal. A remote copy carries the CME box's process id unchanged: never test it
+  against the desk's processes.
 - **No Logging on a remote desk.** The Remote starts none, taps no GUI socket, and a Workspace running a `RemoteClient`
   creates no `AlertManager` (its client thread's exceptions go to its console). Rejects alert beside the server: the Local
   Mirror runs one `AlertManager` on the server's context, subscribed to every stand-in's `OrderRejected`, and reports its own
@@ -1256,9 +1310,10 @@ footer `Navigate`.
 - **Remote links: encryption and authentication** (pinned certificates were designed, then deferred).
 - **An on-screen notice in the Workspace when an order is rejected** (today only the Audit Trail and
   Telegram show it).
-- **Server idle-loop prefetch of hot lines** (cuts the mirror's per-pass recall cost); Logging's
-  always-on poll of every execution ring costs the server a recall per message (measure, then
-  consider a backed-off poll).
+- **Server idle-loop prefetch of hot lines** (cuts the mirror's per-pass recall cost, and the recall
+  a writer pays when it comes round to a line Logging read on the previous lap). Logging's poll is
+  backed off to one pass per 100 ms live (2026-10-13, "Logging polls every 100 ms live"); measure
+  what is left before considering a per-ring letterbox.
 - **Not planned:** a workspace registering a strategy whose algo has not connected (the server
   workspace covers emergencies).
 - ~~**TCP mirror dispatches header-less rows by their first byte (latent)**~~ — resolved 2026-10-07:
