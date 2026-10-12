@@ -12,8 +12,10 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
   `Simulation` keeps the continuous poll (a backtest at Max speed could lap a 2 MB ring in 100 ms). The redundant
   empty-set branch is folded into the pass (same behaviour). The `WatermarkMargin` comment is corrected: the margin covers
   one pass's drain, not the poll interval, so it stays 10 ms.
-- Costs: audit, alerts and strategy logs land up to 100 ms later; a crash can lose up to 100 ms of unappended lines.
-  Not measured yet on the CME box. See Spec.md "Logging polls every 100 ms live".
+- Costs: alerts and strategy logs land up to 100 ms later; a client's audit file up to about 200 ms later (records within
+  the 10 ms ordering margin of the newest wait for the next poll); a crash can lose up to about 200 ms of unappended
+  lines. Tested on the dev PC (scratchpad loggingpollverify: 0 lost of about 100,000, 0 inversions, typically 80 ms,
+  worst 167 ms in normal running); not measured on the CME box. See Spec.md "Logging polls every 100 ms live".
 
 ---
 

@@ -1016,9 +1016,11 @@ Consequences kept deliberately:
 the line the writer will write next, and the writer's next write must then take that line back from Logging's cores
 (about +330 ns measured on the CME box, cross-chiplet). Polled continuously, nearly every message write paid that; polled
 every 100 ms, at most the first one or two writes per ring after each pass do. Everything else a pass reads is lines the
-writer has finished with. What it costs: the audit, alerts and strategy logs reach their files up to 100 ms later (plus
-the 10 ms ordering margin), a newly announced client is tapped up to 100 ms later (no loss: a tap reads its rings from
-the start), and a crash can lose up to 100 ms of not-yet-appended lines. The rings are 2 MB per channel and writers never
+writer has finished with. What it costs: alerts and strategy logs reach their files up to 100 ms later; a client's audit
+file up to about 200 ms later, because records within 10 ms of the newest at a poll are held for the next one to keep the
+file in timestamp order (measured 2026-10-13: typically 80 ms, 2–10% of records held over, worst 167 ms in normal
+running). A newly announced client is tapped up to 100 ms later (no loss: a tap reads its rings from the start), and a
+crash can lose up to about 200 ms of not-yet-appended lines. The rings are 2 MB per channel and writers never
 wait for a reader, so a live channel would have to write more than 2 MB in 100 ms before the tap lost records.
 `Simulation` keeps the continuous poll: no live latency is at stake there, and a backtest at Max speed could lap a ring
 in 100 ms. The ordering margin (`WatermarkMargin`, 10 ms) does not depend on the poll interval: every pass drains every
