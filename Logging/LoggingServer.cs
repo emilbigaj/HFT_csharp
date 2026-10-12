@@ -140,8 +140,9 @@ public class ClientSocketReader : IReader
     Timestamp _lastDataTime = Timestamp.UtcNow; // wall-clock of the last real read; drives the idle-flush of the held tail
 
     // Order is guaranteed only while no active channel's reads lag the leading edge by more than this.
-    // It must exceed the worst-case per-channel read lag (poll interval + scheduling/GC/visibility jitter),
-    // NOT just the data period — a margin == period leaves no slack and lets rare 1-round lags slip through.
+    // It must exceed how long one pass takes to drain every channel (plus scheduling/GC jitter) and how stale a
+    // timestamp can be when written, NOT the poll interval: a pass drains every channel, so a record read in a
+    // later pass was written after this pass read its channel (see Spec.md "Logging polls every 100 ms live").
     static readonly Duration WatermarkMargin = Duration.FromMilliseconds(10);
 
     public ReadStatus TryRead(List<PooledBuffer> results)
@@ -350,6 +351,7 @@ public class LoggingServer : IDisposable
     private volatile bool _disposed;
     private SocketHeader?[] _clientSocketHeaders;
     private readonly int Capacity = 1024;
+    private const int s_realtimePollIntervalMilliseconds = 100;
 
     public Logger Logger { get; }
     public Telegram Alerts { get; }
@@ -600,6 +602,7 @@ public class LoggingServer : IDisposable
 
     }
 
+    // Live, one pass per 100 ms; a simulation polls continuously, since at Max speed a backtest could lap a 2 MB ring in 100 ms (see Spec.md "Logging polls every 100 ms live").
     private void PollerLoop()
     {
         SpinWait spinWait = new SpinWait();
@@ -607,12 +610,6 @@ public class LoggingServer : IDisposable
         {
             try
             {
-                if (_sleeping.IsEmpty)
-                {
-                    spinWait.SpinOnce();
-                    continue;
-                }
-
                 bool anyWorkThisPass = false;
 
                 foreach (var kvp in _sleeping)
@@ -642,7 +639,12 @@ public class LoggingServer : IDisposable
                     }
                 }
 
-                if (!anyWorkThisPass)
+                // Why sleep live: a continuous poll reads the line each writer writes next, so each write waits to take it back
+                if (Clock.Mode == ClockMode.Realtime)
+                {
+                    Thread.Sleep(s_realtimePollIntervalMilliseconds);
+                }
+                else if (!anyWorkThisPass)
                 {
                     spinWait.SpinOnce();
                 }
