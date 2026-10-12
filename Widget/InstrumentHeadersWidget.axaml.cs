@@ -287,34 +287,15 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
 
         HeadersGrid.PointerMoved += (s, e) => _lastPointerPos = e.GetPosition(HeadersGrid);
 
-        // Targeted refresh for allocations made through this GUI. The timer diff below only watches
-        // Primary.InstrumentIds — in a strategy workspace that is the algo's context, which a
-        // GUI-client allocation never touches, so without this the InstrumentId column stays blank.
-        _context.Manual.Instrument += OnManualInstrumentAllocated;
-
         _refreshTimer = new Timer(100);
         _refreshTimer.Elapsed += OnRefresh;
         _refreshTimer.AutoReset = false;
         _refreshTimer.Start();
     }
 
-    // Fires on the ManualClient's owner thread once the allocation echo lands — re-read the one
-    // header (the server has stamped InstrumentId into shared memory by then) and update that row.
-    private void OnManualInstrumentAllocated(Instrument instrument)
-    {
-        int instrumentHeaderId = instrument.Header.InstrumentHeaderId;
-        InstrumentHeader128 header128 = _context.Primary.GetInstrumentHeader(instrumentHeaderId).Read();
-        Dispatcher.UIThread.Post(() =>
-        {
-            if (_disposed) return;
-            if (_headersById.TryGetValue(instrumentHeaderId, out WidgetInstrumentHeader? row))
-                row.Update(in header128);
-        });
-    }
-
     private void LoadAllHeaders()
     {
-        _lastSubs = _context.Primary.InstrumentIds;
+        _lastSubs = ContextManager.ServerContext.InstrumentIds;
         foreach (InstrumentHeader128 header128 in _context.Primary.EnumerateInstrumentHeaders())
         {
             int instrumentHeaderid = header128.AsInstrumentHeader().InstrumentHeaderId;
@@ -330,7 +311,8 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
 
         try
         {
-            Bitset64 currentSubs = _context.Primary.InstrumentIds;
+            // Why: every instrument the server allocated, not just the principal's, so a GUI's own allocation (on a remote desk too) shows here
+            Bitset64 currentSubs = ContextManager.ServerContext.InstrumentIds;
             Bitset64 diff = new Bitset64(currentSubs.Raw ^ _lastSubs.Raw);
             diff.Raw &= currentSubs.Raw;
 
@@ -502,8 +484,6 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
     {
         if (_disposed) return;
         _disposed = true;
-        if (_context is not null)
-            _context.Manual.Instrument -= OnManualInstrumentAllocated;
         _refreshTimer?.Stop();
         _refreshTimer?.Dispose();
     }

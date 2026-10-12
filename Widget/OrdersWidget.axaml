@@ -50,6 +50,7 @@
                 <DataGridTextColumn Header="Side" Binding="{Binding Side}" Width="Auto"/>
 
                 <DataGridTextColumn Header="StateStatus" Binding="{Binding StateStatus}" Width="Auto"/>
+                <DataGridTextColumn Header="StateReason" Binding="{Binding StateReason}" Width="Auto"/>
                 <DataGridTextColumn Header="StateSeq" Binding="{Binding StateSeq}" Width="Auto"/>
                 <DataGridTextColumn Header="StatePrice" Binding="{Binding StatePriceStr}" Width="Auto"/>
                 <DataGridTextColumn Header="StateTicks" Binding="{Binding StateTicks}" IsVisible="False" Width="Auto"/>

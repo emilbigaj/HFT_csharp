@@ -318,17 +318,17 @@ public sealed class Position
                     bool targetRejected = target.OrderTargetStatus == OrderStateStatus.Done;
 
                     // might be false if New not set yet by server, OrderTargetAction.Create must be inflight
-                    bool sameOrder = state.OrderHeader.OrderId == target.OrderHeader.OrderId;
+                    bool isSameOrder = state.OrderHeader.OrderId == target.OrderHeader.OrderId;
 
                     // Until the server reads the Create, the state row still holds the slot's previous order: its fills are not ours.
-                    int quantityFilled = sameOrder ? state.QuantityFilled : 0;
+                    int quantityFilled = isSameOrder ? state.QuantityFilled : 0;
 
                     bool targetIsCancel = !targetRejected && (target.OrderTargetAction == OrderTargetAction.Cancel || target.OrderProfile.Sign * (target.OrderProfile.Quantity - quantityFilled) <= 0);
 
-                    bool stateIsTruth = targetRejected || (sameOrder && state.OrderHeader.Seq >= target.OrderHeader.Seq);
+                    bool stateIsTruth = targetRejected || (isSameOrder && state.OrderHeader.Seq >= target.OrderHeader.Seq);
 
                     // Done once the state says so, or as soon as a cancel is sent, even before the server has read the Create.
-                    bool isOrderDone = (sameOrder && state.OrderStateStatus == OrderStateStatus.Done) || targetIsCancel;
+                    bool isOrderDone = (isSameOrder && state.OrderStateStatus == OrderStateStatus.Done) || targetIsCancel;
 
                     if (isOrderDone)
                     {
@@ -340,7 +340,7 @@ public sealed class Position
                     }
 
                     // An in-flight reduce keeps the order's place in the queue; a new price or more size does not.
-                    bool reduceOnly = !targetRejected && sameOrder && target.OrderTargetAction == OrderTargetAction.Reduce && target.OrderHeader.Seq == state.OrderHeader.Seq + 1;
+                    bool reduceOnly = !targetRejected && isSameOrder && target.OrderTargetAction == OrderTargetAction.Reduce && target.OrderHeader.Seq == state.OrderHeader.Seq + 1;
 
                     OrderProfile orderProfile = stateIsTruth ? state.OrderProfile : target.OrderProfile;
                     int quantityAhead;
@@ -353,7 +353,7 @@ public sealed class Position
                     }
                     else
                     {
-                        // Unconfirmed: it joins behind everything resting at its price, as Server's PendingNew seed assumes.
+                        // Unconfirmed: it joins behind everything resting at its price, as Server's InFlight seed assumes.
                         ref readonly MarketByPrice64 mbp64 = ref _position.Instrument.MarketByPrice;
                         quantityAhead = orderProfile.Side == Side.Buy ? mbp64.Bids.GetQuantity(orderProfile.Ticks) : mbp64.Asks.GetQuantity(orderProfile.Ticks);
                         quantityBehind = 0;

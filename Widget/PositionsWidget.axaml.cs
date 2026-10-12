@@ -239,7 +239,7 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
             AlgoStatus = targetAlgoStatus,
             InstrumentId = pos.InstrumentId,
             StrategyId = pos.StrategyId,
-            ClientId = _context.Manual.ClientId()
+            ClientId = _context.Manual.Context.ClientId
         };
         _context.Manual.OnControlAlgoStatus(controlAlgoStatus);
     }
@@ -256,7 +256,7 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
                 AlgoStatus = targetAlgoStatus,
                 InstrumentId = pos.InstrumentId,
                 StrategyId = pos.StrategyId,
-                ClientId = _context.Manual.ClientId()
+                ClientId = _context.Manual.Context.ClientId
             };
             _context.Manual.OnControlAlgoStatus(controlAlgoStatus);
         }

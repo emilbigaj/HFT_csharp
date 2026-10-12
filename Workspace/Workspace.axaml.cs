@@ -16,6 +16,7 @@ using Avalonia.Threading;
 using Data;
 using Execution;
 using Provider;
+using Socket;
 using Tools;
 using Widget;
 
@@ -30,13 +31,15 @@ namespace Workspace;
 public partial class Workspace : Window, IWidgetHost
 {
     public Context Context { get; } = null!;
-    public ManualClient ManualClient { get; } = null!;
-    public AlertManager AlertManager { get; } = null!;
+    public IManualClient ManualClient { get; } = null!;
+    public AlertManager? AlertManager { get; }   // null on a remote desk: no Logging there; its stand-in alerts beside the server
     public WorkspaceContext WorkspaceContext { get; } = null!;
     private readonly System.Timers.Timer _refreshTimer = null!;
     private string? _currentWorkspacePath;
     private Thread _clientThread = null!;
     private volatile bool _isClosing = false;
+    private ulong _latencySeq;                                                // the Latency[0] row's seq when last seen to change (UI thread)
+    private Timestamp _latencyTimestamp = Timestamp.StopwatchNow;             // when it last changed
     public Workspace()
     {
         InitializeComponent();
@@ -49,18 +52,19 @@ public partial class Workspace : Window, IWidgetHost
         // Idempotent: sizes the symbology-string cache and warms it off-thread (see Spec.md).
         SymbolCache.Initialize(ContextManager.ServerContext);
 
-        // Passing ServerName for both names selects server mode: the GUI still connects as its own
-        // "<server>_GUI" client, but shadows every client instead of one algo and books manual
-        // orders to the reserved house strategy.
-        ManualClient = new ManualClient(
-            context is ClientContext clientContext ? clientContext.ClientName : Context.ServerName,
-            Context.ServerName);
+        // The server as principal selects server mode: the GUI still connects as its own "<server>_GUI<n>"
+        // client, but shadows every client instead of one algo and books manual orders to the reserved house
+        // strategy. Open takes the first free number, so any number of workspaces may share a principal.
+        ManualClient = Provider.ManualClient.Open(context is ClientContext clientContext ? clientContext.ClientName : Context.ServerName, Context.ServerName);
 
-        AlertManager = new AlertManager(ManualClient.Context);
-        Clock.Exception += AlertManager.OnException;
-        ManualClient.OrderRejected += OnClientOrderRejected;
+        if (ManualClient is Provider.ManualClient manualClient)
+        {
+            AlertManager = new AlertManager(ManualClient.Context);
+            Clock.Exception += AlertManager.OnException;
+            manualClient.OrderRejected += (in OrderRejected orderRejected) => AlertManager!.OnOrderRejected(orderRejected, "");
+        }
 
-        _clientThread = LowLatency.StartBackgroundThread($"{ManualClient.ClientName}", () =>
+        _clientThread = LowLatency.StartBackgroundThread($"{ManualClient.Context.ClientName}", () =>
         {
             while (!Tools.Application.IsExiting && !_isClosing)
             {
@@ -71,7 +75,9 @@ public partial class Workspace : Window, IWidgetHost
                 }
                 catch(Exception exception)
                 {
-                    AlertManager.OnException(exception);
+                    // Why: the console too: a remote desk has no AlertManager
+                    Console.WriteLine($"Workspace client thread: {exception}");
+                    AlertManager?.OnException(exception);
                 }
                 Thread.Sleep(1);
             }
@@ -100,11 +106,6 @@ public partial class Workspace : Window, IWidgetHost
         _refreshTimer.Start();
     }
 
-    private void OnClientOrderRejected(in OrderRejected orderRejected)
-    {
-        AlertManager.OnOrderRejected(orderRejected, "");
-    }
-
     private void OnWorkspaceClosed(object? sender, EventArgs e)
     {
         _isClosing = true;
@@ -113,7 +114,6 @@ public partial class Workspace : Window, IWidgetHost
         if (AlertManager != null)
         {
             Clock.Exception -= AlertManager.OnException;
-            ManualClient.OrderRejected -= OnClientOrderRejected;
             AlertManager.Dispose();
         }
 
@@ -142,6 +142,9 @@ public partial class Workspace : Window, IWidgetHost
         Dispatcher.UIThread.Post(() =>
         {
             TimestampText.Text = Context.ServerHeader.GetReadonlyRef().Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff");
+            // A remote desk shows its Mirror link's latency beside the clock (see Spec.md "Remote workspaces")
+            if (ManualClient is RemoteClient)
+                TimestampText.Text = GetLatencyText() + "    " + TimestampText.Text;
             if (SimulationSpeedButton.IsVisible)
             {
                 // The speed the clock thread has applied, not the one last requested.
@@ -150,6 +153,20 @@ public partial class Workspace : Window, IWidgetHost
                     SimulationSpeedButton.Content = simulationSpeedText;
             }
         });
+    }
+
+    // Latency[0], or how long since the Remote Mirror last rewrote it when longer (it rewrites it every pass, so a frozen or
+    // dead Remote Mirror climbs like a stalled link); broken when below 0 or not rewritten for the silence timeout.
+    private string GetLatencyText()
+    {
+        ref SharedArrayEntry<Duration> latencyEntry = ref Context.GetLatency(0);
+        if (latencyEntry.GetSeq() != _latencySeq)
+            (_latencySeq, _latencyTimestamp) = (latencyEntry.GetSeq(), Timestamp.StopwatchNow);
+        Duration latencyAge = Timestamp.StopwatchNow - _latencyTimestamp;
+        // Why a plain read: one aligned 8-byte Duration cannot tear, and Read would spin forever on a row a killed Remote Mirror left mid-write
+        Duration latency = latencyEntry.GetReadonlyRef();
+        bool isBroken = latency < Duration.Zero || latencyAge >= RemoteClient.s_silenceTimeout;
+        return isBroken ? "Connection broken – reconnecting…" : $"{(latency > latencyAge ? latency : latencyAge).TotalMilliseconds:0} ms";
     }
 
     private static string FormatSimulationSpeed(double simulationSpeed)

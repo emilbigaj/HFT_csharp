@@ -22,6 +22,7 @@ public sealed class WidgetOrder : INotifyPropertyChanged
     public ulong ClientOrderId => _orderState.OrderHeader.OrderId;
     public Side Side => _orderState.OrderProfile.Side;
     public OrderStateStatus StateStatus => _orderState.OrderStateStatus;
+    public OrderStateReason StateReason => _orderState.OrderStateReason;
     public int StateSeq => _orderState.OrderHeader.Seq;
     public int StateTicks => _orderState.OrderProfile.Ticks;
     public string StatePriceStr => _instrument.TicksToPrice(StateTicks).ToString(_priceFormat);

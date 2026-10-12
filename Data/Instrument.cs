@@ -12,7 +12,7 @@ namespace Data;
 
 [StructLayout(LayoutKind.Sequential, Size = 4)]
 [RegisterJson]
-public struct Header<T>(T type) where T : Enum
+public struct Header<T> where T : Enum
 {
     // NOT readonly, deliberately. Json.Options sets IncludeFields, and System.Text.Json will happily
     // serialise a readonly field but cannot deserialise into one — so a writable outer Header field
@@ -20,16 +20,20 @@ public struct Header<T>(T type) where T : Enum
     // the message type came back as 0. That silently breaks every dispatcher, since they all switch
     // on the first byte: a RiskLimit restored from <symbol>.risklimit hit `default:` in
     // Server.ReadAdmin and the operator's edit was dropped without a word.
-    public T Type = type;
-    private unsafe fixed byte _reserved[3];
+    public T Type;
 
-    static Header()
+    // Why: the byte check lives here, not in a static constructor: that cost every row's constructor a class-init check
+    // and kept it from inlining; Unsafe.SizeOf<T>() is a JIT-time constant, so for a byte enum this compiles to nothing
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public Header(T type)
     {
         if (Unsafe.SizeOf<T>() != sizeof(byte))
-        {
-            throw new InvalidOperationException($"Enum {typeof(T).Name} must be a byte.");
-        }
+            ThrowTypeIsNotByte();
+        Type = type;
     }
+
+    [DoesNotReturn, MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowTypeIsNotByte() => throw new InvalidOperationException($"Header<T>.Header: enum {typeof(T).Name} must be a byte: every row's first byte is its type.");
 }
 
 

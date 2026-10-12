@@ -2,6 +2,10 @@
 
 	<Import Project="..\HFT.targets" />
 
+	<PropertyGroup>
+		<!-- Why: HFT.targets makes every project an exe; Provider has no entry point, every exe references it -->
+		<OutputType>Library</OutputType>
+	</PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Data\Data.csproj" />

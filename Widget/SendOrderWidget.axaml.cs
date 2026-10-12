@@ -875,11 +875,10 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
         {
             OrderHeader = new()
             {
-                // template: ClientId is needed for TCPServer routing on the remote path;
-                // Client.Create stamps ClientId/StrategyId authoritatively before allocation
+                // template: Client.Create stamps ClientId/StrategyId authoritatively before allocation
                 OrderId = new OrderId
                 {
-                    ClientId = _context.Manual.ClientId(),
+                    ClientId = _context.Manual.Context.ClientId,
                     InstrumentId = _viewModel.SelectedCreateOrderInstrument.InstrumentId,
                 },
                 Seq = 1,

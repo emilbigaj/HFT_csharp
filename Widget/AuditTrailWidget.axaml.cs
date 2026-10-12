@@ -196,7 +196,7 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
         // Primary carries the algo/server tap; the manual client's order traffic is tapped into its
         // own <name>_GUI/Audit directory, so read both (they coincide when the workspace IS the _GUI client).
         string primaryAuditDirectoryPath = _context.Primary.AuditDirectoryPath.Path;
-        string manualAuditDirectoryPath = Provider.Context.GetAuditDirectoryPath(_context.Manual.ClientName);
+        string manualAuditDirectoryPath = Provider.Context.GetAuditDirectoryPath(_context.Manual.Context.ClientName);
         AddLogReader(primaryAuditDirectoryPath);
         if (!string.Equals(manualAuditDirectoryPath, primaryAuditDirectoryPath, StringComparison.OrdinalIgnoreCase))
             AddLogReader(manualAuditDirectoryPath);

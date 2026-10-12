@@ -144,6 +144,32 @@ public enum ClientStatus : byte
     Closed = 4
 }
 
+// Why a connect was refused: the reply's SocketHeader.ClientId, which is the client's id when 0 or more.
+public enum ConnectRefusal : int
+{
+    NoClientIdAvailable = -1,   // the allocators' existing "no id" return
+    ServerError = -2,
+    AlreadyConnected = -3,
+    Closing = -4,               // the name's previous session is still closing: Connect asks again
+    ReservedClientName = -5,
+    NotReady = -6,              // the server's admission rule refused it for now (Server: orders a previous process left are still working)
+    RemoteDesk = -7,            // a live Remote Mirror, not a server: only a RemoteClient attaches here (ManualClient.Open then opens one)
+}
+
+// The server's rule for whether a name no live process holds may connect now; false refuses it as NotReady.
+public delegate bool IsClientReady(int clientId);
+
+// A connect the server refused, with its reason.
+public sealed class ConnectRefusedException(string message, ConnectRefusal connectRefusal) : InvalidOperationException(message)
+{
+    public ConnectRefusal ConnectRefusal { get; } = connectRefusal;
+}
+
+// Reads one ring. It keeps no "closed" state, deliberately: a close message in the ring ends the writer's session, not the
+// ring, so TryRead returns Closed for that one message and reads on after it, where a reconnect under the same name writes
+// its next session. Whoever owns a session decides what Closed means: the ServerSocket ends the client's session (its
+// reads are gated on the client being Open), and Logging's audit tap records straight through, so the session after a
+// reconnect is audited too (see Spec.md "A reader never latches closed").
 public sealed class ReadOnlySocket : IDisposable
 {
     public static readonly int BufferSize = 64 * 1024;
@@ -156,7 +182,6 @@ public sealed class ReadOnlySocket : IDisposable
     private unsafe byte* _endPtr = null;
     private ulong _readSeq = 0;
     private byte[] _buffer = null!;
-    private bool _isClosed = false;
     private bool _isDisposed = false;
 
     public ReadOnlySocket(string name, SharedMemoryView view)
@@ -183,7 +208,6 @@ public sealed class ReadOnlySocket : IDisposable
         _ownedMemory = memory;
     }
 
-    public bool IsClosed { get { return _isClosed; } }
     public bool IsDisposed { get { return _isDisposed; } }
 
     public int Length
@@ -209,7 +233,6 @@ public sealed class ReadOnlySocket : IDisposable
         {
             Protocol.SkipRing(ref _readPtr, _startPtr, _endPtr, ref _readSeq);
         }
-        _isClosed = false;   // the previous session's close message is not ours
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -221,51 +244,29 @@ public sealed class ReadOnlySocket : IDisposable
             _readPtr = _startPtr;
         }
         _readSeq = 0;
-        _isClosed = false;
     }
 
-    public void Close()
-    {
-        if (_isDisposed) throw new ObjectDisposedException(Name);
-        _isClosed = true;
-    }
-
+    // Closed for a close message (that one read only: see the class comment), otherwise the ring's status.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public unsafe ReadStatus TryRead(out ReadOnlySpan<byte> rdst)
     {
         if (_isDisposed) throw new ObjectDisposedException(Name);
-        if (_isClosed)
-        {
-            rdst = ReadOnlySpan<byte>.Empty;
-            return ReadStatus.Closed;
-        }
-
         ReadStatus status = Protocol.TryReadFromRing(ref _readPtr, _startPtr, _endPtr, _buffer, out rdst, ref _readSeq);
-        if (Socket.IsCloseMessage(rdst))
-        {
-            _isClosed = true;
-            return ReadStatus.Closed;
-        }
-
-        return status;
+        // Why: no latch: the close message ends the writer's session, not the ring; the next read continues after it
+        return Socket.IsCloseMessage(rdst) ? ReadStatus.Closed : status;
     }
 
+    // Closed for a close message (that one read only: see the class comment), otherwise the ring's status.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public unsafe ReadStatus TryRead<T>(ref T value) where T : unmanaged
     {
         if (_isDisposed) throw new ObjectDisposedException(Name);
-        if (_isClosed)
-        {
-            value = default!;
-            return ReadStatus.Closed;
-        }
-
         Span<byte> dst = MemoryMarshal.AsBytes(MemoryMarshal.CreateSpan(ref value, 1));
         ReadStatus status = Protocol.TryReadFromRing(ref _readPtr, _startPtr, _endPtr, dst, out ReadOnlySpan<byte> rdst, ref _readSeq);
 
+        // Why: no latch: the close message ends the writer's session, not the ring; the next read continues after it
         if (Socket.IsCloseMessage(rdst))
         {
-            _isClosed = true;
             value = default!;
             return ReadStatus.Closed;
         }
@@ -287,7 +288,6 @@ public sealed class ReadOnlySocket : IDisposable
     public unsafe ReadStatus GetReadStatus()
     {
         if (_isDisposed) throw new ObjectDisposedException(Name);
-        if (_isClosed) return ReadStatus.Closed;
         return Protocol.GetReadStatusFromRing((Protocol.Header64*)_readPtr, _startPtr, _endPtr, _readSeq);
     }
 
@@ -531,8 +531,8 @@ public sealed class Socket : IDisposable
     {
         if (_isDisposed) throw new ObjectDisposedException(Name);
         _isClosed = true;
+        // Why: only the writers close: a close is a message to the other side; a reader keeps no closed state (see ReadOnlySocket)
         foreach (WriteOnlySocket writer in _writeOnlySockets) writer?.Close();
-        foreach (ReadOnlySocket reader in _readOnlySockets) reader?.Close();
     }
 
     public void Dispose()
@@ -706,6 +706,7 @@ public sealed class ClientSocket : IDisposable
 
     private SocketHeader _socketHeader;
     private readonly Socket _socket;
+    private readonly Application.ExitAction _closeOnExit;
 
     public ClientSocket(string clientName, string serverName, int[] clientToServerLengths, int[] serverToClientLengths)
     {
@@ -761,53 +762,75 @@ public sealed class ClientSocket : IDisposable
         }
 
         _socket = new Socket(Name, sharedMemory, clientToServer, serverToClient);
-        Application.AddExitAction($"Close ClientSocket {Name}", Close);
+        _closeOnExit = Application.AddExitAction($"Close ClientSocket {Name}", Close);
     }
 
     public bool IsDisposed { get { return _socket == null || _socket.IsDisposed; } }
     public bool IsClosed { get { return _socket == null || _socket.IsClosed; } }
 
+    // Asks the server for this client's id; returns it, or throws naming the server's refusal. Waits while no server listens.
     public int Connect()
     {
+        // Step 1: a closed socket cannot connect
         if (_socket == null) throw new InvalidOperationException("No socket");
-        if (IsClosed) return -1;
+        if (IsClosed) throw new InvalidOperationException($"ClientSocket.Connect: {ClientName} is closed.");
 
+        // Step 2: ask until the answer is final. Why: Closing settles within one listen pass (Persistance) or 1 s (without)
         using LetterBox<SocketHeader> clientBox = new LetterBox<SocketHeader>(ClientName, Access.Read);
         using LetterBox<SocketHeader> serverBox = new LetterBox<SocketHeader>(ServerName, Access.Write);
-
-        while (!serverBox.TryStore(in _socketHeader))
+        int clientId = RequestClientId(clientBox, serverBox);
+        while (clientId == (int)ConnectRefusal.Closing)
         {
-            Thread.Sleep(1);
+            Thread.Sleep(100);
+            clientId = RequestClientId(clientBox, serverBox);
         }
 
-        Timestamp waitingSince = Timestamp.UtcNow;
-        SocketHeader reply = default;
+        // Step 3: refused: release without writing a close. Why: these rings may carry a live process's session under this name
+        if (clientId < 0)
+        {
+            Dispose();
+            throw new ConnectRefusedException($"ClientSocket.Connect: server {ServerName} refused {ClientName}: {(ConnectRefusal)clientId}.", (ConnectRefusal)clientId);
+        }
+        Console.WriteLine($"{ClientName}: Connected.");
+        return clientId;
+    }
 
+    // Posts one request under a fresh timestamp; returns the ClientId of the reply to it.
+    private int RequestClientId(LetterBox<SocketHeader> clientBox, LetterBox<SocketHeader> serverBox)
+    {
+        // Step 1: stamp and post; the timestamp tells this request's reply from an earlier one's
+        _socketHeader.Timestamp = Timestamp.UtcNow;
+        while (!serverBox.TryStore(in _socketHeader))
+            Thread.Sleep(1);
+
+        // Step 2: wait for the reply to this request: same name, timestamp and process
+        Timestamp waitingSince = Timestamp.UtcNow;
         while (true)
         {
-            bool peek = clientBox.TryPeek(out reply);
-
-            if (peek && reply.ClientName == _socketHeader.ClientName && reply.Timestamp == _socketHeader.Timestamp)
+            if (clientBox.TryPeek(out SocketHeader reply) && reply.ClientName == _socketHeader.ClientName
+                && reply.Timestamp == _socketHeader.Timestamp && reply.ClientProcessId == _socketHeader.ClientProcessId)
             {
-                clientBox.TryEmpty(out reply);
-                break;
+                clientBox.TryEmpty(out _);
+                return reply.ClientId;
             }
-
             Timestamp now = Timestamp.UtcNow;
             if ((now - waitingSince).TotalSeconds > 3)
             {
                 waitingSince = now;
                 Console.WriteLine($"{ClientName}: Waiting for server {ServerName}...");
             }
-
             Thread.Sleep(1);
         }
-        Console.WriteLine($"{ClientName}: Connected.");
-        return reply.ClientId;
     }
 
     public void Close() => _socket?.Close();
-    public void Dispose() => _socket?.Dispose();
+
+    public void Dispose()
+    {
+        // Why: once released there is nothing to close at exit; the exit action would also throw on a disposed socket
+        _closeOnExit.Cancel();
+        _socket?.Dispose();
+    }
 
     // Park every cursor at the head of the ring: whatever is queued is skipped.
     public void Recover()
@@ -878,7 +901,7 @@ public sealed class ServerSocket : IDisposable
 
     // ClientAllocated means "a socket was created for this client" and fires once per socket.
     // ClientOpened/ClientClosed fire on every attach/detach. Anything that needs a live socket must
-    // hang off ClientOpened: at ClientAllocated time the socket may not exist yet.
+    // hang off ClientOpened: at ClientAllocated time the socket exists but no process is attached to it yet.
     public event ClientAllocated? ClientAllocated;
     public event ClientAllocated? ClientDeallocated;
     public event Action<int>? ClientOpened;
@@ -886,6 +909,7 @@ public sealed class ServerSocket : IDisposable
     public event Action<Exception>? Exception;
     public ClientIdAllocator AllocateClientId;
     public ClientDeallocator DeallocateClient;
+    public IsClientReady? IsClientReady;
 
 
     private readonly LetterBox<SocketHeader> _letterBox;
@@ -923,8 +947,17 @@ public sealed class ServerSocket : IDisposable
         {
             while (_isRunning)
             {
-                PollPids();
-                PollLetterBox();
+                // Why: one bad request or event handler must not end this thread; it is what notices every dead client and cancels its orders
+                try
+                {
+                    PollPids();
+                    PollLetterBox();
+                }
+                catch (Exception exception)
+                {
+                    Console.WriteLine($"{ServerName}.Listen: {exception}");
+                    Exception?.Invoke(exception);
+                }
                 Thread.Sleep(1);
             }
         });
@@ -1039,11 +1072,7 @@ public sealed class ServerSocket : IDisposable
         clientHeader.ClosedTimestamp = Timestamp.MaxValue;
         clientHeader.ClientProcessId = socketHeader.ClientProcessId;
 
-        using LetterBox<SocketHeader> clientBox = new LetterBox<SocketHeader>(socketHeader.ClientName.ToString(), Access.Write);
-        while (!clientBox.TryStore(in socketHeader))
-        {
-            Thread.Sleep(1);
-        }
+        ReplyToClient(in socketHeader);
 
         clientHeader.Status.Store(ClientStatus.Open);
         _clientIds.AtomicSet(clientId);
@@ -1076,49 +1105,85 @@ public sealed class ServerSocket : IDisposable
 
     }
 
+    // Takes one connect request and answers it exactly once: the client's id, or a negative ConnectRefusal.
     private void PollLetterBox()
     {
-        if (_letterBox.TryEmpty(out SocketHeader socketHeader))
+        // Step 1: take the request
+        if (!_letterBox.TryEmpty(out SocketHeader socketHeader))
+            return;
+        string clientName = socketHeader.ClientName.ToString();
+        Console.WriteLine($"{GetType().Name}::{ServerName}: Received connection request from {clientName}");
+
+        // Step 2: decide. Why: a throw used to end the listen thread and leave the client waiting forever; it is answered too
+        try
         {
-            string clientName = socketHeader.ClientName.ToString();
-            Console.WriteLine($"{GetType().Name}::{ServerName}: Received connection request from {clientName}");
+            DecideConnect(ref socketHeader);
+        }
+        catch (Exception exception)
+        {
+            Console.WriteLine($"{GetType().Name}::{ServerName}: Client {clientName} connect failed: {exception.Message}");
+            Exception?.Invoke(exception);
+            socketHeader.ClientId = (int)ConnectRefusal.ServerError;
+        }
 
-            int clientId = AllocateClientId(in socketHeader);
-            socketHeader.ClientId = clientId;
-            if (clientId < 0)
-            {
-                Console.WriteLine($"{GetType().Name}::{ServerName}: Client {clientName} failed to allocate clientId.");
-                return;
-            }
+        // Step 3: a refused client is told why; an accepted one is attached, and OpenClient sends its id
+        if (socketHeader.ClientId < 0)
+        {
+            Console.WriteLine($"{GetType().Name}::{ServerName}: Client {clientName} refused: {(ConnectRefusal)socketHeader.ClientId}.");
+            ReplyToClient(in socketHeader);
+            return;
+        }
+        OpenClient(in socketHeader);
+    }
 
-            ClientStatus status = _clientHeaders[clientId].Status.State;
+    // Sets ClientId to the client's id, building its socket on its first attach, or to a negative ConnectRefusal.
+    private void DecideConnect(ref SocketHeader socketHeader)
+    {
+        // Step 1: the name's id. Why: a request never chooses its own id; one that did could take another client's slot
+        socketHeader.ClientId = -1;
+        socketHeader.ClientId = AllocateClientId(in socketHeader);
+        if (socketHeader.ClientId < 0)
+            return;
 
-            if (status == ClientStatus.Open)
-            {
-                Console.WriteLine($"{GetType().Name}::{ServerName}: Client {clientName} is already connected.");
-                return;
-            }
-            else if (status == ClientStatus.Closing || status == ClientStatus.Closed)
-            {
-                // An unhandled status would fall through into OpenClient and swallow the close.
-                Console.WriteLine($"{GetType().Name}::{ServerName}: Client {clientName} is in the process of closing. Try again in a moment.");
-                return;
-            }
-            else if (status == ClientStatus.Detached)
-            {
-                // Re-attach: deliberately skip CreateClient and reuse the existing Socket. That is
-                // what preserves both the buffered ring and this side's read cursors.
-            }
-            else if (status == ClientStatus.Disposed)
-            {
-                if (ClientAllocated != null)
-                {
-                    ClientAllocated(in socketHeader);
-                }
-                CreateClient(in socketHeader);
-            }
+        // Step 2: one process per name. Why: a close is finished on this thread (PollPids); opening now would swallow it
+        ClientStatus status = _clientHeaders[socketHeader.ClientId].Status.State;
+        if (status == ClientStatus.Open)
+        {
+            socketHeader.ClientId = (int)ConnectRefusal.AlreadyConnected;
+            return;
+        }
+        if (status == ClientStatus.Closing || status == ClientStatus.Closed)
+        {
+            socketHeader.ClientId = (int)ConnectRefusal.Closing;
+            return;
+        }
 
-            OpenClient(in socketHeader);
+        // Step 3: no live process holds the name; the server may still refuse it for now
+        if (IsClientReady != null && !IsClientReady(socketHeader.ClientId))
+        {
+            socketHeader.ClientId = (int)ConnectRefusal.NotReady;
+            return;
+        }
+
+        // Step 4: a first attach builds the socket, then announces it, as LoadClients does; a Detached client keeps its ring and read cursors
+        if (status == ClientStatus.Disposed)
+        {
+            CreateClient(in socketHeader);
+            ClientAllocated?.Invoke(in socketHeader);
+        }
+    }
+
+    // Stores a reply in the client's letterbox, where Connect matches it to its request.
+    private static void ReplyToClient(in SocketHeader socketHeader)
+    {
+        using LetterBox<SocketHeader> clientBox = new LetterBox<SocketHeader>(socketHeader.ClientName.ToString(), Access.Write);
+        while (!clientBox.TryStore(in socketHeader))
+        {
+            // Why: a client that died before reading its reply leaves it behind (Linux keeps the region), and this loop would spin
+            // forever; only this thread stores here, so the box holds that reply or nothing
+            if (clientBox.TryPeek(out SocketHeader leftoverReply) && !ProcessId.IsAlive(leftoverReply.ClientProcessId))
+                clientBox.TryEmpty(out _);
+            Thread.Sleep(1);
         }
     }
 
@@ -1246,7 +1311,7 @@ public sealed class ServerSocket : IDisposable
         // Detached is writable: this is the change that lets the server buffer fills for a client
         // whose process is gone. Reads stay Open-only — nothing writes to a detached client's
         // inbound ring, and refusing to act on a dead client's last unread order target is
-        // deliberate (CancelAllOrders is about to cancel it anyway).
+        // deliberate (TryCloseOutOrders is about to cancel it anyway).
         // Persistance keeps the ≤1ms Closing window writable too — a fill landing there must not
         // vanish from the very ring persistence exists to preserve (Spec.md "Socket close protocol").
         ClientStatus status = client.Status.State;

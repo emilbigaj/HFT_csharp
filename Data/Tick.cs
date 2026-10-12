@@ -86,7 +86,10 @@ public struct Level(int Ticks, int Quantity)
 public struct TickHeader(TickType tickType, int instrumentId, Timestamp exchangeTimestamp, Timestamp sendingTimestamp, Timestamp nicTimestamp)
 {
     public TickType TickType = tickType;
-    private unsafe fixed byte _reserved[3];
+    // Why: plain bytes, not a fixed buffer: a fixed buffer puts a stack-cookie check in every frame holding the struct
+    private byte _reserved0;
+    private byte _reserved1;
+    private byte _reserved2;
     public int InstrumentId = instrumentId;
     public Timestamp ExchangeTimestamp = exchangeTimestamp; // message was received by the Market Segment Gateway and had FIFO order handling applied
     public Timestamp SendingTimestamp = sendingTimestamp; // timestamp from the exchange - when did the exchange put the packet on the wire

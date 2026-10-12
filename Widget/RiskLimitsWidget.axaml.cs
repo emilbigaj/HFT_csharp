@@ -355,7 +355,7 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
             // timestamp, the logging server appends the .risklimit line. The grid picks the change up
             // on its next refresh.
             ControlRiskLimit controlRiskLimit = edited.Value;
-            controlRiskLimit.ClientId = _context.Manual.ClientId();
+            controlRiskLimit.ClientId = _context.Manual.Context.ClientId;
             _context.Manual.OnControlRiskLimit(in controlRiskLimit);
         }
         catch (Exception ex)

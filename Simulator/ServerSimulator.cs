@@ -959,7 +959,7 @@ public class InstrumentSimulator
                 OrderHeader = orderTarget.OrderHeader,
                 TimeInForce = orderTarget.TimeInForce,
                 QuantityFilled = 0,
-                QuantityAhead = -1,   // no real position: OnQueuePosition always sends the first one, since the server's PendingNew seed is the book quantity, not ours
+                QuantityAhead = -1,   // no real position: OnQueuePosition always sends the first one, since the server's InFlight seed is the book quantity, not ours
                 OrderStateStatus = OrderStateStatus.Active,
                 OrderStateReason = OrderStateReason.Acked,
                 OrderProfile = targetProfile,
@@ -1117,14 +1117,7 @@ public class ExchangeSimulator
 
         if (!orderRejectedReasons.IsEmpty)
         {
-            OrderRejected orderRejected = new OrderRejected()
-            {
-                OrderHeader = orderTarget.OrderHeader,
-                OrderProfile = orderTarget.OrderProfile,
-                OrderTargetAction = orderTarget.OrderTargetAction,
-                OrderRejectedReasons = orderRejectedReasons,
-                OrderRejectedSource = OrderRejectedSource.Exchange,
-            };
+            orderTarget.NewOrderRejected(orderRejectedReasons, OrderRejectedSource.Exchange, out OrderRejected orderRejected);
 
             ServerSimulator.FromExchangeToNicToClient_OrderRejected(in orderRejected);
         }
@@ -1632,7 +1625,7 @@ public class ServerSimulator
                     break;
                 case (byte)OrderType.AheadOfOrder:
                     ref readonly AheadOfOrder aheadOfOrder = ref MemoryMarshal.AsRef<AheadOfOrder>(src);
-                    _server.OnQuantityAhead(aheadOfOrder.ClientOrderId, aheadOfOrder.Quantity, aheadOfOrder.QuantityBehind);
+                    _server.OnQuantityAhead(aheadOfOrder.ClientOrderId, aheadOfOrder.QuantityAhead, aheadOfOrder.QuantityBehind);
                     break;
                 case (byte)OrderType.OrderState:
                     OrderState orderState = MemoryMarshal.Read<OrderState>(src);

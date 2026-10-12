@@ -82,6 +82,9 @@ public abstract class Context
     public Access ServerAccess { get; }
     public Access ClientAccess { get; }
 
+    // Root of every server and strategy directory: S:\ (/mnt/S/ on Linux) unless a program sets it at startup, before any path is built.
+    public static FileSystemPath DirectoriesRoot { get; set; } = @"S:\";
+
     public static FileSystemPath GetAlertsFilePath(FileSystemPath directoryPath, DateTime date)
     {
         string fileName = $"{date:yyyy-MM-dd}.alert";
@@ -181,6 +184,7 @@ public abstract class Context
     protected readonly SharedArray<MessageEfficiency> _messageEfficiency;
     protected readonly SharedArray<RollingRateLimit> _rateLimits;
     protected readonly SharedArray<CoreGroup> _coreGroups;
+    protected readonly SharedArray<Duration> _latencies;   // per CoreGroup's link; below 0: disconnected
 
     protected readonly SharedArray<OrderState> _orderStates;
     protected readonly SharedArray<OrderRisk> _orderRisks;
@@ -233,12 +237,8 @@ public abstract class Context
         // CreateOrOpen happily creates it, so the symptom is a hang in EnsureConnected or a
         // permanently empty read, never an error. Keep every site below joined.
         _serverHeaderBox = new LetterBox<ServerHeader>(ServerName / "ServerHeader", ServerAccess);
-        _ = NewSharedArray<ServerHeader>((ServerName / "ServerHeader") + "LetterBox", 1, ServerAccess); // just for mirror
 
         EnsureConnected();
-
-        // Legged headers resolve their legs through this context's shared header array.
-        LeggedHeader.GetLegHeader = instrumentHeaderId => GetInstrumentHeader(instrumentHeaderId).Read();
 
         ref readonly ServerHeader serverHeader = ref ServerHeader.GetReadonlyRef();
 
@@ -268,6 +268,8 @@ public abstract class Context
 
         // Last of the base arrays so the ids before it keep their mirror order. Per context like the book: the server's covers every order on the instrument, a client's only its own.
         _workingRisks = NewSharedArray<WorkingRisk>(directoryPath / "WorkingRisks", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
+        // Appended after it for the same reason
+        _latencies = NewSharedArray<Duration>(serverName / "Latency", serverHeader.CoreGroupIds.Length, ServerAccess);
 
         _instruments = new Instrument[serverHeader.InstrumentIds.Length];
         _positions = new Position[serverHeader.InstrumentIds.Length];
@@ -282,12 +284,33 @@ public abstract class Context
         SharedArray<T> sharedArray = new SharedArray<T>(name, capacity, access, isDense: isDense);
         return sharedArray;
     }
-    internal void Mirror(int arrayId, int index, ReadOnlySpan<byte> srcObj) // done on the mirror side (mirror receives over tcp a pack { arrayId, index, bytes }
+
+    // Every array by id, in creation order, write-capable: the mirror reads and writes them (see Spec.md "Remote workspaces").
+    public SharedArray GetSharedArray(int arrayId) => _sharedArrays[arrayId];
+
+    // A fingerprint of the array layout (each array's row size and capacity, in creation order): two Mirror ends agree only when theirs match.
+    public uint GetLayoutHash()
     {
-        _sharedArrays[arrayId].Write(index, srcObj);
+        uint _layoutHash = 2166136261;   // Why FNV-1a, not HashCode: HashCode is seeded per process, so two machines would never agree
+        for (int arrayId = 0; arrayId < SharedArraysCount; arrayId++)
+            _layoutHash = (_layoutHash ^ (uint)GetSharedArray(arrayId).TypeSize ^ ((uint)GetSharedArray(arrayId).Capacity << 16)) * 16777619;
+        return _layoutHash;
     }
 
-    public SharedArrayEnumerable EnumerateSharedArray(int arrayId, bool snapshot, Span<byte> dstObj) => new SharedArrayEnumerable(_sharedArrays[arrayId], snapshot, dstObj);
+    // Finds a client by its exact name; false when no client has it.
+    public bool TryGetClientId(in String128 clientName, out int clientId)
+    {
+        foreach (int candidateClientId in ServerHeader.GetReadonlyRef().ClientIds)
+        {
+            if (!_clientSocketHeaders[candidateClientId].IsEmpty() && _clientSocketHeaders[candidateClientId].Read().ClientName == clientName)
+            {
+                clientId = candidateClientId;
+                return true;
+            }
+        }
+        clientId = -1;
+        return false;
+    }
 
 
     protected void EnsureConnected()
@@ -392,6 +415,10 @@ public abstract class Context
     {
         return ref _coreGroups.GetEntry(coreGroupId);
     }
+
+    // One per CoreGroup: its link's latency, below 0 while disconnected. On a remote copy, index 0 is the
+    // Mirror link to the CME box, written by the Remote Mirror (see Spec.md "Remote workspaces").
+    public ref SharedArrayEntry<Duration> GetLatency(int coreGroupId) => ref _latencies.GetEntry(coreGroupId);
 
     // Throws when no loaded CoreGroup has that name: a client asking for a group the server does not have is a setup error.
     public int GetCoreGroupId(String16 coreGroupName)
@@ -600,7 +627,10 @@ public abstract class Context
         return header128.AsInstrumentHeader().InstrumentId;
     }
 
-    public abstract OrderEnumerable EnumerateOrders(int instrumentId = -1);
+    // Every client's orders, or only those booked to strategyId (from whichever client sent them); -1 means any.
+    // An order the server has not answered yet is listed only for inFlightClientId (the workspace's own GUI; see Spec.md).
+    public OrderEnumerable EnumerateOrders(int instrumentId = -1, int strategyId = -1, int inFlightClientId = -1)
+        => new OrderEnumerable(_orderStates, _orderTargets, 0, OrderIdAllocator.GetLastGlobalIndex(ServerHeader.GetReadonlyRef().ClientIds.Length - 1), instrumentId, strategyId, inFlightClientId);
 
     public PositionEnumerable EnumeratePositions()
     {
@@ -671,7 +701,7 @@ public sealed class ClientContext : Context
         }
     }
 
-    public static FileSystemPath DirectoriesPath => @$"S:\Strategies\{Clock.Mode}";
+    public static FileSystemPath DirectoriesPath => DirectoriesRoot / "Strategies" / Clock.Mode.ToString();
 
     public static FileSystemPath GetDirectoryPath(string clientName)
     {
@@ -742,21 +772,8 @@ public sealed class ClientContext : Context
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int GetClientIdFromMap(string clientName)
     {
-        String128 clientNameCopy = new String128(clientName);
-        foreach (int i in ServerHeader.GetReadonlyRef().ClientIds)
-        {
-            if (_clientSocketHeaders[i].IsEmpty())
-            {
-                continue;
-            }
-
-            SocketHeader header = _clientSocketHeaders[i].Read();
-
-            if (header.ClientName == clientNameCopy)
-            {
-                return i;
-            }
-        }
+        if (TryGetClientId(new String128(clientName), out int clientId))
+            return clientId;
         throw new InvalidOperationException($"{GetType()}.GetClientIdFromMap({clientName}), Client not connected to server '{ServerName}'.");
     }
 
@@ -809,13 +826,6 @@ public sealed class ClientContext : Context
     private void ThrowInstrumentIdOutOfRange(int instrumentId)
         => throw new ArgumentOutOfRangeException(nameof(instrumentId), $"{GetType()}.ThrowIfInstrumentIdOutOfRange({instrumentId}), instrumentId has not been allocated.");
 
-    // --- C# Specific Implementations ---
-
-    public override OrderEnumerable EnumerateOrders(int instrumentId = -1)
-    {
-        return new OrderEnumerable(_orderStates, _orderTargets, OrderIdAllocator.GetFirstGlobalIndex(_clientId), OrderIdAllocator.GetLastGlobalIndex(_clientId), instrumentId);
-    }
-
     public override void Dispose()
     {
         _localPositionHeaders.Dispose();
@@ -846,6 +856,9 @@ public sealed class ServerContext : Context
         : base(serverName, serverName, access, Access.Read)
     {
         ThrowIfInvalidServerName(serverName);
+
+        // Why a ServerContext: it lives as long as its process; a ClientContext (a Mirror's stand-in) can close while the process trades on (see Spec.md)
+        LeggedHeader.GetLegHeader ??= instrumentHeaderId => GetInstrumentHeader(instrumentHeaderId).Read();
 
         ClientsDirectoryPath = ServerName / "Clients";
         Directory.CreateDirectory(ClientsDirectoryPath);
@@ -885,7 +898,7 @@ public sealed class ServerContext : Context
         }
     }
 
-    public static FileSystemPath DirectoriesPath => @$"S:\Servers\{Clock.Mode}";
+    public static FileSystemPath DirectoriesPath => DirectoriesRoot / "Servers" / Clock.Mode.ToString();
 
     public static FileSystemPath GetDirectoryPath(string serverName)
     {
@@ -938,25 +951,23 @@ public sealed class ServerContext : Context
         return ref _clientSocketHeaders[clientId];
     }
 
+    // The client's id: its existing one, the id it asks for (LoadClients only), or the lowest free one; a negative ConnectRefusal when refused.
     public int AllocateClientId(in SocketHeader socketHeader)
     {
         // The server's leaf name is reserved for strategy 0's directory — a client named after the server would share the house book's files (see Spec.md).
         if (socketHeader.ClientName == ServerStrategyName.Path)
-            throw new InvalidOperationException($"ServerContext.AllocateClientId({ServerName}), client name {socketHeader.ClientName} collides with the reserved server strategy name.");
+            return (int)ConnectRefusal.ReservedClientName;
 
         ref SharedArrayEntry<ServerHeader> serverHeaderEntry = ref ServerHeader;
         ref ServerHeader serverHeader = ref serverHeaderEntry.GetRef();
         ref Bitset64 clientIds = ref ServerHeader.GetRef().ClientIds;
 
-        foreach (int i in clientIds)
-        {
-            if (_clientSocketHeaders[i].GetReadonlyRef().ClientName == socketHeader.ClientName)
-                return i;
-        }
+        if (TryGetClientId(socketHeader.ClientName, out int existingClientId))
+            return existingClientId;
         int clientId = socketHeader.ClientId < 0 ? clientIds.LowestClear : socketHeader.ClientId;
 
         if (clientId < 0)
-            throw new InvalidOperationException($"ServerContext.GetOrAddClientId({ServerName}), Failed allocate clientId for {socketHeader.ClientName}.");
+            return (int)ConnectRefusal.NoClientIdAvailable;
         
         serverHeaderEntry.AcquireLock();
         SocketHeader socketHeaderCopy = socketHeader;
@@ -1122,13 +1133,6 @@ public sealed class ServerContext : Context
     }
 
 
-    // --- C# Specific Implementations ---
-
-    public override OrderEnumerable EnumerateOrders(int instrumentId = -1)
-    {
-        return new OrderEnumerable(_orderStates, _orderTargets, 0, OrderIdAllocator.GetLastGlobalIndex(ServerHeader.GetReadonlyRef().ClientIds.Length - 1), instrumentId);
-    }
-
     // Full state dump for debugging: every entry of every shared structure, zeroed slots included.
     // Reads are unsynchronised — a torn row under concurrent writes is acceptable here; the printed
     // seq tells you (odd = write in progress at read time).
@@ -1210,81 +1214,15 @@ public sealed class ServerContext : Context
 
     public override void Dispose()
     {
+        // Why: a test that starts another server in this process takes the leg lookup over, never keeping a pointer into unmapped memory
+        if (LeggedHeader.GetLegHeader?.Target == this)
+            LeggedHeader.GetLegHeader = null;
         _serverPositionHeaders.Dispose();
         base.Dispose();
     }
 }
 
 // --- Enumerables ---
-
-public ref struct SharedArrayEnumerable
-{
-    private readonly SharedArray _sharedArray;
-    private readonly bool _snapshot;
-    private readonly Span<byte> _dstObj;
-
-    internal SharedArrayEnumerable(SharedArray array, bool snapshot, Span<byte> dstObj)
-    {
-        _sharedArray = array;
-        _snapshot = snapshot;
-        _dstObj = dstObj;
-    }
-
-    public Enumerator GetEnumerator() => new Enumerator(_sharedArray, _snapshot, _dstObj);
-
-    public ref struct Enumerator
-    {
-        private readonly SharedArray _sharedArray;
-        private readonly bool _snapshot;
-        private Span<byte> _dstObj;
-        private int _index;
-        private ReadOnlySpan<byte> rdstObj;
-
-        internal Enumerator(SharedArray array, bool snapshot, Span<byte> dstObj)
-        {
-            _sharedArray = array;
-            _snapshot = snapshot;
-            _dstObj = dstObj;            
-            _index = -1;
-            rdstObj = default;
-        }
-
-        public Record Current => new Record(_index, rdstObj);
-
-        public bool MoveNext()
-        {
-            while (++_index < _sharedArray.Capacity)
-            {
-                ReadStatus readStatus = _sharedArray.TryRead(_index, _dstObj, out rdstObj);
-                if (readStatus == ReadStatus.Empty)
-                    continue;
-                if (_snapshot || readStatus == ReadStatus.New)
-                    return true;
-            }
-            return false;
-        }
-    }
-
-    public readonly ref struct Record
-    {
-        public readonly int Index;
-        public readonly ReadOnlySpan<byte> Bytes;
-
-        internal Record(int index, ReadOnlySpan<byte> bytes)
-        {
-            Index = index;
-            Bytes = bytes;
-        }
-
-        public void Deconstruct(out int index, out ReadOnlySpan<byte> bytes)
-        {
-            index = Index;
-            bytes = Bytes;
-        }
-    }
-}
-
-
 
 public readonly struct PositionEnumerable
 {
@@ -1500,21 +1438,25 @@ public readonly struct OrderEnumerable
     private readonly int _start;
     private readonly int _end;
     private readonly int _instrumentId;
+    private readonly int _strategyId;
+    private readonly int _inFlightClientId;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public OrderEnumerable(SharedArray<OrderState> orderStates, SharedArray<OrderTarget> orderTargets, int start, int end, int instrumentId = -1)
+    public OrderEnumerable(SharedArray<OrderState> orderStates, SharedArray<OrderTarget> orderTargets, int start, int end, int instrumentId, int strategyId, int inFlightClientId)
     {
         _orderStates = orderStates;
         _orderTargets = orderTargets;
         _start = start;
         _end = end;
         _instrumentId = instrumentId;
+        _strategyId = strategyId;
+        _inFlightClientId = inFlightClientId;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public OrderEnumerator GetEnumerator()
     {
-        return new OrderEnumerator(_orderStates, _orderTargets, _start, _end, _instrumentId);
+        return new OrderEnumerator(_orderStates, _orderTargets, _start, _end, _instrumentId, _strategyId, _inFlightClientId);
     }
 }
 
@@ -1525,18 +1467,22 @@ public struct OrderEnumerator
 
     private readonly int _lastGlobalOrderIndex;
     private readonly int _instrumentId;
+    private readonly int _strategyId;
+    private readonly int _inFlightClientId;
     private int _globalOrderIndex;
 
     public (OrderState State, OrderTarget Target) Current { get; private set; }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal OrderEnumerator(SharedArray<OrderState> orderStates, SharedArray<OrderTarget> orderTargets, int firstGlobalIndex, int lastGlobalIndex, int instrumentId)
+    internal OrderEnumerator(SharedArray<OrderState> orderStates, SharedArray<OrderTarget> orderTargets, int firstGlobalIndex, int lastGlobalIndex, int instrumentId, int strategyId, int inFlightClientId)
     {
         _orderStates = orderStates;
         _orderTargets = orderTargets;
         _globalOrderIndex = firstGlobalIndex - 1;
         _lastGlobalOrderIndex = lastGlobalIndex;
         _instrumentId = instrumentId;
+        _strategyId = strategyId;
+        _inFlightClientId = inFlightClientId;
         Current = default;
     }
 
@@ -1546,7 +1492,8 @@ public struct OrderEnumerator
     NextGlobalOrderIndex:
         while (++_globalOrderIndex <= _lastGlobalOrderIndex)
         {
-            if (_orderStates[_globalOrderIndex].IsEmpty())
+            // Why: by the target row: a Create the server has not answered yet has no state row in a fresh slot
+            if (_orderTargets[_globalOrderIndex].IsEmpty())
             {
                 continue;
             }
@@ -1557,44 +1504,54 @@ public struct OrderEnumerator
             ref readonly OrderState state = ref stateEntry.GetReadonlyRef();
             ref readonly OrderTarget target = ref targetEntry.GetReadonlyRef();
 
-            ulong stateSeq0, stateSeq1 = 0;
-            ulong targetSeq0, targetSeq1 = 0;
+            ulong stateSeq0, stateSeq1;
+            ulong targetSeq0, targetSeq1;
 
             do
             {
                 stateSeq0 = stateEntry.GetSeq();
                 targetSeq0 = targetEntry.GetSeq();
 
+                // Why: skipped this walk, not retried: a live writer finishes in nanoseconds, but a row a dead client left mid-write would spin this forever
                 if (Protocol.IsWriteInProgress(stateSeq0) || Protocol.IsWriteInProgress(targetSeq0))
-                {
-                    continue;
-                }
-
-                if (_instrumentId != -1 && target.OrderHeader.OrderId.InstrumentId != _instrumentId || target.OrderHeader.OrderId == 0)
                 {
                     goto NextGlobalOrderIndex;
                 }
 
-                if (state.OrderHeader.OrderId == target.OrderHeader.OrderId)
+                if (_instrumentId != -1 && target.OrderHeader.OrderId.InstrumentId != _instrumentId
+                    || _strategyId != -1 && target.OrderHeader.OrderId.StrategyId != _strategyId
+                    || target.OrderHeader.OrderId == 0)
                 {
-                    if (state.OrderStateStatus == OrderStateStatus.Done)
+                    goto NextGlobalOrderIndex;
+                }
+
+                // Why: until the server's row is about this order, the client's row says whether one is in flight
+                bool isSameOrder = state.OrderHeader.OrderId == target.OrderHeader.OrderId;
+                // Why: another client's order is listed only once the server has it: a cancel from here could otherwise reach the
+                // server ahead of that client's Create and be dropped; this GUI's own orders follow its channel, so they show from the click
+                bool isDone = isSameOrder ? state.OrderStateStatus == OrderStateStatus.Done
+                    : target.OrderTargetStatus != OrderStateStatus.Active || target.OrderHeader.OrderId.ClientId != _inFlightClientId;
+                if (isDone)
+                {
+                    stateSeq1 = stateEntry.GetSeq();
+                    targetSeq1 = targetEntry.GetSeq();
+
+                    if (stateSeq0 != stateSeq1 || targetSeq0 != targetSeq1)
                     {
-                        stateSeq1 = stateEntry.GetSeq();
-                        targetSeq1 = targetEntry.GetSeq();
-
-                        if (stateSeq0 != stateSeq1 || targetSeq0 != targetSeq1)
-                        {
-                            continue;
-                        }
-
-                        goto NextGlobalOrderIndex;
+                        continue;
                     }
 
+                    goto NextGlobalOrderIndex;
+                }
+
+                if (isSameOrder)
+                {
                     Current = (state, target);
                 }
                 else
                 {
-                    Current = (default!, target);
+                    OrderState.NewInFlight(in target, out OrderState inFlightState);
+                    Current = (inFlightState, target);
                 }
 
                 stateSeq1 = stateEntry.GetSeq();
@@ -1709,82 +1666,17 @@ public struct InstrumentEnumerator
 public class WorkspaceContext
 {
     public Context Primary { get; }
-    public ManualClient Manual { get; }
+    public IManualClient Manual { get; }
 
-    public WorkspaceContext(Context primary, ManualClient manual)
+    public WorkspaceContext(Context primary, IManualClient manual)
     {
         Primary = primary ?? throw new ArgumentNullException(nameof(primary), $"WorkspaceContext.WorkspaceContext(), primary context cannot be null.");
         Manual = manual ?? throw new ArgumentNullException(nameof(manual), $"WorkspaceContext.WorkspaceContext(), manual client cannot be null.");
     }
 
-    // A ServerContext already enumerates every client's orders — including this GUI's own slice —
-    // so compositing the manual context on top of it would list those twice.
-    public CompositeOrderEnumerable EnumerateOrders(int instrumentId = -1)
-    {
-        return new CompositeOrderEnumerable(Primary, Primary is ServerContext ? null : Manual.Context, instrumentId);
-    }
-}
-
-public readonly struct CompositeOrderEnumerable
-{
-    private readonly Context _primary;
-    private readonly Context? _secondary;
-    private readonly int _instrumentId;
-
-    // secondary may be null when primary already covers its rows.
-    public CompositeOrderEnumerable(Context primary, Context? secondary, int instrumentId)
-    {
-        _primary = primary;
-        _secondary = secondary;
-        _instrumentId = instrumentId;
-    }
-
-    public CompositeOrderEnumerator GetEnumerator()
-    {
-        return new CompositeOrderEnumerator(_primary, _secondary, _instrumentId);
-    }
-}
-
-public struct CompositeOrderEnumerator
-{
-    private OrderEnumerator _primary;
-    private OrderEnumerator _secondary;
-    private bool _inPrimary;
-    private readonly bool _hasSecondary;
-
-    public CompositeOrderEnumerator(Context primary, Context? secondary, int instrumentId)
-    {
-        _primary = primary.EnumerateOrders(instrumentId).GetEnumerator();
-        _hasSecondary = secondary != null;
-        _secondary = _hasSecondary ? secondary!.EnumerateOrders(instrumentId).GetEnumerator() : default;
-        _inPrimary = true;
-        Current = default;
-    }
-
-    public (OrderState State, OrderTarget Target) Current { get; private set; }
-
-    public bool MoveNext()
-    {
-        if (_inPrimary)
-        {
-            if (_primary.MoveNext())
-            {
-                Current = _primary.Current;
-                return true;
-            }
-            _inPrimary = false;
-        }
-
-        if (!_hasSecondary)
-            return false;
-
-        if (_secondary.MoveNext())
-        {
-            Current = _secondary.Current;
-            return true;
-        }
-
-        return false;
-    }
+    // A server workspace lists every client's orders; a strategy workspace every order booked to its strategy, whichever
+    // client sent it: the algo, this GUI, a sibling GUI or a remote desk's (see Spec.md "Workspaces (GUIs)").
+    public OrderEnumerable EnumerateOrders(int instrumentId = -1)
+        => Primary.EnumerateOrders(instrumentId, (Primary as ClientContext)?.ClientId ?? -1, Manual.Context.ClientId);
 }
 //END_FILE HFT/Provider/Context.cs

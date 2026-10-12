@@ -62,7 +62,7 @@ public sealed class Test : Algo
         }
 
         // An empty target list cancels whatever is working.
-        Target(ref targets);
+        TryTarget(ref targets);
     }
 
 }

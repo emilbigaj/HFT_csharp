@@ -450,6 +450,7 @@ public class RiskLayer
 
                 ref OrderRisk orderRisk = ref _context.GetOrderRisk(orderTarget.OrderHeader.OrderId).GetRef();
 
+                // Why: a slot's row may hold a previous order's, or a previous process's: a Create always starts it empty
                 if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
                     orderRisk = new OrderRisk();
 

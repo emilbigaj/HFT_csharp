@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -498,6 +499,10 @@ public readonly struct Timestamp : IComparable<Timestamp>, IEquatable<Timestamp>
             return FromDateTime(DateTime.UtcNow);
         }
     }
+
+    // The machine's monotonic Stopwatch as a Timestamp, counted from an arbitrary start, not the epoch: only for the time
+    // between two readings on the same machine (a wall clock can step), never for display.
+    public static Timestamp StopwatchNow => new Timestamp((long)(Stopwatch.GetTimestamp() * Latency.NanosPerTick));
 
 
     // Tried only after the caller's own format fails, so nothing that parses today changes: a date

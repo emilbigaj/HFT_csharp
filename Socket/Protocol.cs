@@ -84,6 +84,18 @@ public static class Protocol
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe ulong ReadSequence(Header64* hdr) => Volatile.Read(ref hdr->Sequence);
 
+    // -------- Frame stamp (slot path) --------
+
+    // Writes the frame (Magic, Length) of a slot that lacks it; the Sequence is never touched, so an unwritten slot still reads
+    // Empty and a live slot's lock counter does not move. Constant values: concurrent stampers and writers cannot disagree.
+    public static unsafe void Stamp(Header64* hdr, int length)
+    {
+        if (Volatile.Read(ref hdr->Magic) == s_magic && hdr->Length == length)
+            return;
+        hdr->Length = length;
+        Volatile.Write(ref hdr->Magic, s_magic);
+    }
+
     // -------- Slot Write --------
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -132,7 +144,7 @@ public static class Protocol
 
     // Like Write() but re-bases the seqlock instead of assuming an even start: a writer that died
     // mid-write can leave the sequence ODD. For recovering a slot whose original writer (a client
-    // process) is confirmed dead — see Server.CancelAllOrders. evenBase = next even >= seq+1, so the
+    // process) is confirmed dead — see Server.TryCloseOutOrders. evenBase = next even >= seq+1, so the
     // copy window is always odd (a concurrent reader sees odd -> retries, never tears) and the
     // published value is even and strictly greater than any prior publish (readers observe it New).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

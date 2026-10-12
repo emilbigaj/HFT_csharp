@@ -16,6 +16,7 @@
   <Project Path="Execution/Execution.csproj" />
   <Project Path="Generator/Generator.csproj" Id="66e37c86-e6d9-4e9d-8492-d8457753c40b" />
   <Project Path="Logging/Logging.csproj" />
+  <Project Path="Mirror/Mirror.csproj" />
   <Project Path="Provider/Provider.csproj" />
   <Project Path="Proxy/Proxy.csproj" Id="3b89e7c0-2a8e-41db-86a5-f5963f693984" />
   <Project Path="Simulator/Simulator.csproj" Id="d2e99745-e131-464e-ab7b-7c3cb8f71cc1" />

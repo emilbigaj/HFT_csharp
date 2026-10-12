@@ -2,6 +2,7 @@ using System;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Tools;
 
 namespace Socket;
@@ -91,6 +92,17 @@ public unsafe struct SharedArrayEntry<T> where T : unmanaged
         }
     }
 
+    // Copies the row unless it is unwritten or being written right now (odd seq, or the seq moved during the copy); never waits.
+    internal readonly bool TryCopy(Span<byte> dstObj)
+    {
+        ulong seq = GetSeq();
+        if (seq == 0UL || Protocol.IsWriteInProgress(seq))
+            return false;
+        new ReadOnlySpan<byte>(GetPtr(), Unsafe.SizeOf<T>()).CopyTo(dstObj);
+        Thread.MemoryBarrier();
+        return GetSeq() == seq;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal ReadOnlySpan<byte> Read(Span<byte> dstObj)
     {
@@ -134,7 +146,7 @@ public unsafe struct SharedArrayEntry<T> where T : unmanaged
         Protocol.Write(in value, _headerPtr, dstLen);
     }
 
-    // Recovery write for a slot whose client process is confirmed dead (Server.CancelAllOrders):
+    // Recovery write for a slot whose client process is confirmed dead (Server.TryCloseOutOrders):
     // bypasses the Read access tag (the OS mapping is always ReadWrite; Access is a software-only
     // tag) and re-bases the seqlock so a slot the client left mid-write (odd sequence) recovers cleanly.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -170,6 +182,7 @@ public abstract class SharedArray : IDisposable
     public abstract Access Access { get; }
     public abstract ReadOnlySpan<byte> Read(int index, Span<byte> dstObj);
     public abstract ReadStatus TryRead(int index, Span<byte> dstObj, out ReadOnlySpan<byte> rdstObj);
+    public abstract bool TryCopy(int index, Span<byte> dstObj);
 
     public abstract int TypeSize { get; }
     public abstract bool IsEmpty(int index);
@@ -177,6 +190,7 @@ public abstract class SharedArray : IDisposable
     public abstract ulong GetSeq(int index);
 
     public abstract void Write(int index, ReadOnlySpan<byte> src);
+    public abstract void RecoveryWrite(int index, ReadOnlySpan<byte> src);
 
     public abstract void Dispose();
     public abstract bool IsDense { get; }
@@ -233,6 +247,17 @@ public sealed class SharedArray<T> : SharedArray where T : unmanaged
                 _entries[i] = new SharedArrayEntry<T>(entryPtr, access);
             }
         }
+
+        // 5. Frame every row: a row edited only under the lock never gets one from Write, and TryRead/Read need it
+        if (access == Access.Write)
+            StampFrames();
+    }
+
+    // Frames each row (Protocol.Stamp) that a full Write has not.
+    private unsafe void StampFrames()
+    {
+        for (int index = 0; index < Capacity; index++)
+            Protocol.Stamp((Protocol.Header64*)(_basePtr + (long)index * _entryLength), TypeSize);
     }
 
     public ref SharedArrayEntry<T> this[int index]
@@ -257,18 +282,24 @@ public sealed class SharedArray<T> : SharedArray where T : unmanaged
         return GetEntry(index).TryRead(dstObj, out rdstObj);
     }
 
+    public override bool TryCopy(int index, Span<byte> dstObj) => GetEntry(index).TryCopy(dstObj);
+
     public override ReadOnlySpan<byte> Read(int index, Span<byte> dstObj)
     {
         return GetEntry(index).Read(dstObj);
     }
 
 
-    public override void Write(int index, ReadOnlySpan<byte> srcObj)
+    public override void Write(int index, ReadOnlySpan<byte> srcObj) => GetEntry(index).Write(in AsValue(srcObj));
+
+    public override void RecoveryWrite(int index, ReadOnlySpan<byte> srcObj) => GetEntry(index).RecoveryWrite(in AsValue(srcObj));
+
+    // The bytes of one T, checked for length.
+    private ref readonly T AsValue(ReadOnlySpan<byte> srcObj)
     {
         if (srcObj.Length < Unsafe.SizeOf<T>())
-            throw new ArgumentException($"SharedArray<{typeof(T).Name}>.Write: srcObj is {srcObj.Length} bytes, must be {TypeSize} bytes.", nameof(srcObj));
-        ref readonly T obj = ref MemoryMarshal.AsRef<T>(srcObj);
-        GetEntry(index).Write(in obj);
+            throw new ArgumentException($"SharedArray<{typeof(T).Name}>.AsValue: srcObj is {srcObj.Length} bytes, must be {TypeSize} bytes.", nameof(srcObj));
+        return ref MemoryMarshal.AsRef<T>(srcObj);
     }
 
     public override bool IsEmpty(int index)

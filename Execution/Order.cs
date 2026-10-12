@@ -52,7 +52,7 @@ public enum OrderStateStatus : byte
 public enum OrderStateReason : byte
 {
     Unknown = 0,
-    PendingNew = 1,
+    InFlight = 1,   // sent, not yet acked by the exchange (the server writes it; a walk shows it until the server answers)
     Acked = 2,
     Fill = 3,       // partial vs complete lives in OrderStateStatus: Fill+Active / Fill+Done
     Canceled = 4,   // here onwards -> Done unconditionally
@@ -133,13 +133,16 @@ public enum OrderRejectedSource : byte
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
+[method: MethodImpl(MethodImplOptions.AggressiveInlining)]   // Why: the compiler zeroes every field, so the JIT judges the constructor too big to inline
 public struct OrderRejected()
 {
     public Header<OrderType> Header = new(OrderType.OrderRejected);
     public OrderHeader OrderHeader;
     public OrderTargetAction OrderTargetAction;
     public OrderRejectedSource OrderRejectedSource;
-    private unsafe fixed byte _reserved[2];
+    // Why: plain bytes, not a fixed buffer: a fixed buffer puts a stack-cookie check in every frame holding the struct
+    private byte _reserved0;
+    private byte _reserved1;
     public OrderProfile OrderProfile;
     public Bitset64 OrderRejectedReasons;
 
@@ -162,20 +165,11 @@ public struct OrderRejected()
     // Benign rejection: every reason set is a routine race, absorbed silently by all consumers.
     public bool IsDiscarded => !OrderRejectedReasons.IsEmpty && OrderRejectedReasons.IsSubsetOf(OrderDiscarded);
 
-    public readonly static Bitset64 OrderDiscarded;
-
-    static OrderRejected()
-    {
-        OrderDiscarded.Set((int)OrderRejectedReason.CreateIsActive);
-        OrderDiscarded.Set((int)OrderRejectedReason.CancelIsActive);
-        OrderDiscarded.Set((int)OrderRejectedReason.TargetIsActive);
-        OrderDiscarded.Set((int)OrderRejectedReason.TargetIsStale);
-        OrderDiscarded.Set((int)OrderRejectedReason.StateIsDone);
-        OrderDiscarded.Set((int)OrderRejectedReason.AlgoIsPaused);
-        OrderDiscarded.Set((int)OrderRejectedReason.TooManyOrdersPerSecond);
-        OrderDiscarded.Set((int)OrderRejectedReason.TooManyActiveTargets);
-    }
-
+    // Why: a constant, not a static constructor: that cost every OrderRejected constructor a class-init check and kept IsDiscarded from inlining
+    private const ulong s_orderDiscardedMask = 1UL << (int)OrderRejectedReason.CreateIsActive | 1UL << (int)OrderRejectedReason.CancelIsActive
+        | 1UL << (int)OrderRejectedReason.TargetIsActive | 1UL << (int)OrderRejectedReason.TargetIsStale | 1UL << (int)OrderRejectedReason.StateIsDone
+        | 1UL << (int)OrderRejectedReason.AlgoIsPaused | 1UL << (int)OrderRejectedReason.TooManyOrdersPerSecond | 1UL << (int)OrderRejectedReason.TooManyActiveTargets;
+    public static Bitset64 OrderDiscarded => new Bitset64(s_orderDiscardedMask);
 }
 
 
@@ -414,8 +408,9 @@ public struct OrderHeader
 }
 
 
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[StructLayout(LayoutKind.Sequential, Pack = 1, Size = 64)]   // Why: Size pads the tail, not a fixed buffer: that puts a stack-cookie check in every frame holding the struct
 [RegisterJson]
+[method: MethodImpl(MethodImplOptions.AggressiveInlining)]   // Why: the compiler zeroes every field, so the JIT judges the constructor too big to inline
 public struct Fill()
 {
     // 64 bytes; Price sits at offset 40 (4+28+8), naturally 8-aligned. Price is a PRICE, not
@@ -427,7 +422,6 @@ public struct Fill()
     public double Price;
     public int Quantity;
     public FillType FillType;
-    private unsafe fixed byte _reserved[11];
 
     public Side Side
     {
@@ -446,6 +440,7 @@ public struct Fill()
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)] // 64 bytes: no room left
 [RegisterJson]
+[method: MethodImpl(MethodImplOptions.AggressiveInlining)]   // Why: the compiler zeroes every field, so the JIT judges the constructor too big to inline
 public struct OrderState()
 {
     public Header<OrderType> Header = new(OrderType.OrderState);
@@ -455,22 +450,49 @@ public struct OrderState()
     public TimeInForce TimeInForce;
     public OrderStateStatus OrderStateStatus;
     public OrderStateReason OrderStateReason;
-    private unsafe fixed byte _reserved[1];
+    private byte _reserved;   // Why: a plain byte, not a fixed buffer: that puts a stack-cookie check in every frame holding the struct
     public int QuantityFilled;
     public int QuantityAhead;
     public int QuantityBehind;   // same queue as QuantityAhead; only the simulator reports it
 
     public int WorkingQuantity => OrderProfile.Quantity - QuantityFilled;
+
+    /// The state of a Create the exchange has not acked yet: Active, InFlight, nothing filled, Seq 0.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void NewInFlight(in OrderTarget orderTarget, out OrderState orderState)
+    {
+        // Why: constructor, then field stores, into the caller's variable: new() { ... } builds a temporary and copies it (measured +7 ns)
+        orderState = new();
+        orderState.OrderHeader = orderTarget.OrderHeader;
+        orderState.OrderHeader.Seq = 0;   // Why: Seq 0 marks a new order the exchange has not acked
+        orderState.OrderProfile = orderTarget.OrderProfile;
+        orderState.TimeInForce = orderTarget.TimeInForce;
+        orderState.OrderStateStatus = OrderStateStatus.Active;
+        orderState.OrderStateReason = OrderStateReason.InFlight;
+    }
+
+    /// This state ended by its Create's refusal: Done/Rejected, with the refused order's header and profile.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly void NewRejected(in OrderRejected orderRejected, out OrderState rejectedState)
+    {
+        // Why: out, not a return: returning by value costs an extra 64-byte copy (+4.7 ns) when the caller passes the result by ref
+        rejectedState = this;
+        rejectedState.OrderHeader = orderRejected.OrderHeader;
+        rejectedState.OrderProfile = orderRejected.OrderProfile;
+        rejectedState.OrderStateStatus = OrderStateStatus.Done;
+        rejectedState.OrderStateReason = OrderStateReason.Rejected;
+    }
+
     public override string ToString() => Json.Serialize(this);
 }
 
 // 20 bytes
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
-public struct AheadOfOrder(ulong clientOrderid, int quantity, int quantityBehind)
+public struct AheadOfOrder(ulong clientOrderid, int quantityAhead, int quantityBehind)
 {
     public Header<OrderType> Header = new(OrderType.AheadOfOrder);
-    public int Quantity = quantity;
+    public int QuantityAhead = quantityAhead;
     public ulong ClientOrderId = clientOrderid;
     public int QuantityBehind = quantityBehind;
 }
@@ -478,6 +500,7 @@ public struct AheadOfOrder(ulong clientOrderid, int quantity, int quantityBehind
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)] // 52 bytes
 [RegisterJson]
+[method: MethodImpl(MethodImplOptions.AggressiveInlining)]   // Why: the compiler zeroes every field, so the JIT judges the constructor too big to inline
 public struct OrderTarget()
 {
     public Header<OrderType> Header = new(OrderType.OrderTarget);
@@ -487,7 +510,21 @@ public struct OrderTarget()
     public TimeInForce TimeInForce;  // 1
     public OrderTargetAction OrderTargetAction;  // 1
     public OrderStateStatus OrderTargetStatus = OrderStateStatus.Active;
-    private unsafe fixed byte _reserved[1];
+    private byte _reserved;   // Why: a plain byte, not a fixed buffer: that puts a stack-cookie check in every frame holding the struct
+
+    /// The reject that refuses this target, for these reasons, from this source.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly void NewOrderRejected(Bitset64 orderRejectedReasons, OrderRejectedSource orderRejectedSource, out OrderRejected orderRejected)
+    {
+        // Why: constructor, then field stores, into the caller's variable: new() { ... } builds a temporary and copies it (measured +7 ns)
+        orderRejected = new();
+        orderRejected.OrderHeader = OrderHeader;
+        orderRejected.OrderTargetAction = OrderTargetAction;
+        orderRejected.OrderRejectedSource = orderRejectedSource;
+        orderRejected.OrderProfile = OrderProfile;
+        orderRejected.OrderRejectedReasons = orderRejectedReasons;
+    }
+
     public override string ToString() => Json.Serialize(this);
 }
 

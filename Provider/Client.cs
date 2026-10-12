@@ -12,7 +12,7 @@ using System.Threading;
 
 namespace Provider;
 
-public sealed class ManualClient : Client
+public sealed class ManualClient : Client, IManualClient
 {
     // Set only when shadowing an algo; null for a server workspace, which has no algo behind it.
     // Kept solely so Dispose releases what this client opened — ContextManager owns the ServerContext.
@@ -29,26 +29,89 @@ public sealed class ManualClient : Client
     // _isOrderActive bitset only ever see a single mutator.
     private readonly ConcurrentQueue<Action> _writeQueue = new();
 
-    public ManualClient(string clientName, string serverName) : base(clientName.EndsWith("_GUI") ? clientName : clientName + "_GUI", serverName)
-    {
-        Context principal;
-        if (clientName == serverName)
-        {
-            principal = ContextManager.ServerContext;
-            _strategyId = OrderIdAllocator.ServerStrategyId;
-        }
-        else
-        {
-            _algoContext = new ClientContext(clientName.EndsWith("_GUI") ? clientName[..^4] : clientName, serverName, Access.Read);
-            principal = _algoContext;
-            _strategyId = _algoContext.ClientId;
-        }
+    private const int s_maximumGuiCount = 8;   // Why: each GUI name holds one of the server's 64 client ids for the week (Persistance)
+    private const int s_maximumNotReadyWaitSeconds = 5;   // Why: a cancel normally completes in milliseconds; longer means the exchange is out, and a GUI must still open
 
-        // Subscribe the GUI client to the same instruments the principal trades. GetInstrument blocks
-        // per instrument (opens its ring, applies the snapshot) — serial, so the single join buffer is safe.
-        foreach(int instrumentId in principal.InstrumentIds)
+    // Opens the first GUI name no live GUI holds, for a principal (a strategy, or the server for a server workspace):
+    // "<principal>_GUI0", then "_GUI1" and on; throws past the 8th. A name whose previous GUI's orders are still being
+    // cancelled is asked again once a second for up to 5 s before the next number is tried. On a remote desk (the Remote Mirror
+    // answers RemoteDesk) the name is opened as a RemoteClient, a pass-through to the ManualClient the Mirror runs beside the server.
+    public static IManualClient Open(string principalName, string serverName)
+    {
+        bool _isRemoteDesk = false;
+        int _guiNumber = 0;
+        int _notReadyWaitSeconds = 0;
+        while (true)
         {
-            GetInstrument(principal.GetInstrument(instrumentId).Header.InstrumentHeaderId);
+            string guiName = GetGuiName(principalName, _guiNumber, _isRemoteDesk);
+            try
+            {
+                return _isRemoteDesk ? new RemoteClient(guiName, serverName) : new ManualClient(guiName, principalName, serverName);
+            }
+            catch (ConnectRefusedException connectRefusedException) when (connectRefusedException.ConnectRefusal == ConnectRefusal.RemoteDesk)
+            {
+                // Why: only a live Remote Mirror gives this answer, so no stale file or flag can make a Workspace remote
+                _isRemoteDesk = true;
+            }
+            catch (ConnectRefusedException connectRefusedException) when (connectRefusedException.ConnectRefusal == ConnectRefusal.NotReady
+                && _notReadyWaitSeconds < s_maximumNotReadyWaitSeconds)
+            {
+                // Why: the server is cancelling the last GUI's orders (each ask re-sends them); a new number would take another of the week's client ids
+                Console.WriteLine($"ManualClient.Open: {guiName} waits for its previous orders to be cancelled");
+                _notReadyWaitSeconds++;
+                Thread.Sleep(1000);
+            }
+            catch (ConnectRefusedException connectRefusedException) when (connectRefusedException.ConnectRefusal is ConnectRefusal.AlreadyConnected or ConnectRefusal.NotReady
+                && _guiNumber < s_maximumGuiCount - 1)
+            {
+                _guiNumber++;
+                _notReadyWaitSeconds = 0;
+            }
+        }
+    }
+
+    // GUI number n of a principal: "<principal>_GUI<n>"; on a remote desk "<principal>_GUI<n>@<machine>", a name no Workspace elsewhere can hold.
+    public static string GetGuiName(string principalName, int guiNumber, bool isRemoteDesk) => $"{principalName}_GUI{guiNumber}{(isRemoteDesk ? "@" + Environment.MachineName : "")}";
+
+    // The principal a remote desk's GUI name serves: the name before its "_GUI<n>@<machine>"; false for a name that is no remote GUI's.
+    public static bool TryGetPrincipalName(string remoteGuiName, out string principalName)
+    {
+        int machineIndex = remoteGuiName.LastIndexOf('@');
+        int suffixIndex = machineIndex > 0 ? remoteGuiName.LastIndexOf("_GUI", machineIndex, StringComparison.Ordinal) : -1;
+        bool isGuiName = suffixIndex > 0 && int.TryParse(remoteGuiName.AsSpan(suffixIndex + 4, machineIndex - suffixIndex - 4), out _);
+        principalName = isGuiName ? remoteGuiName[..suffixIndex] : "";
+        return isGuiName;
+    }
+
+    // A GUI client named guiName, booking to principalName: the server (server mode, the house book) or a strategy.
+    public ManualClient(string guiName, string principalName, string serverName) : base(guiName, serverName)
+    {
+        try
+        {
+            Context principal;
+            if (principalName == serverName)
+            {
+                principal = ContextManager.ServerContext;
+                _strategyId = OrderIdAllocator.ServerStrategyId;
+            }
+            else
+            {
+                _algoContext = new ClientContext(principalName, serverName, Access.Read);
+                principal = _algoContext;
+                _strategyId = _algoContext.ClientId;
+            }
+
+            // Subscribe the GUI client to the same instruments the principal trades. GetInstrument blocks
+            // per instrument (opens its ring, applies the snapshot) — serial, so the single join buffer is safe.
+            foreach(int instrumentId in principal.InstrumentIds)
+            {
+                GetInstrument(principal.GetInstrument(instrumentId).Header.InstrumentHeaderId);
+            }
+        }
+        catch
+        {
+            Dispose();
+            throw;
         }
     }
 
@@ -113,7 +176,7 @@ public sealed class ManualClient : Client
         {
             return false;
         }
-        // A cancel of an algo order jumps far past the algo's own seqs, as Server.CancelAllOrders does, so a racing algo amend never shares its seq.
+        // A cancel of an algo order jumps far past the algo's own seqs, as Server.TryCloseOutOrders does, so a racing algo amend never shares its seq.
         int seq = existingOrderTarget.OrderHeader.Seq + (orderId.IsAlgoOrder() ? 1_000_000 : 1);
         orderTarget.OrderHeader.Seq = Math.Max(seq, orderTarget.OrderHeader.Seq);
         return Send(ref orderTarget);
@@ -231,7 +294,8 @@ public abstract class Client
 
         string auditDirectoryPath = Provider.Context.GetAuditDirectoryPath(ClientName);
         Directory.CreateDirectory(auditDirectoryPath);
-        if (Clock.Mode == ClockMode.Simulation)
+        // Why: an algo starts each simulation run with an empty audit; a GUI never touches audit files (it can restart within a run)
+        if (Clock.Mode == ClockMode.Simulation && this is AlgoClient)
         {
             foreach (string filePath in Directory.EnumerateFiles(auditDirectoryPath))
             {
@@ -245,18 +309,24 @@ public abstract class Client
         _socket = new ClientSocket(ClientName, ServerName, channelLengths, channelLengths);
         _clientId = _socket.Connect();
 
-        Context = new ClientContext(ClientName, ServerName, Access.Write);
+        // Why: once connected, the server holds this name's socket open and answers no second connect under the name
+        // until it closes; a throw below must close it, or a retry in the same process hangs (see Spec.md "Remote workspaces")
+        try
+        {
+            Context = new ClientContext(ClientName, ServerName, Access.Write);
 
-        _instrumentData = new ReadOnlySocket?[Context.ServerHeader.GetReadonlyRef().InstrumentIds.Length];
+            _instrumentData = new ReadOnlySocket?[Context.ServerHeader.GetReadonlyRef().InstrumentIds.Length];
 
-        RiskLayer = new RiskLayer(Context, OrderRejectedSource.Client);
+            RiskLayer = new RiskLayer(Context, OrderRejectedSource.Client);
 
-        // A previous process's Active order would hold room, slots and fills this process never made (see Spec.md).
-        ThrowIfPreviousOrdersActive();
-        // ensures all messages cleared out
-        Thread.Sleep(100);
-        // Every previous order is Done and already in the position rows WorkingRisk is seeded from: skip what is queued for them.
-        _socket.Recover();
+            // The server admitted this process only once every previous order was Done (Server.IsClientReady): skip what is queued for them.
+            _socket.Recover();
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
     }
 
     public ReadOnlySpan<byte> ReadAdmin()
@@ -327,19 +397,6 @@ public abstract class Client
         if (instrument.ProductGroupId < 0)
             Context.AllocateProductGroupId(instrument, instrument.Symbology.Root);
         return instrument;
-    }
-
-    private void ThrowIfPreviousOrdersActive()
-    {
-        for (int localIndex = 0; localIndex < 64; localIndex++)
-        {
-            OrderId orderId = new OrderId { ClientId = _clientId, LocalIndex = localIndex };
-            ref readonly OrderState orderState = ref Context.GetOrderState(orderId).GetReadonlyRef();
-            if (orderState.OrderStateStatus == OrderStateStatus.Active)
-                throw new InvalidOperationException($"Order {orderState.OrderHeader.OrderId} from a previous process is still Active: start again once the server has cancelled it.");
-            // Done: its risk row is the previous process's, so this process starts from an empty one.
-            Context.GetOrderRisk(orderId).GetRef() = default;
-        }
     }
 
     // Strategy: open the per-instrument ring and seed the replica from the server's authoritative book.
@@ -556,6 +613,8 @@ public abstract class Client
             case (byte)OrderType.Position:
                 OnPositionHeader(rsrcObj);
                 break;
+            case (byte)OrderType.OrderTarget:   // a cancel the server sent for this client's previous process: recorded by the audit, nothing to apply
+                break;
             default:
                 throw new NotImplementedException($"Unknown message type: {type}");
         }
@@ -626,10 +685,8 @@ public abstract class Client
         OrderState?.Invoke(in orderState);
     }
 
-    
-
     private Bitset64 _isOrderActive = new Bitset64();
-    // A Create needs one of this client's 64 order slots; a slot frees only on its order's Done.
+    // A Create needs one of this client's 64 order slots; a slot frees only on its order's Done (a Create refused here never keeps one).
     public bool HasFreeOrderSlot => !_isOrderActive.IsFull;
     // Per local slot: the last seq whose ack RiskLayer applied, so an echoed state is not applied twice.
     private readonly int[] _ackedSeqs = new int[64];
@@ -733,12 +790,13 @@ public abstract class Client
         NicTimestamp = orderRejected.OrderHeader.NicTimestamp;
         ExchangeTimestamp = orderRejected.OrderHeader.ExchangeTimestamp;
         ref OrderTarget orderTarget = ref Context.GetOrderTarget(orderRejected.OrderHeader.OrderId).GetRef();
-        bool isTargetDone = orderRejected.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId && orderTarget.OrderHeader.Seq == orderRejected.OrderHeader.Seq;
+        bool isSameOrder = orderRejected.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId;
+        bool isTargetDone = isSameOrder && orderTarget.OrderHeader.Seq == orderRejected.OrderHeader.Seq;
         if (isTargetDone)
             orderTarget.OrderTargetStatus = OrderStateStatus.Done;
 
         // RiskLayer releases what this client reserved for the order, discarded rejects included.
-        if (orderRejected.OrderHeader.OrderId == orderTarget.OrderHeader.OrderId && orderRejected.OrderHeader.OrderId.IsAlgoOrder())
+        if (isSameOrder && orderRejected.OrderHeader.OrderId.IsAlgoOrder())
             RiskLayer.OnOrderRejected(in orderRejected);
 
         // Non-discarded rejections raise the event regardless of source, so exchange/server
@@ -758,14 +816,7 @@ public abstract class Client
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     protected void Reject(in OrderTarget orderTarget, Bitset64 orderRejectedReasons, OrderRejectedSource orderRejectedSource)
     {
-        OrderRejected orderRejected = new OrderRejected()
-        {
-            OrderHeader = orderTarget.OrderHeader,
-            OrderProfile = orderTarget.OrderProfile,
-            OrderTargetAction = orderTarget.OrderTargetAction,
-            OrderRejectedReasons = orderRejectedReasons,
-            OrderRejectedSource = orderRejectedSource
-        };
+        orderTarget.NewOrderRejected(orderRejectedReasons, orderRejectedSource, out OrderRejected orderRejected);
 
         if (IsDiscarded(in orderRejected))
             return;
@@ -786,15 +837,13 @@ public abstract class Client
         if (_isDisposed)
             return;
 
-        if (_isOrderActive.IsFull)
-            throw new InvalidOperationException();
-        
         _isDisposed = true;
-        foreach (ReadOnlySocket? reader in _instrumentData)
+        // Why: also called from a constructor that threw part-way, before these were built
+        foreach (ReadOnlySocket? reader in _instrumentData ?? [])
             reader?.Dispose();
         _socket.Close();
         _socket.Dispose();
-        Context.Dispose();
+        Context?.Dispose();
     }
 }
 //END_FILE HFT/Provider/Client.cs
