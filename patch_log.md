@@ -4,6 +4,315 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-12 — remote desks: a `RemoteClient` passes every call to the Local end's ManualClient; the remote copy has one writer
+
+- `Provider/RemoteClient.cs` (new) and `IManualClient` — a remote Workspace's manual client is a pass-through: each call
+  (`OnOrderTarget`, `OnAllocateInstrument`, `OnControlAlgoStatus`, `OnControlRiskLimit`) goes up its ring to the Remote
+  Mirror and on to the stand-in ManualClient the Local end runs under the same name and client id, which does the slot,
+  risk check, target row and send. It holds no order state and writes no row, so the remote copy's only writer is the
+  Mirror, applying the Local end's rows: an order appears once the Local end has it, never at the click. Why: the remote
+  side guessing order state caused every link-loss defect of the last week (L, O, P/M, N, J, the half-sent race).
+- `Mirror/` — `MirrorPublisher` is renamed `LocalMirror` and `MirrorSubscriber` `RemoteMirror` (files too), after the two
+  roles; the `GuiReply` packet is `AllocatedClientId` (it carries what the Remote's `AllocateClientId` hook returns: a
+  client id or a negative `ConnectRefusal`), with `ApplyAllocatedClientId` and `SendAllocatedClientId`. Entries below this
+  one use the old names.
+- `Mirror/RemoteMirror.cs` — deleted `ReconcileGui`, `CloseOutGui`, the forwarded bits, readiness bits, the `ApplyRow`
+  skip rules and order states pushed into GUI sockets (333 → 227 lines). Only a RemoteClient attaches: a plain
+  ManualClient is refused `ConnectRefusal.RemoteDesk` (new, -7) and `ManualClient.Open` opens a RemoteClient instead, so
+  only a live Remote Mirror makes a Workspace remote. Remote GUI names end `@<machine>`, so no CME-box Workspace can take
+  one during an outage.
+- Latency display: one link per remote machine, one number. `Context.GetLatency(coreGroupId)` is a new shared array
+  (`<server>/Latency`, a `Tools.Duration` per CoreGroup, below 0 = disconnected), appended after `WorkingRisks` so
+  earlier array ids keep their mirror order. The Remote Mirror pings the Local end every 100 ms, the Local end echoes each
+  ping straight back, and the Remote writes `Latency[0]` in the copy every pass: the worst of the last 10 round trips, or
+  the age of the oldest unanswered ping when longer, -1 ns after 10 s without a pong. All Mirror timing (ping, pong, the Workspace display) uses `Timestamp.StopwatchNow` (new in `Tools/Timestamp.cs`: the machine's monotonic `Stopwatch` as a `Timestamp`) and `Duration`. A remote Workspace shows it beside the
+  clock (or how long since the row last changed, so a dead Remote Mirror climbs too) and "Connection broken –
+  reconnecting…" when below 0 or unchanged for 10 s. Clicks while the link is down are dropped; the number is the signal.
+- `LocalMirror.IsPublishDue` (was `HasQueuedPackets`) — the Local end also publishes on the same pass when any stand-in
+  ManualClient reads an order state from the server (its `OrderState` event sets a flag that `Publish`
+  clears). Before, nothing was queued for an order once rejects stopped travelling, so its rows waited for the 100 ms
+  tick (smoke run: shown 139 ms after the click while the server had it at 39 ms). Still one publish per pass.
+- `Mirror/TcpLink.cs` — the constructor closes its socket if it throws (production review S13); the accept path leaked one
+  socket handle per connection that failed while its link was built. Also fixes the truncated "gives up as soon" comment.
+- `Provider/Context.cs`, `Mirror/MirrorPacket.cs`, `Mirror/LocalMirror.cs`, `Mirror/Program.cs` — layout check (production
+  review S8): `Context.GetLayoutHash()` fingerprints the array layout (FNV-1a over each array's row size and capacity);
+  the Local end sends it in every `MirrorServerHeader`, and `RunRemote` throws at startup when the desk's own differs,
+  naming both values. Before, a desk on a different build silently put rows into the wrong arrays (adding `Latency` this
+  week shifted every later array's number). Breaks: the server-header packet is 4 bytes longer; deploy both ends together.
+- `Mirror/RemoteMirror.cs`, `Mirror/LocalMirror.cs` — the GuiList timer, `AllocateClientId`'s 10 s deadline and the 3 s
+  refused-start cache time elapsed with `Timestamp.StopwatchNow`, not the wall clock (production review S9). Before, a
+  backward wall-clock step (Windows after sleep, a time-sync correction, a manual change) stopped the GuiList for the size
+  of the step, so a Workspace closed meanwhile kept its stand-in and its orders working at the exchange. The Local end's
+  start time stays on the wall clock: it identifies a run, it does not measure time.
+- `Mirror/TcpLink.cs` — `DialTcpLink` cancels a connect after 2 s (`CancellationTokenSource`, awaited) instead of
+  abandoning it with `.Wait(2000)` (production review S2). An abandoned connect task faulted unobserved and the Local
+  Mirror's AlertManager alerted `UnobservedTaskException`: with the home PC off, about one Telegram alert every 3 s all
+  night. The dial log now shows the real cause (refused, canceled) instead of "One or more errors occurred".
+- `Mirror/LocalMirror.cs`, `Mirror/Program.cs` — the Local end queues each pong instead of writing it straight back, so it
+  goes out after the publish it triggers on the same pass, and the 100 ms publish timer is deleted (each remote's ping,
+  every 100 ms, now drives the publishes; with no remote connected nothing is published). Why: a pong written straight
+  back proved only the link, so a Local end that answered pings but no longer published (a throw in `Publish`) showed a
+  healthy latency over a frozen screen; now it reads as a stall. The latency is still a round trip, now including one
+  Local pass and publish (loopback smoke: 32 ms before and after; a `Publish` made to throw now climbs to "Connection
+  broken" instead of showing 32 ms). `IsPublishDue` also covers a remote not yet synced: without that, a freshly started
+  Remote (which pings only once it has the server header) and the Local end each waited for the other, and the link
+  dropped and redialled every 10 s forever. About −3 lines.
+- `Provider/Context.cs` — `LeggedHeader.GetLegHeader` is set only by the first `ServerContext` (`??=`), never by a
+  `ClientContext`, and cleared by `ServerContext.Dispose` when it is its own (production review B2). Before, every context set it to itself; in the Local Mirror a closed
+  stand-in left it pointing at its disposed context: the next spread lookup threw `ObjectDisposedException`, so a remote
+  spread allocation was silently dropped and a spread reject alert named `UnknownSymbol_<id>` (a lookup racing that
+  `Dispose` on the AlertManager thread could read unmapped memory). Verified on the loopback harness: both fail before,
+  both pass after. +3 lines, cold path.
+- `Mirror/MirrorConfig.cs`, `Mirror/TcpLink.cs` — `IPWhitelist`: a listening end accepts only these IP
+  addresses and closes any other connection at once; `ThrowIfInvalid` refuses a listener with the list empty or holding a
+  non-IP. Why: on a Remote any new link replaced the live one, so an internet scanner touching the port made the Local end
+  close that desk's stand-ins and the server cancel every remote order (production review B3). Breaks: a Remote's
+  MirrorConfig.json must now list the CME box's egress address.
+- `LocalMirror.ApplyMessage` — the 1 s age check is deleted, with what only it used: `MirrorMessageHeader.CopyTimestamp`,
+  `MirrorHeartbeat.PublishTimestamp`, the Remote's `_copyTimestamp` and `s_maximumMessageAge`. Every call that reaches the
+  Local end is now made on its stand-in, however late: a call clicked during a stall under 10 s reaches the server when
+  the stall ends (Spec.md "Calls are not aged"). Breaks: the message and heartbeat packets are 8 bytes shorter, so both
+  Mirror ends must be deployed together.
+- No Logging on a remote desk: the Remote Mirror starts none; a RemoteClient Workspace creates no AlertManager. The Local
+  Mirror's `Program.RunLocal` runs one `AlertManager` on the server's context: its loop's exceptions and every stand-in's
+  rejects reach Telegram from the CME box.
+- `Provider/Client.cs` — `OnOrderRejected` and `OnOrderState` back to their committed shape (the id-only client-side
+  Create rule and `DeallocateOrder` existed only for remote GUIs). `InstrumentHeadersWidget` follows the server's
+  allocations, so the remote `Instrument` event is gone.
+- Code: net −44 lines (.cs/.axaml). Smoke run against a simulation server: 14 of 16 pass; the 2 failures are by design:
+  a reject does not reach the remote Workspace itself (it reaches Telegram, as for a Workspace on the CME box).
+- Breaks: both Mirror ends and the Workspaces must be deployed together (wire and ring shape changed).
+
+## 2026-10-08 — review fixes: `PendingNew` renamed `InFlight`, an order shows in the GUI from the click, a full client disposes (`cpp_alignment_report_2026-10-07.md` §4.4, §4c)
+
+- `Execution/Order.cs` — `PendingNew = 1` is now `InFlight = 1` (same value). New `OrderState.NewInFlight(in OrderTarget)`
+  builds the state of a Create the exchange has not acked (Active, InFlight, nothing filled, Seq 0).
+- `Provider/Server.cs` — `OnOrderTarget`'s Create branch builds its state with `NewInFlight` (was an inline initialiser).
+- `Provider/Context.cs` — `OrderEnumerator` finds a slot by its target row and shows an order the server has not answered
+  as `NewInFlight(target)`. Before: a fresh slot's order was hidden until the server answered, a reused slot's showed as
+  an empty state with id 0 (two such rows merged in the grid), and a refused Create in a reused slot showed as a phantom.
+- `Widget/OrdersWidget` — a `StateReason` column.
+- `Execution/Order.cs` — builders replace hand-copied initialisers (behaviour-preserving): `OrderTarget.NewOrderRejected(reasons,
+  source)` in `Client.Reject`, `Server.OnOrderTarget`, `ServerSimulator` and `MirrorPacket.NewConnectionBrokenReject` (was
+  `CreateConnectionBrokenReject`); `OrderState.NewRejected(in OrderRejected, out OrderState)` (out, not a return: a return cost an extra 64-byte copy, +4.7 ns per refused Create, measured) in `Server.OnOrderRejected` (on the live row)
+  and `MirrorSubscriber.WriteRejectToGui` (on `new OrderState()`, as before). `GetInFlight` is now `NewInFlight`.
+- `Execution/Order.cs`, `Data/Instrument.cs`, `Data/Tick.cs` — hot row constructors inline (behaviour- and layout-neutral:
+  sizes, offsets, constructor bytes and JSON verified identical): `[method: MethodImpl(AggressiveInlining)]` on the
+  parameterless constructors of `OrderRejected`, `OrderState`, `OrderTarget`, `Fill` (the compiler zeroes every field, so
+  the JIT judged them too big); `fixed byte _reserved[]` became plain `byte` fields (`Fill`: `Size = 64`; `Header<T>`: its
+  `Size = 4` already reserves them), removing a stack-cookie check from every frame holding one; `OrderRejected`'s static
+  constructor became a constant mask (`OrderDiscarded`), so `IsDiscarded` inlines; `Header<T>`'s static constructor (the
+  one-byte enum check) moved into its constructor as a JIT-time constant, free for a byte enum.
+- `Execution/Order.cs` — `OrderState.NewInFlight(in OrderTarget, out OrderState)` and `OrderTarget.NewOrderRejected(reasons,
+  source, out OrderRejected)` build as constructor, then field stores, into the caller's variable (the server's InFlight
+  state straight into its row); `new() { ... }` built a temporary and copied it (measured about +7 ns per Create and per
+  server reject). Same shape as `NewRejected`. Output verified byte-identical on populated orders.
+- `Mirror/`, `Provider/Client.cs` — link recovery is exact, and the Mirror never makes up an OrderState (design A with
+  DeallocateOrder; design B, a server-side age check, was built and measured, and rejected: a re-sent Create could overwrite a live
+  order's state):
+  - `Client.DeallocateOrder` (target done, position no longer counts it, slot free) is used by a Done state and by the refusal of
+    a Create the server never saw (source `Client`), so a `Client` ends that order itself. Before, the Remote wrote a made-up
+    Done/Rejected into the copy and the GUI's channel (`WriteRejectToGui`, deleted), which needed the phantom guard in
+    `ApplyRow` (deleted).
+  - `MirrorSubscriber.ReconcileGui` (issue J): on each GuiReply, every order the GUI still waits on that the server has no
+    row about is refused `ConnectionBroken` as a Create. Before, an order lost in a dying link stayed InFlight with its slot
+    taken until the Workspace restarted.
+  - `ApplyRow` skips a row whose bytes the copy already holds, so a snapshot no longer re-delivers every state to a GUI.
+  - `MirrorPublisher.PublishRows`: a row skipped mid-write while a remote takes its snapshot counts as changed next pass;
+    before, it never reached that remote unless it changed again.
+  - The Remote closes a dead link at once, so the Local end redials about 10 s sooner.
+- `Mirror/MirrorPublisher.cs` — each GUI command is sent (`ManualClient.WriteSocket`) at the end of `ApplyMessage`, where
+  it was aged, instead of in `Read` step 4 (which now only reads): nothing slow in the rest of the pass can push an order
+  that passed the 1 s check past it, and a GUI detached later in the same batch no longer takes its last commands with it.
+- `Mirror/MirrorPublisher.cs` — the 1 s age check refuses every order target alike (`ConnectionBroken`), cancels included,
+  for one simple rule (it exempted cancels since the second rerun). A late cancel is now refused like any other: its order
+  keeps working, and the operator sees the reject and cancels again.
+- `Provider/Context.cs` — a strategy workspace lists every order booked to its strategy, whichever client sent it
+  (`Context.EnumerateOrders(instrumentId, strategyId)` walks every slot with a `StrategyId` filter;
+  `WorkspaceContext.EnumerateOrders` passes `-1` for a server workspace, else the ManualClient's strategy id). Before, it
+  listed the algo's slots plus this GUI's, so a sibling GUI's manual orders for the same strategy (another Workspace, a
+  remote desk) were invisible and could not be cancelled. `CompositeOrderEnumerable`/`Enumerator` and the per-context
+  `EnumerateOrders` overrides are deleted (about -135 lines).
+- `Mirror/MirrorSubscriber.cs` — `CloseOutGui` (defect N): on the GuiReply that admits a new Workspace process, before it
+  is released from `AllocateClientId`, every target row its dead predecessor left Active with no server row about it is
+  marked Done in the copy, as `Server.TryCloseOutOrders` settles a dead client's rows. Before, a Workspace restarted under
+  the same name showed such an order (lost with the link, or refused before the server saw it) as InFlight forever: its
+  refusal was in the queue the new process skips (`Client.Recover`), and a cancel of it was dropped by the Local end.
+  About +19 lines, one file.
+- `Provider/Client.cs` — `OnOrderRejected` ends an order on a client-side Create refusal matched by id alone, not id and
+  seq. Before, an amend or cancel sent before the refusal arrived moved the target's seq on, so the refusal looked stale and
+  the order hung InFlight with its slot taken: a Create and its cancel both refused as too old by the Local end (M, slot
+  leak), a cancel clicked just after `ReconcileGui` refused a lost order, or a cancel arriving fresh after its Create was
+  refused as too old (both dropped silently by the Local end's `ManualClient.Amend`). Safe: such a Create never reached the
+  server, so nothing sent after it can be live; ids carry a generation, so a reused slot never matches. Every other refusal
+  still needs the same seq. Measured (wf10 BenchmarkDotNet): +0.37 ns per server refusal, +0.5 ns per client-side Create
+  refusal, 0 allocated; a refusal only, never a send.
+- `Mirror/MirrorSubscriber.cs` — `ReconcileGui` refuses only orders the Remote sent and nobody answered: a per-GUI
+  `Bitset64` (`_forwardedLocalIndicesByClientId`) is set when step 4 sends an own order, cleared by its Done row
+  (`ApplyRow`) or a refused Create coming down (`ApplyPackets`), and cleared by `ReconcileGui`, which no longer requires the
+  target to be Active. Fixes, found by the wf10 harness and its design review: a Create clicked just before a GuiReply
+  (or whose row was written but not yet its message) was refused and then sent, so the GUI showed refused while the order
+  was live (L, high); a refusal a frozen Workspace had not read (Remote not-ready, Local age check or ManualClient refusal,
+  or a previous `ReconcileGui`) was repeated (O); a lost Create whose cancel was refused during the outage leaked its slot
+  (P). Designs without the bit were checked and rejected: nothing the Remote can read at the GuiReply separates a lost order
+  from one already refused (Spec.md "Only orders sent and never answered are reconciled"). About +12 lines.
+- `Provider/Context.cs` — the walk shows an order the server has not answered only for the workspace's own GUI client
+  (`EnumerateOrders(..., inFlightClientId)`; `WorkspaceContext` passes `Manual.ClientId()`). Another client's order is
+  listed once the server's state row is about it. Before, a GUI could cancel another client's in-flight order; that cancel
+  travels a different channel, could reach the server ahead of the Create, and was dropped while the order went on working.
+  Hiding it replaces a per-action guard in every widget (about +6 lines instead of +12).
+- `Socket/Socket.cs` — `ReadOnlySocket` no longer latches closed: `TryRead` returns `Closed` for a close message and reads
+  on after it; its `_isClosed`, `IsClosed`, `Close()` and the clears in `Recover`/`Reset` are deleted, and `Socket.Close`
+  closes only the writers. Fixes Logging's audit tap going deaf to a client's orders after its first close: after any
+  reconnect under the same name the audit had the server's answers but none of the operator's orders, amends or cancels.
+  The `ServerSocket` already ended the session through its Open gate, so nothing else changes (see Spec.md "A reader
+  never latches closed").
+- `Provider/Server.cs` — `CancelAllOrders` is now `TryCloseOutOrders`, true once nothing waits on the exchange;
+  `IsClientReady` is just that call, and `HasActiveOrders` / `IsOrderActive` are folded in (one walk, one read per slot).
+  It closes out a Create the server never read (target Active, state row still the slot's previous order): stamped Done, its
+  cancel still sent; before, that cancel was always refused and the name stayed `NotReady` for the week. It also repairs a
+  target row the dead client left mid-write when the slot is not working (before, only working slots were repaired).
+  A Create counts as unread only once the client is drained: a request/acknowledge handshake (`OnClientClosed` bumps a
+  request with `Interlocked.Increment`; each CoreGroup thread acknowledges it at the end of a `ReadExecution` pass, writing
+  only when it moved) proves no Create read just before the close is still being handled; until then its row keeps
+  Active + Cancel, so the vendor's replay-on-ack can cancel it. The state row is read with `TryRead` (a torn read of a row
+  the CoreGroup thread is writing could skip a live order). `Provider/Client.cs` — `ManualClient.Open`
+  asks a `NotReady` name again once a second, for up to 5 s, before moving on to the next number (which took another client id for the
+  week and could not see the stuck orders); only `AlreadyConnected` moves on.
+- `Provider/Server.cs` — each cancel `CancelAllOrders` injects (a client closed, or a refused reconnect) is written to the
+  client's server-to-client channel before it is sent, so the client's audit shows the cancel before its Done/Canceled (it
+  was in no audit file). `Provider/Client.cs` ignores an `OrderTarget` on that channel instead of throwing.
+- `Provider/Client.cs` — `Dispose` no longer throws when all 64 order slots are active (an unexplained guard from the first
+  commit): the Mirror's `DetachGuis` threw there on every pass for a remote GUI with 64 working orders, so the Local mirror
+  stopped for every remote and those orders were never cancelled (the socket never closed). Any client now closes when full.
+- Breaks: audit files store the enum by name. Lines written before the rename say `"PendingNew"`, fail to parse, and are
+  skipped by the Audit Trail; text searches must use the new name. Deploy with the C++ rename (it writes the name too).
+
+## 2026-10-07 — a connect is always answered; the previous-orders check moves to the server; remote-mirror groundwork (`cpp_alignment_report_2026-10-07.md`)
+
+Complete in C# and run (see Evidence). Deploy the server and every client together: an old client
+takes a negative refusal code as its id.
+
+- `Socket/Socket.cs` — the server answers every connect request exactly once. The reply's
+  `SocketHeader.ClientId` is the id when 0 or more, otherwise a new `ConnectRefusal`
+  (`NoClientIdAvailable -1, ServerError -2, AlreadyConnected -3, Closing -4, ReservedClientName -5,
+  NotReady -6`); the layout is unchanged. Today's three silent returns (no id, already Open,
+  Closing/Closed) left the client in `Connect` forever. `PollLetterBox` takes the request,
+  `DecideConnect` decides, and the new `ReplyToClient` stores the answer (also used by `OpenClient`).
+  A throw while deciding is answered `ServerError`; the listen loop's pass is wrapped in try/catch,
+  so a bad request or a `ClientOpened`/`ClientClosed` handler no longer ends the thread that notices
+  dead clients and cancels their orders. A request's own `ClientId` is forced to -1 before
+  allocating. A first attach builds the socket before firing `ClientAllocated` (was the reverse; as
+  `LoadClients` does). `ReplyToClient` empties a reply left by a client that died before reading it
+  (Linux keeps the region), which used to spin the listen thread forever. New hook
+  `IsClientReady(clientId)`, asked only when no live process holds the name (Detached/Disposed);
+  false is answered `NotReady`. Client side: `ClientSocket.Connect` returns the id or throws with the
+  refusal (`Closing` is re-asked every 100 ms under a fresh timestamp; the reply is matched on name,
+  timestamp and process id). A refused socket is disposed, never closed: a second process maps the
+  same rings as the live one, and `Close` would end the live session and cancel its orders. The exit
+  action is kept and cancelled on `Dispose` (it closed regardless at shutdown, the same danger, and
+  threw `ObjectDisposedException` after every `Client.Dispose`). `IsClosed` throws instead of
+  returning -1.
+- `Provider/Server.cs` — `IsClientReady`: a client whose previous process left an Active order is
+  refused `NotReady`, and `CancelAllOrders` runs again (the cancel on close can fail). A name that is
+  Open (connected and trading) is answered `AlreadyConnected` and its orders are never touched.
+  `HasActiveOrders`/`IsOrderActive` define "still working" once, for both: the server's state row
+  decides once it is about the slot's order (same `OrderId`), otherwise the client's target row
+  (a Create not processed yet). Not "state Active or target Active", `CancelAllOrders`'s old test:
+  `CancelAllOrders` stamps the target row Active and nothing sets it back, so a process that died
+  with a working order was refused `NotReady` forever after the exchange cancelled it (found by the
+  runtime harness). `CancelAllOrders` no longer re-cancels an order whose state row is Done. Behaviour change: `CancelAllOrders` now also runs on
+  every refused connect attempt (each lifts the target's `Seq` by 1,000,000; accepted, not capped).
+- `Provider/Client.cs` — `ThrowIfPreviousOrdersActive`, its `OrderRisk` clear and the 100 ms sleep
+  are gone: the server admits a process only once every previous order is Done, and their last
+  messages are in the ring long before `Recover` runs (milliseconds after admission); `Recover` stays.
+  The clear was redundant: a validated Create resets its row (`RiskLayer.cs`, now commented), and
+  nothing reads a slot's row before the process's own Create on it. A constructor that
+  throws after `Connect` now calls `Dispose()` (base constructor and `ManualClient`'s body), so the
+  server releases the name; it used to stay Open for the life of the process, and a retry in the
+  same process hung. `Dispose` tolerates a half-built client (`_instrumentData ?? []`,
+  `Context?.Dispose()`).
+- `Provider/Context.cs` — `ServerContext.AllocateClientId` returns `ReservedClientName` (a client named
+  after the server) and `NoClientIdAvailable` (no free id) instead of throwing, so the client hears the
+  reason; `Server.LoadClients` throws on a negative result, keeping a broken clients file loud at
+  startup. `TryGetClientId(in String128, out int)`: one name lookup for
+  `ClientContext.GetClientIdFromMap` (same exception as before when absent),
+  `ServerContext.AllocateClientId` (same outcome) and the mirror. `GetSharedArray(arrayId)` replaces
+  `Mirror()`/`EnumerateSharedArray()`; `SharedArrayEnumerable` deleted (its seq test missed every
+  field written in place: Timestamp, TradingStatus, QuantityAhead, RateLimits).
+- `Socket/SharedArray.cs` — byte-level `RecoveryWrite(int, ReadOnlySpan<byte>)` beside `Write`;
+  both go through `AsValue` (length check).
+- `Provider/TCPServer.cs`, `Provider/Program.cs`, `Provider/Properties/launchSettings.json` deleted;
+  `Provider.csproj` is a library. New `Mirror` project (in `HFT.slnx` and `Build.csproj`), a stub
+  until the remote-workspace mirror lands. `Widget/SendOrderWidget.axaml.cs` comment no longer cites
+  TCPServer.
+- `Provider/Context.cs` — `Context.DirectoriesRoot` (static, default `S:\`, i.e. `/mnt/S/` on Linux)
+  replaces the hard-coded `S:\` in `ClientContext`/`ServerContext.DirectoriesPath`; a program may set
+  it at startup before any path is built. Paths and shared-memory names are unchanged without an
+  override (checked: all four Realtime/Simulation directory paths equal the old strings). For a remote
+  risk desk with no S: drive. `Workspace/Program.cs` — `-d <DirectoriesRoot>`, relative to the
+  executable. `Mirror/MirrorConfig.cs` — `MirrorConfig.json` beside the executable (role, server name,
+  clock mode, listen port, dial addresses, DirectoriesRoot); a missing file is written with defaults and
+  the program stops naming it. Telegram keeps `S:\Telegram.json` (Tools cannot see Provider), so a
+  remote desk sends no Telegram alerts.
+- `Mirror/` — the remote-workspace mirror (Spec.md "Remote workspaces"): `TcpLink`/`TcpLinkConnector`
+  (plain TCP, length-prefixed packets, reader and writer threads, 10 s silence timeout, redial every
+  second; loopback-tested), `MirrorPacket` (Row, Message, Heartbeat, GuiList, GuiReply; names travel
+  relative to `Context.DirectoriesRoot`), `MirrorPublisher` (Local: byte-compared rows every 100 ms,
+  one ManualClient per listed remote GUI, closed when the GUI goes so the server cancels its orders;
+  GUI commands replayed through it), `MirrorSubscriber` (Remote: the copy, a `ServerSocket` under the
+  server's name, GUI ids from the Local end's `GuiReply`, refusals and `ConnectionBroken` for a GUI no
+  ManualClient serves, Logging told about each GUI so its Audit Trail works), `Program` (config,
+  startup, the two loops). `Socket.cs`: `ConnectRefusedException` carries the refusal reason.
+- `Socket/Protocol.cs`, `Socket/SharedArray.cs`, `Provider/Context.cs` — every `SharedArray` row is framed at
+  construction (`Protocol.Stamp`: `Magic` and `Length` where missing, never `Sequence`). The end-to-end test found the
+  mirror shipped no order state: rows edited under the lock never get a frame from `Write`, and `TryRead` read them as
+  Empty (the house-book allocation row too, so a remote server workspace refused its own orders). The server-header
+  alias (a one-row array over the header `LetterBox`, "array 0") is deleted: the `LetterBox` reads `Length` as "posted",
+  so a stamp would fake a post. The Mirror sends the header as its own packet (`MirrorPacketType.ServerHeader`) first in
+  every pass; the remote posts the first into its `LetterBox` (`TryStore`) and writes later ones into that entry. The
+  publisher skips a row being written (odd seq) instead of letting `TryRead` spin, forever on a row a dead client left
+  mid-write (it stalled the Local Mirror in the test, and a GUI order then reached the exchange 13 s late).
+- `Mirror/` — a Create refused before the server saw it (by the GUI's stand-in ManualClient, which checks 100 ms after the
+  GUI did, or by the mirror) left the remote GUI's slot busy for good: no Done row follows a refusal the server never
+  made. The Remote now writes the Done/Rejected state before any source-`Client` Create reject
+  (`MirrorSubscriber.WriteRejectToGui`), which also replaces its own `ConnectionBroken` path; `ConnectionBroken` rejects
+  are source `Client`. The Local end refuses an order that waited more than 1 s after arriving (`TcpLink` stamps arrival)
+  instead of sending it late.
+- `Mirror/` — order age is now measured on the Local end's own clock: each heartbeat carries its `Stopwatch`, the remote
+  echoes the latest in every GUI message (`MirrorMessageHeader.CopyStopwatchTimestamp`), and an order echoing more than
+  1 s ago is refused. The arrival stamp it replaces (removed from `TcpLink`) missed a stall of the whole process: the
+  rerun froze the Local process 3 s and an order was acked 2.6 s after the click. `PublishRows` reads with the new
+  `SharedArray.TryCopy` (never waits on a row mid-write; the odd-seq check before `TryRead` left a window). A Create the
+  Remote refuses also gets its Done/Rejected written into the copy's state row, so the GUI's grid shows the refusal.
+- `Mirror/` — from the second rerun: a cancel is never refused for age (a stall threw cancels away); the Remote takes the
+  echoed Local clock before applying its pass (a stalled Remote stamped an old click with the newest heartbeat, and the
+  order reached the server 2.5 s late); an attached GUI's state row from a snapshot no longer replaces the Remote's
+  Done/Rejected for the slot's current order (a phantom order after a link drop); `MirrorPacket.RewriteName` throws a
+  clear message when a name exceeds 128 characters (a long remote install folder crashed it with `FixedString<128>`).
+- `Provider/Client.cs` — in simulation only an `AlgoClient` clears its audit files at startup; a GUI never touches them, so
+  GUIs (and the Mirror's stand-ins after a link drop) restart within a run. `Workspace/Program.cs` — the simulation clock
+  holds while the copy's header reads 1970 (a remote link down) instead of running unpaced.
+- `Provider/Context.cs` — `OrderEnumerator.MoveNext` skips a slot mid-write instead of retrying: it spun forever on a row
+  a dead client left mid-write, hanging the GUI's ladder, orders and send-order widgets.
+- `Provider/Client.cs`, `Workspace/Workspace.axaml.cs`, `Mirror/MirrorPublisher.cs` — several workspaces per principal
+  (strategy or server), on any machines. GUI names are `<principal>_GUI<n>` from 0 (was `<principal>_GUI`, so the first
+  GUI's folder moves to `_GUI0`; its earlier audit stays under `_GUI`, and a mid-week restart's `LoadClients` holds the
+  old name's id until Monday). `ManualClient.Open(principal, server)` takes the lowest free number, skipping
+  `AlreadyConnected`/`NotReady`, at most 8; the constructor takes the GUI name and the principal explicitly instead of
+  adding or stripping "_GUI". The Local Mirror opens exactly the name the remote lists (`TryGetPrincipalName`) and, within
+  3 s of refusing a name, repeats that refusal at once instead of staying silent (the remote used to wait 10 s).
+- `Spec.md` — new "Connect: every request is answered" and "Remote workspaces (the Mirror)"; "Client
+  restart" rewritten for the server-side check; server workspaces are one at a time (the old "any
+  number may be open" was wrong); the obsolete TCP-mirror item and the startup-window residual are
+  marked resolved.
+- Evidence: the solution builds (0 errors). Scratchpad harness (`handshake_harness`): a real
+  `ServerSimulator` plus each client as a separate OS process. Second process under a live name,
+  restart, Closing retry, previous order Active / Done (seeded and through the real close path),
+  reserved name, throwing close handler, constructor failure in the same process: all PASS after the
+  `IsOrderActive` fix (S3b failed before it). Linux leftover reply not reproducible on Windows.
+  Report §6.
+
 ## 2026-10-05 — aligned with C++ (`csharp_alignment_report_2026-10-05.md`, HFT_cpp `persist-client-sockets`)
 
 The seven "C# to implement" items of the C++ review, each agreed with the user, C++ the reference:

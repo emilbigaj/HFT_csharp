@@ -30,22 +30,49 @@ here; the reasoning lives here.
   exposed as `Context.ServerStrategyName`. Its position files therefore live alongside every other
   strategy's, and cannot collide with the server-wide aggregate rows in `<serverDir>\Positions`.
 - **Name reservation:** because the house directory is named after the server, no client may take
-  the server's leaf name — `AllocateClientId` throws on the collision. (`<serverName>_GUI`
+  the server's leaf name — `AllocateClientId` refuses it (`ReservedClientName`). (`<serverName>_GUI<n>`
   workspaces are unaffected; only an exact leaf match is reserved.)
 
 ## Workspaces (GUIs)
 
-- A **server workspace** sends every OrderTarget with `StrategyId = 0`. Any number may be open;
-  they all point at the house book. It sees ALL orders, ALL positions, ALL risk limits across every
+- **Any number of workspaces may share a principal** (the server, or one strategy), on any mix of machines: each is a
+  client in its own right, named `<principal>_GUI<n>` (on a remote desk `<principal>_GUI<n>@<machine>`, see "Remote
+  workspaces") with its own client id, order slots and folder, booking to the principal. `ManualClient.Open` takes the lowest free number from 0, skipping a name a live GUI holds
+  (`AlreadyConnected`); a name whose previous GUI's orders are still being cancelled (`NotReady`) is asked again once a
+  second (a new number would take another client id for the week), for up to 5 s: a cancel normally completes in
+  milliseconds, so longer means the exchange cannot confirm it, and a GUI must still open; at most 8 per principal. Why the lowest free
+  number and not a name unique per launch: under `Persistance` a name keeps its client id for the week, so per-launch names
+  would use up the 64 ids; numbered names use only as many as the most GUIs ever open at once. Saved layouts live under
+  the principal, so every number shares them.
+- A **server workspace** sends every OrderTarget with `StrategyId = 0`. It points at the
+  house book. It sees ALL orders, ALL positions, ALL risk limits across every
   allocated instrument of every strategy, and its position view is the sum over all strategies.
   It can cancel any client's orders and amend any manual (non-algo) order (global order-id
   addressing); its creates always book to strategy 0. An algo's orders are cancel-only from a GUI
   (see "Manual orders" below).
 - A **strategy workspace** shadows one algo client. Its ManualClient has its own client id — its
   order targets allocate in its own id space — and books manual orders to the principal strategy.
+  It lists every order **booked to that strategy**, whichever client sent it: the algo's, its own, a sibling GUI's, a
+  remote desk's through the Mirror (`WorkspaceContext.EnumerateOrders` walks every slot, filtered by the order id's
+  `StrategyId`). Listing by client instead (the algo's slots plus this GUI's) hid a sibling GUI's manual orders for the
+  same strategy: the position moved on their fills, but this workspace could neither show nor cancel them. A server
+  workspace lists every client's orders. The Audit Trail still reads only this GUI's own audit folder.
 - Allocating an instrument from a GUI (InstrumentHeaders right-click) allocates it to the GUI
   client, which is what makes the server open the instrument's data feed; by the union invariant it
   also provisions strategy 0.
+- **An order shows from the click.** The order walk (`OrderEnumerator`) finds a slot by its target row, which the GUI
+  writes as it sends. Until the server's state row is about that order (a fresh slot has none; a reused one still holds
+  the previous order), the walk shows `OrderState.NewInFlight(target)`, the same Active/InFlight state the server then
+  writes; a Create refused before the server saw it has its target marked Done and is not shown. Once the server's row is
+  the order's, that row decides, and Done is not shown. On a remote desk the target row is written by the ManualClient
+  beside the server, so the order shows once that row returns (see "Remote workspaces").
+- **Another client's order shows once the server has it.** The walk shows an unanswered order only for the workspace's
+  own GUI client (`inFlightClientId`); another client's (the algo's, a sibling GUI's, a remote desk's) is listed from the
+  server's first state row about it. Why: a cancel from this GUI travels its own channel, so it could reach the server
+  ahead of the other client's Create and be dropped, leaving the order working while the operator thinks it cancelled. Its
+  own orders need no such wait: its cancel follows its Create on the same channel. Hiding the order, rather than guarding
+  each action (context menu, Cancel All, amend, ladder), means no widget can act on it too early. The cost: another
+  client's order is invisible for the microseconds before the server reads it (longer in a paused simulation).
 
 ## The era rule (algo tick consistency)
 
@@ -526,7 +553,7 @@ Where the label matters:
   when it is an explicit `Reduce` one seq ahead of the state; a Replace takes the book estimate of an
   unconfirmed order. An order the exchange has not confirmed (a pending Create, or an in-flight
   Replace) is assumed to join behind everything resting at its price: it reports the client book's
-  quantity at that price as `QuantityAhead` and 0 behind, as the server's PendingNew seed does (until
+  quantity at that price as `QuantityAhead` and 0 behind, as the server's InFlight seed does (until
   2026-10-04 it reported `int.MaxValue`). The two can differ by market data in flight between the
   server's book and the client's. `QuantityAhead` and `QuantityBehind` are one queue observation:
   `Server.OnQuantityAhead` writes them with one 64-bit store and no lock, and
@@ -538,42 +565,58 @@ Where the label matters:
 The simulator, like CME, decides reduce versus reprice from the price and quantity change itself,
 not from the action byte. An exchange adapter maps Reduce to the venue's quantity-down modify.
 
-### Client restart: refuse while the previous process has Active orders, then skip the backlog
+### Client restart: the server admits a client once its previous orders are Done; the client skips the backlog
 
-At construction, after its `RiskLayer` is built, a client checks all 64 of its order slots once
-(aligned with C++, 2026-10-05):
-
-1. If any slot's `OrderState` row is `Active`, the constructor throws `InvalidOperationException`
-   and the process does not start: "start again once the server has cancelled it". A previous
-   process's live order holds room, a slot and future fills this process never made, on any
-   instrument. It can still be live after a restart: the restart was faster than the server's
-   cancel-on-close round trip, iLink was down, or the session is in a no-cancel phase.
-2. Every `Done` slot's `OrderRisk` row is cleared: it belongs to the previous process.
-3. The client sleeps 100 ms, so whatever the server is still writing for those finished orders
-   lands in the ring. The server updates the order and position rows under their locks and writes
-   the messages after releasing them, so a row can read Done a few hundred ns before its last
-   messages are in the ring.
-4. `ClientSocket.Recover()` parks every read cursor at the head of the client's rings. Everything
-   queued is about the previous process's finished orders, which are already in the position rows
-   `WorkingRisk` is seeded from; processing them would double-count fills into
-   `WorkingRisk.Position` and replay stale states and rejects.
-
-Instrument allocation then only rewrites `WorkingRisk { Position = own strategy position row,
-reservations 0 }`; with no Active orders zero reservations is exact. The region can outlive a
-process (the GUI maps it), so it is rewritten on every allocation rather than trusted.
-
-Why at construction and for every slot: a per-instrument check at allocation missed a previous
-order on an instrument not yet allocated, and its fills could already be queued; and the socket's
-own backlog skip runs when the socket is built, before the handshake, so anything the server wrote
-between then and the seed was read after the seed and counted twice.
-
-The scan reads only the `OrderState` rows, so a previous process's Create the server has not read
-yet (its state row still holds an older, Done order) is not detected. It runs for a `ManualClient`
-too, so a GUI restarted before the server cancels its previous manual orders refuses to open; a
-running GUI re-allocating an instrument no longer re-checks. Accepted residual: a manual (GUI) order
-booked to this strategy carries another client's id, so neither the check nor the backlog skip
-covers it; if it fills during the client's startup its fill can be counted twice (an operating rule:
-no manual orders on an algo while it starts).
+- **The server decides** (`Server.IsClientReady`, asked by `ServerSocket` only for a name no live process holds). While any
+  of the name's 64 orders is still working, the connect is refused `NotReady` and `TryCloseOutOrders` runs again: the cancel
+  on close can fail (iLink down, a no-cancel phase). "Working" is the server's `OrderState` row being Active once that row is
+  about the order; before the server has read the order, the client's `OrderTarget` row. The target row cannot decide once
+  the state row is the order's: `TryCloseOutOrders` stamps it Active and nothing stamps it back, so a process that died with a
+  working order would be refused forever after the exchange cancelled it.
+- **`Server.TryCloseOutOrders` closes out a gone client's 64 slots in one walk** (on close, and as `IsClientReady` on every
+  reconnect attempt): it cancels what is working, marks a Create the server never read Done, and repairs a target row the
+  client left mid-write (odd seq: readers would skip it forever and the next process's seqlock would run inverted), marked
+  Done with no cancel when the slot is not working (its torn id may name no instrument). True once nothing waits on the exchange. Its target stays Active (with
+  `Cancel`) while the exchange may hold the order, which the vendor's replay-on-ack reads to cancel a still-InFlight order.
+  It reads the state row with `TryRead` (waits out a write in progress: the CoreGroup thread is alive and may be writing
+  that order's ack or fill; a torn read could skip a live order), and the gone client's target row plainly.
+- **The cancel needs no wait.** Nothing left unread in a closed client's ring is ever processed (reads stop at Detached).
+  A Create the CoreGroup thread was already handling at the close is finished within its pass, and the close's cancel,
+  on that CoreGroup's injection queue, is drained at the start of the next pass, so it always follows the Create: it
+  cancels the order, or is refused harmlessly if there was none. Draining only decides the bookkeeping below. Never wait
+  for it on the listen thread: with the simulation clock paused the CoreGroup threads do not run, and every connect and
+  dead-client check would stop.
+- **A Create is "unread" only once the client is drained.** At close a CoreGroup thread may be part-way through a Create it
+  read just before the client was marked Detached; until it has finished, that Create's row keeps Active + Cancel. The proof
+  is a handshake, not a timing margin: `OnClientClosed` bumps a drain request with `Interlocked.Increment` (a full fence, so a
+  thread that reads the new request also sees the client Detached) and records it for the client; each CoreGroup thread, at
+  the end of a `ReadExecution` pass, reads the request (one cached read per pass) and acknowledges it, writing only when it
+  moved. Once every CoreGroup thread has acknowledged a request at least as new as the client's, everything read from it has
+  been handled, and later passes cannot read it. Cost: nothing extra per pass but that read; per close, one fence on the
+  listen thread and one cache miss and write per CoreGroup thread. While the simulation clock is paused the threads do not
+  run, so a name with an unread Create stays `NotReady` until they do.
+- **A Create the server never read is closed out**: its target row Active while the state row is still the slot's
+  previous order. With the client gone its ring is never read again, so it can never reach the exchange; the cancel sent for
+  it is refused (the state row is another order's) and nothing marked it back, so the name stayed `NotReady` forever. Its
+  target is stamped Done (which also hides it from the order walk) and does not count as working. The cancel is still sent:
+  at close the CoreGroup thread may be mid-way through a Create it read just before, and then the cancel finds its order.
+- **The server's cancels are audited on the client's channel.** The client never sent them, so no tap would record them and
+  its audit file would show a Done/Canceled with no cancel before it. The CoreGroup thread writes each injected cancel to the
+  client's server-to-client channel before sending it, so the Logging tap records request, then reject or Done, in order.
+  A client ignores an `OrderTarget` there (only its previous process's cancels arrive that way, and `Recover` skips them).
+- A name that is Open (connected and trading) is refused `AlreadyConnected`, its orders untouched; one still closing is
+  refused `Closing`, and `Connect` asks again every 100 ms.
+- **Then the client skips the backlog** (`ClientSocket.Recover()` after building its context): everything queued is about
+  the previous process's finished orders, already in the position rows `WorkingRisk` is seeded from. No wait is needed: the
+  server writes each order's row and its ring message microseconds apart on one thread, and `Recover` runs milliseconds after
+  admission.
+- **`OrderRisk` rows are not cleared at startup:** a validated Create resets its slot's row, and nothing reads a slot's row
+  before this process's own Create on it.
+- Instrument allocation then only rewrites `WorkingRisk { Position = own strategy position row, reservations 0 }`; with no
+  Active orders zero reservations is exact. The region can outlive a process (the GUI maps it), so it is rewritten on every
+  allocation rather than trusted.
+- Accepted residual (unchanged): a manual order booked to this strategy carries another client's id; if it fills during
+  the client's startup its fill can be counted twice (operating rule: no manual orders on an algo while it starts).
 
 ## Algo: Target and TryTarget
 
@@ -704,7 +747,7 @@ to a strategy, or to the house book.
   an algo order would be undone on the algo's next tick, and the algo's `RiskLayer` copy cannot see
   it (the GUI never writes the algo's target row). A cancel may always intervene.
 - **`ManualClient` owns seq numbering.** A cancel of an algo order is numbered existing target seq +
-  1,000,000, as `Server.CancelAllOrders` does, so it never collides with the algo's own next seq; any
+  1,000,000, as `Server.TryCloseOutOrders` does, so it never collides with the algo's own next seq; any
   action on a manual order (amend or cancel) is existing seq + 1; the caller's seq wins only if
   larger. The widgets used four ad-hoc offsets (+1,000,000 on the ladder's cancel, +10,000 + age in
   seconds on the orders grid's cancel, +1000 on the send-order cancel, +1 on the send-order amend)
@@ -713,7 +756,7 @@ to a strategy, or to the house book.
   What makes the jump legal, and what follows it. The server's seq check compares a target only with
   the owner's target row (the shared `OrderTargets` row the owning client writes before it sends) and
   refuses only a lower seq (`TargetIsStale`); there is no `seq == previous + 1` rule, so gaps are
-  legal (`Server.CancelAllOrders` relies on this too). The GUI never writes an algo's target row, so
+  legal (`Server.TryCloseOutOrders` relies on this too). The GUI never writes an algo's target row, so
   the server never sees the GUI cancel's seq: the algo's own next amend of that order passes the seq
   check against its own row and is refused only once the order is `Done` (`StateIsDone`, discarded,
   no pause), at the server or, if it gets to the exchange first, as `OrderNotFound` alone, which
@@ -771,21 +814,21 @@ and the C++ server. Drops are not counted or logged.
 CME answers a refused new order with one report; the C++ InstrumentRouter turned it into two
 messages, reject then Done/Rejected state, and the C# simulator synthesised the same pair the other
 way round. The order matters to the algo. With the reject first, the reject releases the in-flight
-reservation while the state row still says PendingNew, so for a tick `ActiveTargets` still shows an
+reservation while the state row still says InFlight, so for a tick `ActiveTargets` still shows an
 order that is dead and the algo sees room it cannot account for. With the Done first, one message
 releases the reservation and hides the order together, and the reject after it only explains why:
 the same shape as a fill, where the state carries the risk change and the event explains it.
 
 So the server owns it. `Server.OnOrderRejected` is the entry point for every refused target: the
 exchange's (the adapter calls it) and the server's own (`OnOrderTarget` calls it when `ValidateOrder`
-refuses, after writing and publishing the Create's PendingNew row, so a server- and an
-exchange-refused Create send the client the same sequence: PendingNew, Done/Rejected, reject).
+refuses, after writing and publishing the Create's InFlight row, so a server- and an
+exchange-refused Create send the client the same sequence: InFlight, Done/Rejected, reject).
 `OnOrderTarget` does not check the slot is free: a Create for a slot whose order is still live
 (`OrderIndexIsBusy`) is refused by the client's own `ValidateCreate` against the same row, and the
 platform relies on clients behaving. If one ever reached the server it would overwrite the live
 order's row and release its reservation. For a refused Create it
 publishes a `Done`/`Rejected` state through
-`OnOrderState` before the reject: `WriteOrderState` merges it into the PendingNew row (keeping
+`OnOrderState` before the reject: `WriteOrderState` merges it into the InFlight row (keeping
 `TimeInForce` and the queue fields), `RiskLayer.OnOrderState` releases everything the order holds,
 and the reject that follows finds nothing left to remove. Adapters send only the reject; the
 simulator's `OnExchangeOrderRejected` now does exactly that. An adapter that still sends its own
@@ -794,6 +837,20 @@ but the duplicate is forwarded to the client, so the C++ router should stop send
 synthesis sits after the `OrderNotFound` → `StateIsDone` mapping and inside the same-order check,
 so the mapping sees the row's real status and a reject for a slot reused by another order writes
 nothing. A refused Replace or Cancel gets no state at all: the order is still working, unchanged.
+
+**How a client ends an order.** A `Client` frees an order's slot (target Done, the position stops counting it, the slot
+id is free) only on the order's `Done` state (`OnOrderState`):
+
+- **Refused by the server or the exchange** (source `Server` or `Exchange`): the reject alone never deallocates. The
+  server saw the order, so it owns the order's end: the slot is freed by the `Done` state, which for a refused Create the
+  server publishes just before the reject (above). The reject only marks the target answered.
+- **Refused by the client's own checks** (`Validate` in `Send`, or no free slot): refused synchronously inside `Create`,
+  before the target row is written or the position counts it, so `Create` just frees the slot id it took.
+
+Nothing refuses on a client's behalf after it sent an order: a remote desk's orders are sent by the ManualClient beside
+the server, and a call clicked on a stale screen is dropped by the Local Mirror before it reaches one (see "Remote
+workspaces"). A refusal of an amend or a cancel never deallocates: its order may be working at the server, whose state
+rows still decide its end.
 
 ## Process guards aligned with C++ (2026-10-05)
 
@@ -909,14 +966,40 @@ two races the naive `if (Status == Open) Status = Closing` has:
 A fresh `Load()` at the transition site would adopt the new epoch and defeat the whole check — the
 CAS must use the snapshot taken when the evidence was observed.
 
+### A reader never latches closed
+
+A close message ends the **writer's session, not the ring**. `ReadOnlySocket.TryRead` returns `Closed` for the close
+message itself, that one read only, and its next read continues right after it; the reader keeps no "closed" state at all
+(no flag, no `Close()`, no `IsClosed`). Only a writer closes: `WriteOnlySocket.Close` writes the close message and from then
+on emits only close messages, until a reconnect's `Recover` clears it.
+
+What a `Closed` read means is decided by **whoever owns the session**, not by the reader:
+
+- **`ServerSocket`** (the trading server, Logging's own sockets, the Mirror's remote): `Closed` requests `Open → Closing`,
+  and every later read and peek is gated on the client being `Open`, so the session ends there until the client
+  reconnects; the reconnect's `Recover` skips anything left unread.
+- **Logging's audit tap** (`SocketListener`, which reads a trading server client's channels with no `ServerSocket` in
+  front, for the whole life of the socket): the close message is a point in the record; the tap keeps reading, and a
+  reconnect under the same name writes its next session right after it, so that session is audited too. Every channel
+  closes in the client-to-server direction only, so a pass never reports `Closed` overall and the tap is never dropped,
+  which is right: under `Persistance` the socket, and the server's writes into it while the client is away (fills, the
+  cancels on close, their Done), outlive each client process.
+
+Why not keep the latch (as it was): it made a close permanent for the ring, which no reader needed (the `ServerSocket` gate
+already ends the session) and one reader could not have: Logging's tap went deaf to the client-to-server direction at the
+first close, so after any reconnect under the same name (a Workspace reopened, an algo restarted, every Mirror link drop
+over 10 s) the audit kept the server's answers but lost every order, amend and cancel the operator sent. Rebuilding the
+tap per session instead would lose the server's writes while the client is away, and either skip or duplicate the new
+session's first records at the rebuild.
+
 Consequences kept deliberately:
 
 - **Write gate:** `Open || Detached || (Persistance && Closing)`. Without the third term, the ≤1ms
   `Closing` window silently drops server→client writes — a fill landing there would vanish from the
   very ring persistence exists to preserve. Non-persist keeps dropping there, matching the old
   semantics.
-- **`PollLetterBox` refuses `Closing` like `Closed`** ("try again in a moment"): an unhandled
-  status falls through into `OpenClient`, which would silently swallow the close in flight.
+- **`PollLetterBox` answers `Closing` and `Closed` with `ConnectRefusal.Closing`**, and `ClientSocket.Connect` asks again
+  every 100 ms: opening there would swallow the close in flight.
 - **Recover-on-reconnect skips the dead client's unread backlog** (`Socket.Recover` parks readers
   at the writer's head). Consistent with the persist design — the client is gone and its orders get
   cancelled — but it is a choice, not a neutral fact.
@@ -927,6 +1010,194 @@ Consequences kept deliberately:
   would read as alive forever and its orders would never be cancelled; on Windows `OpenProcess(0)`
   fails, so the two platforms disagreed. `IsAlive` returns false for `pid <= 0` on every platform:
   the safe direction, because closing cancels. The C++ `IsProcessAlive` keeps the same guard.
+
+### Connect: every request is answered
+
+- The server's reply carries `ClientId`: the client's id when 0 or more, otherwise a `ConnectRefusal`
+  (`NoClientIdAvailable`, `ServerError`, `AlreadyConnected`, `Closing`, `ReservedClientName`, `NotReady`). `SocketHeader`'s
+  layout is unchanged. Before this, three cases got no reply and `Connect` waited forever.
+- `Connect` throws `ConnectRefusedException` (its reason in `ConnectRefusal`) and only `Dispose`s the socket: a refused second
+  process maps the same rings as the live one, and `Close` would write a close message into them, ending the live session
+  and cancelling its orders. Its exit action (close at exit) is cancelled on `Dispose` for the same reason.
+- A throw while deciding is answered `ServerError`; each listen pass is wrapped too, since that thread is what notices dead
+  clients and cancels their orders. A reply left by a client that died before reading it is emptied before the next is
+  stored (Linux keeps the region).
+- A request's own `ClientId` is ignored (forced to -1): only `LoadClients` may pass a stored id.
+- A client's constructor that throws after `Connect` disposes itself, so the server releases the name; a retry in the same
+  process used to hang.
+
+## Remote workspaces (the Mirror)
+
+People outside the colo (arb's risk desk, the home office) run the normal Workspace against a copy of the CME server, with
+full order entry. The CME box accepts no inbound connections, so its end dials out.
+
+- **Two ends, one program.** `Mirror.exe` reads `MirrorConfig.json` beside itself; a missing file is written with defaults
+  and the program stops, naming it. `MirrorRole Local` runs beside the real server, `Remote` where people sit. Either end may
+  listen (`ListenPort`), dial (`ConnectAddresses`, redialled every second), or both; a Local end refuses to listen while
+  links are unauthenticated: whoever reached it would get full order entry.
+- **Rows down.** The Local end attaches read-only and publishes on the pass a remote connects (its snapshot: a new Remote pings only once it has the server header, so waiting for its ping would deadlock), on the pass a remote's ping arrives (every 100 ms, so at least that often while a remote is connected; with none connected nothing is published, and there is no timer), or when a stand-in ManualClient reads an order state from the server (a fill's too: `Server.OnFill` writes the state and position rows before it sends the stand-in the state, and the fills themselves go to the strategy's channel) or a GUI waits on its `AllocatedClientId` (`LocalMirror.IsPublishDue`; still one publish per pass, so the server pays one extra row scan per pass with news, not one per message), sends each remote
+  every row whose bytes changed since the last pass; a remote that just connected gets every row. Bytes, not seqs: the
+  server writes TradingStatus, Timestamp, QuantityAhead and the rate limits in place without moving the seq. A pass sends
+  the server header, then rows, then `AllocatedClientId`s, then a heartbeat, so no GUI gets its id before the rows that hold it.
+  The header is its own packet, not a row: the remote sizes its copy from the first one and posts it in the copy's
+  `LetterBox`, as a server posts its own; later ones are written into that entry. It also carries the Local end's
+  `Context.GetLayoutHash()` (FNV-1a over each array's row size and capacity, in creation order), and the Remote throws at
+  startup, naming both values, when its own differs: rows are tagged only by array number, so a desk on a different build
+  (an array added, removed or resized) would put rows into the wrong arrays and show plausible but wrong orders and
+  positions. Both ends must run the same build. A row being written as the pass reads it
+  (odd seq, or the seq moving during the copy) is skipped and caught next pass (`SharedArray.TryCopy`, which never waits):
+  `TryRead` would spin, forever on a row a dead client left mid-write. The order walk (`OrderEnumerator`, the GUI's order
+  grids) does the same for the same reason: a slot mid-write is skipped for that refresh, never shown torn (a torn row can
+  mix two orders, and the GUI acts on what it shows).
+- **Every `SharedArray` row is framed at construction** (`Protocol.Stamp`: `Magic` and `Length = sizeof(T)` where missing,
+  `Sequence` untouched, by any write-capable opener). Rows the server edits under the lock (order states, positions) never
+  get a frame from `Write`, and `TryRead`/`Read` refuse a row without one: the mirror saw every order state as Empty. An
+  unwritten row still reads Empty (`Sequence` 0). The server header is no longer also opened as a one-row array
+  ("array 0"): that region is a `LetterBox`, whose `Length` means "posted", and a frame stamped on it would fake a post.
+- **Cost to the server.** A line the server wrote since the last pass costs its next write a cross-chiplet ownership recall
+  (measured about +330 ns on Zen 4, once per hot line per pass; comparing bytes or checking seqs first costs the server
+  the same). Writing everything twice to a ring for the mirror measured worse: it pays on every event. The Local end runs
+  on the housekeeping cores, since each CoreGroup fills its chiplet.
+- **One ManualClient per open remote GUI; the Workspace's client is a pass-through to it.** The remote lists its open GUIs
+  every second (`GuiList`), and at once when one connects. The Local end starts a ManualClient, the GUI's stand-in, under
+  the same name for each newly listed GUI and closes it when the GUI is no longer listed or its remote drops; the server
+  then cancels what it left working, as for any client that closes, and refuses a reopen `NotReady` while those cancels
+  are pending (a stand-in it could not start is tried again on a later `GuiList`, at most every 3 s). The stand-in's id is
+  the GUI's id on the remote, so the copied order rows and the ids in the GUI's orders are its own: no id translation.
+- **Which Workspace is remote: only a live Remote Mirror says so.** `ManualClient.Open` first opens a plain ManualClient.
+  The Remote Mirror's `ServerSocket` refuses every name that is not a remote desk's (`ConnectRefusal.RemoteDesk`), and
+  Open then opens the same number as a `RemoteClient`; the real server never gives that answer. Why not a marker file or a
+  flag: a file outlives the Mirror that wrote it, and a Workspace that once saw it beside a real server would send nothing
+  that server reads. A remote desk's GUI names end `@<machine>` (`ManualClient.GetGuiName`): no Workspace on the CME box or
+  on another desk can hold one, so after a link loss nobody else can take a remote GUI's name, and with it its client id,
+  before its stand-in is started again. The Local end reads the principal from the name before `_GUI<n>@`
+  (`ManualClient.TryGetPrincipalName`). Names still fit 128 characters, folder included (see "Setting up a remote desk").
+- **A `RemoteClient` holds nothing.** Each call (order target, allocation, algo status, risk limit) goes unchanged into its
+  socket's admin channel; the Remote Mirror forwards it, and the Local end makes the same call on the stand-in, which takes
+  the slot, runs the RiskLayer, writes the target row and sends. Nothing comes back down the GUI's socket. The
+  RemoteClient holds no order state, writes no row and raises no event: a remote Workspace
+  shows only what the copy holds. The InstrumentHeaders grid watches the server's allocated instruments
+  (`ServerContext.InstrumentIds`), so an allocation shows there without an event.
+- **The copy is read-only on the remote.** The Remote keeps it under the same server leaf name and runs a `ServerSocket`
+  under that name, where only `RemoteClient`s attach. The Mirror is its only writer, and it writes only the Local end's
+  rows. Rows are stored with `RecoveryWrite`, which repairs one a killed Mirror left mid-write. Names travel relative to
+  `Context.DirectoriesRoot`; each end puts its own root in front (`MirrorPacket.RewriteNames`). Why: a remote GUI that wrote
+  its own target rows beside the Mirror made two writers per row, which needed a per-GUI reconcile after a link loss and a
+  close-out after a Workspace restart; with one writer neither exists.
+- **A remote order shows once its row returns.** Its target row is written beside the server, so it appears when the next
+  pass brings the row down: the stand-in's first order state from the server triggers that pass at once, so about one round trip, then the Workspace refresh. The GUI never shows its own action
+  before the Local end has it. A click lost in a dying link never appears.
+- **Answers.** A `RemoteClient` connecting on a remote waits for the Local end's `AllocatedClientId`: its id, or the server's refusal
+  (`AlreadyConnected`, `NotReady`), which `ManualClient.Open` handles as on the CME box (the next number, or ask again in
+  a second). A second Workspace under a name already open on the same remote is refused at once.
+- **The latency display.** One link per remote machine, so one number, kept in the copy for every Workspace there:
+  `Context.GetLatency(coreGroupId)`, a `Tools.Duration` per CoreGroup (the shared array `<server>/Latency`), below 0
+  while disconnected; on a remote copy, index 0 is the Mirror link. The Remote Mirror sends a `Ping` every 100 ms carrying
+  its own monotonic clock (`Timestamp.StopwatchNow`, the machine's `Stopwatch` as a `Timestamp`); the Local end queues it back as a `Pong`, so it goes out after the publish it triggers on that same pass (rows, then the pong): the round trip then covers the Local loop and a publish too, and a Local end that answers but no longer publishes reads as a stall, not as a healthy number over a frozen screen; the
+  Remote times it on that same clock (no clocks need to agree) and writes `Latency[0]` every pass: the worst of the last
+  10 round trips, or, when longer, the age of the oldest unanswered ping (the newest answered one's age less one interval),
+  so it climbs through a stall; -1 ns from 10 s without a pong (`RemoteClient.s_silenceTimeout`, also `TcpLink`'s silence
+  limit). A remote Workspace shows it beside its clock, or how long since the row last changed when longer, so a dead or
+  frozen Remote Mirror (which stops rewriting it) climbs the same way; below 0, or unchanged for 10 s, it reads "Connection
+  broken – reconnecting…". The Workspace reads the value plainly, not through the seqlock: one aligned 8-byte `Duration`
+  cannot tear, and a seqlocked read would spin forever on a row a killed Remote Mirror left mid-write (the unchanged-for-10 s
+  rule then shows it broken), and would throw on an unwritten row. The Local end never writes the array (the server's rows are unwritten, so they are never
+  published over the copy's). The ping is also the link's keep-alive. A Workspace beside the real server shows no number.
+  Clicks while the link is down are dropped, with no refusal: the display is the signal. The clock beside it is the
+  copy's `ServerHeader.Timestamp`, which the server rewrites every pass and the Local end sends at the start of every
+  publish, so it moves only while the server is alive. Read together: a moving clock and a healthy latency mean all is
+  well; a frozen clock with a climbing latency or "Connection broken" means the link or a Mirror is down; a frozen clock
+  with a healthy latency means the server itself has stopped (no code needed for that case).
+- **Link loss.** Ten seconds of silence ends a link; both ends send at least once a second. The Remote closes a dead link at
+  once, so the Local end sees it end and redials without waiting for its own 10 s; the Local end drops what was still
+  queued on it, closes that link's stand-ins, and the server cancels what they left working. While the link is down a
+  GUI's calls are dropped. When the link returns the remote gets a full snapshot (a row skipped mid-write during it is
+  sent the next pass) and its GUIs are listed again; a call that reaches the Local end before its GUI's stand-in is started
+  again is dropped (a residual: the latency is the link's, not that GUI's, so it does not show this). Nothing is reconciled: the remote holds no order state, and every
+  order's end is in the copied rows. A restarted Local end (a new start time in the heartbeat) ends the Remote: client ids
+  may differ, so the Workspaces must be reopened, and the Remote waits for the last run's Workspaces to close before it
+  starts. The copy's header is left as it was (a simulation Workspace's clock holds there).
+- **No Logging on a remote desk.** The Remote starts none, taps no GUI socket, and a Workspace running a `RemoteClient`
+  creates no `AlertManager` (its client thread's exceptions go to its console). Rejects alert beside the server: the Local
+  Mirror runs one `AlertManager` on the server's context, subscribed to every stand-in's `OrderRejected`, and reports its own
+  exceptions to it too (so the Local Mirror starts only once the server's Logging listens). The stand-ins' sockets are tapped by the server's Logging like any client's, so the CME box has
+  the full audit; the remote Audit Trail stays empty (the menu entry is kept). The `AlertManager` also alerts
+  `TaskScheduler.UnobservedTaskException`, so the dial loop cancels a connect that times out (`TcpLinkConnector.DialTcpLink`,
+  a 2 s `CancellationTokenSource`) instead of abandoning it: an abandoned connect task faulted unobserved, and with the home
+  PC off overnight (a dropped SYN every redial) that was an Exception alert about every 3 s, over 1,000 an hour.
+- **Spread symbols resolve through the process's ServerContext.** `LeggedHeader.GetLegHeader` is one static per process,
+  set only by the first `ServerContext` created (`??=`); a `ClientContext` never touches it. Every process has a
+  ServerContext that lives as long as it does (the server's own, `ContextManager`'s, the Remote's copy). Not
+  `ContextManager.ServerContext` itself: the simulation server builds its own before `ContextManager.Initialize`, and the
+  Remote Mirror never calls it. `ServerContext.Dispose` clears the lookup if it is its own, so a test that starts another
+  server in the same process takes it over. Why: every context used to set it to itself, so it pointed at the newest; in the
+  Local Mirror that is the last stand-in started, and once that stand-in closed (a GUI closing, a link drop) the next spread
+  lookup went through that disposed context: it threw `ObjectDisposedException` (the disposed `ServerHeader` box is read
+  first), so a remote desk's spread allocation was silently dropped (only an Exception alert showed it) and a spread reject
+  alert named `UnknownSymbol_<id>`; a lookup on the AlertManager thread racing the stand-in's `Dispose` could read unmapped
+  memory and crash the process (verified on the loopback harness, 2026-10-12). All contexts of one server map the same
+  header array, so the answer is the same.
+- **Calls are not aged.** Every call that reaches the Local end is made on its stand-in, however long it took. A call
+  clicked during a stall shorter than the 10 s silence limit (the network, either Mirror, or a stale copy) reaches the
+  server when the stall ends, acting on the market as it is then: a Buy clicked 1 s into a 9 s stall goes to the exchange
+  about 8 s later. The latency display, climbing through the stall, is the trader's signal to wait before clicking. A call
+  made while the link is declared dead is dropped (`TcpLink.Write`), and the stand-ins' orders are cancelled. (Until
+  2026-10-12 the Local end dropped any call whose copy was over 1 s old by its own clock; removed by the user's decision.)
+
+### Setting up a remote desk
+
+- Ship the Build output folder (Mirror, Workspace and their libraries; Logging is not run there) with its `MirrorConfig.json`:
+  `{ "MirrorRole": "Remote", "ServerName": "<server leaf>", "ClockMode": "Realtime", "ListenPort": 7400, "IPWhitelist": ["<CME box egress IP>"], "DirectoriesRoot": "Data" }`.
+  Nothing lives outside that folder: `DirectoriesRoot` is relative to the executables, so no S: drive is needed. Keep the
+  folder near the drive root: every name (folder included) must fit 128 characters, and the Mirror stops with a message
+  naming the path that does not. A remote GUI's name also carries `@<machine>` (up to 15 characters on Windows).
+  Workspace shortcut: `Workspace.exe -s <server leaf> -m Realtime [-c <strategy>] -d Data`.
+- The CME box's `MirrorConfig.json`, beside its Mirror: `MirrorRole Local`, the same server name and mode, and each
+  remote's address in `ConnectAddresses`. The CME deploy never ships a `MirrorConfig.json`; it would replace the box's.
+- A listening end accepts only `IPWhitelist` (`TcpLinkConnector.AcceptTcpLinks` closes any other connection at once; `MirrorConfig.ThrowIfInvalid` refuses to start a listener with the list empty). Why: on a Remote any new link replaces the live one, and the Local end then closes that desk's stand-ins, so the server cancels every remote order; an internet scanner touching the port would do that several times a day. Firewall the port to the same address too: links are still plain TCP, unauthenticated and
+  unencrypted for now.
+
+### Residuals
+
+- An order that reached the exchange just as the link died works unseen until the link is declared dead (up to 10 s),
+  when the Local end closes its ManualClient and the server cancels it; the snapshot then shows its real end (Canceled, or
+  Filled). A shorter silence limit would shrink the window at the cost of dropping links on ordinary Wi-Fi hiccups.
+- A remote GUI name (`@<machine>`) can only be taken by another Workspace on the same desk, which its own Remote refuses
+  at once (`AlreadyConnected`); the next number is tried, as on the CME box. Within 3 s of a refused stand-in start the
+  Local end repeats that refusal without asking the server again.
+- Right after a reconnect, a GUI's calls are dropped until the Local end has started its stand-in again (milliseconds, or
+  seconds while the server finishes the old cancels; `NotReady` is retried). The latency is the link's, so it reads healthy
+  meanwhile. Machine-unique names (`@<machine>`) remove the lasting case, a CME-box Workspace taking the name.
+- The latency includes each end's polling: the Remote Mirror's 1 ms sleeps (on Windows
+  up to a timer tick each, about 15 ms) and the Local end's pass, so it reads a little above the click's own path (a
+  loopback smoke run showed 30 to 50 ms).
+- A remote desk keeps no audit and sends no alerts; the remote Audit Trail is empty. The audit is the stand-ins' on the CME
+  box, and their rejects reach Telegram from the Local Mirror. A remote Workspace's clock exceptions (simulation) are not
+  reported, as it has no `AlertManager`.
+- `ManualClient.Open` on a remote desk first builds a plain ManualClient to hear `RemoteDesk`, which creates that GUI
+  number's empty audit folder under the copy's root.
+- Remote GUI names are unique per host name: two desks with the same machine name would share GUI names and ids.
+- A remote GUI whose connect the Remote's own socket refuses after the CME box has answered (`DecideConnect`'s last checks:
+  the same name reconnecting within the ~1 ms "Closing" window after a clean close, or an error building the socket's
+  shared memory) stays in `_pendingClientIds`, because `ClientOpened` never fires: it is listed until the Remote restarts,
+  so its stand-in on the CME box holds a client id meanwhile, and a retry under the same name waits 10 s for an answer the
+  CME box does not send (it already serves that stand-in), gets `NotReady` and moves to the next number. Accepted
+  (2026-10-12): no person reconnects within 1 ms and `ManualClient.Open` waits a second between tries, and a socket-build
+  error means the desk's shared memory is failing anyway; nothing is sent wrongly. A GUI that dies while connecting is not
+  this case: the Remote's listen thread opens its socket regardless (`OpenClient` needs nothing from the GUI) and
+  `PollPids` then closes it as dead.
+- Publishes have no minimum gap (declined 2026-10-12): besides each desk's ping (10 a second), every order state a
+  stand-in reads triggers one on the next pass, and each publish reads every server row (a hot row read costs the server's
+  next write to it about 330 ns). Only remote-desk orders trigger them, so the rate is a few tens a second while a remote
+  trader is active; a 10 ms gap would cap it at 100 a second if a measurement on the CME box ever shows it matters.
+- The Local Mirror alerts every exception its loop catches, unthrottled: one that recurs every pass (1 ms) floods
+  Telegram, and a name that does not fit 128 characters under the Local root alerts once per `GuiList` (each second).
+- Links are not encrypted or authenticated yet.
+- **Simulation, by design:** an algo restarted under the same name within one simulation run fails to start, because it
+  deletes its audit files before connecting and that run's Logging still holds today's file open (`Persistance` keeps the
+  tap). Algo audit files are never shared between runs and never multiplied. A GUI (`ManualClient`) never touches audit
+  files, so GUIs restart freely within a run, and the mirror recreates a remote GUI's stand-in after a link drop; a GUI's
+  file for one date is not cleared between runs that simulate that date. Realtime never deletes audit files.
 
 ## TickHistoryWriter crash safety (day-boundary resume only)
 
@@ -969,8 +1240,8 @@ footer `Navigate`.
 - **House position persistence, write side:** position lines are written by the logging tap
   following each client's socket. Strategy 0 has no socket, so nothing writes its `.position` files
   yet; the restore path finds no file and starts a zeroed row.
-- **Multiple server workspaces collide** on the client name `<serverName>_GUI` (same shared-memory
-  region). Deferred deliberately.
+- ~~**Multiple server workspaces collide**~~ — resolved 2026-10-07: each workspace takes the next free
+  `<principal>_GUI<n>` name (see "Workspaces (GUIs)").
 - **C++ mirror:** the union rule lives in `Server.OnAllocateInstrument` and must be mirrored in
   `Server.hpp` before live behaves like sim.
 - **No `filled > worst` alarm:** a `Done` with `|QuantityFilled|` above the order's worst case
@@ -982,7 +1253,16 @@ footer `Navigate`.
   throw; the caller reports"). The C# code is frozen; the fix is to wrap it like the drain.
 - ~~**GUI re-allocate re-runs the restart check**~~ — resolved 2026-10-05: the check moved to the
   client constructor (see "Client restart"), so a re-allocate only reseeds `WorkingRisk`.
-- **TCP mirror dispatches header-less rows by their first byte (latent):** `TCPServer.ReadTCP`
+- **Remote links: encryption and authentication** (pinned certificates were designed, then deferred).
+- **An on-screen notice in the Workspace when an order is rejected** (today only the Audit Trail and
+  Telegram show it).
+- **Server idle-loop prefetch of hot lines** (cuts the mirror's per-pass recall cost); Logging's
+  always-on poll of every execution ring costs the server a recall per message (measure, then
+  consider a backed-off poll).
+- **Not planned:** a workspace registering a strategy whose algo has not connected (the server
+  workspace covers emergencies).
+- ~~**TCP mirror dispatches header-less rows by their first byte (latent)**~~ — resolved 2026-10-07:
+  `TCPServer.cs` is deleted; the Mirror dispatches rows by array id and type. Former text: `TCPServer.ReadTCP`
   switches on the first byte of every mirrored row as if it were an `OrderType`/`AllocateType`.
   `OrderRisk` (array id 12, the server's copy) has no `Header`: its first byte is the low byte of
   `_activeTargetsCount`. Today no `OrderRisk` row is shipped: the rows are written by plain ref and
@@ -1010,7 +1290,9 @@ Each of these was seen in the harness or reasoned through and left as is on purp
 - **The server rate limit is invisible to `TryTarget`.** A create or replace over the limit is
   refused with `TooManyOrdersPerSecond`, which is discarded: dropped silently, no pause, and
   `TryTarget` still returned true for it.
-- **Startup window.** A previous order's final fill that lands in the microseconds between the
+- ~~**Startup window.**~~ Resolved 2026-10-07: the server admits a client only once every previous
+  order's state row is Done, and `Recover` runs milliseconds later (see "Client restart"). Former
+  text: A previous order's final fill that lands in the microseconds between the
   client connecting and its restart check passes the check (the order is now `Done`) and can be
   counted twice in the client's `WorkingRisk.Position`: once in the seeded position row, once when
   the new process reads the forwarded `Fill`, which also releases a reservation this process never
