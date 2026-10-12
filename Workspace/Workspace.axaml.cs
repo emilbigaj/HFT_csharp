@@ -142,9 +142,11 @@ public partial class Workspace : Window, IWidgetHost
         Dispatcher.UIThread.Post(() =>
         {
             TimestampText.Text = Context.ServerHeader.GetReadonlyRef().Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff");
-            // A remote desk shows its Mirror link's latency beside the clock (see Spec.md "Remote workspaces")
+            // A remote desk shows its Mirror link's latency beside the clock, a Workspace beside the server whether the server's process has exited (see Spec.md "Remote workspaces")
             if (ManualClient is RemoteClient)
                 TimestampText.Text = GetLatencyText() + "    " + TimestampText.Text;
+            else if (!ProcessId.IsAlive(Context.ServerHeader.GetReadonlyRef().ServerProcessId))
+                TimestampText.Text = "Disconnected – server stopped, close this Workspace    " + TimestampText.Text;
             if (SimulationSpeedButton.IsVisible)
             {
                 // The speed the clock thread has applied, not the one last requested.

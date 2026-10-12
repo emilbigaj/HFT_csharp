@@ -29,6 +29,14 @@ static void RunLocal(FileSystemPath serverName, TcpLinkConnector tcpLinkConnecto
 {
     // Step 1: attach to the running server, read-only; in simulation its clock drives this one
     ContextManager.Initialize(serverName);
+    // Why exit with the server: a dead server's stand-ins are read by no one, and its restart cannot post its header while this process maps it
+    int serverProcessId = ContextManager.ServerContext.ServerHeader.GetReadonlyRef().ServerProcessId;
+    // Why check before the AlertManager: it waits forever for the dead server's Logging, which exits with that server
+    if (!ProcessId.IsAlive(serverProcessId))
+    {
+        Console.WriteLine($"Mirror.RunLocal: the posted server header names process {serverProcessId}, which has exited; start the Local Mirror after the server");
+        return;
+    }
     if (Clock.Mode == ClockMode.Simulation)
     {
         Clock.Begin = ContextManager.ServerContext.ServerHeader.GetReadonlyRef().Timestamp;
@@ -45,7 +53,8 @@ static void RunLocal(FileSystemPath serverName, TcpLinkConnector tcpLinkConnecto
     AlertManager alertManager = new(ContextManager.ServerContext);
     LocalMirror localMirror = new(ContextManager.ServerContext, tcpLinkConnector, alertManager);
     tcpLinkConnector.Start();
-    while (!Application.IsExiting)
+    bool isServerAlive = ProcessId.IsAlive(serverProcessId);
+    while (!Application.IsExiting && (isServerAlive = ProcessId.IsAlive(serverProcessId)))
     {
         // Why: one bad packet or refused GUI must not stop the mirror for everyone
         try
@@ -61,6 +70,8 @@ static void RunLocal(FileSystemPath serverName, TcpLinkConnector tcpLinkConnecto
         }
         Thread.Sleep(1);
     }
+    if (!isServerAlive)
+        Console.WriteLine($"Mirror.RunLocal: server process {serverProcessId} has exited; the Local Mirror exits with it");
     alertManager.Dispose();
 }
 

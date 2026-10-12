@@ -920,10 +920,16 @@ public sealed class ServerContext : Context
         // and the RiskLayer's StrategyIdNotAllocated check each test this bit.
         ServerHeader reserved = serverHeader;
         reserved.ClientIds.Set(OrderIdAllocator.ServerStrategyId);
+        reserved.ServerProcessId = Environment.ProcessId;
 
+        // Why never overwrite a dead run's header: the server would start on that run's rows and rings (see Spec.md)
         if (!serverHeaderBox.TryStore(in reserved))
         {
-            throw new InvalidOperationException($"ServerContext.Connect({serverName}), Failed to write ServerHeader to shared memory.");
+            int previousServerProcessId = serverHeaderBox.GetReadonlyRef().ServerProcessId;
+            serverHeaderBox.Dispose();
+            throw new InvalidOperationException(ProcessId.IsAlive(previousServerProcessId)
+                ? $"ServerContext.Connect: {serverName} is already running as process {previousServerProcessId}; stop it before starting another"
+                : $"ServerContext.Connect: {serverName}'s previous server (process {previousServerProcessId}) has exited, but other processes still map its shared memory; stop its clients (Local Mirror, algos, Workspaces) and start again");
         }
 
         return serverHeaderBox;

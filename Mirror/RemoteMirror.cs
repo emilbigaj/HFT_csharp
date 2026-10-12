@@ -136,11 +136,11 @@ public sealed class RemoteMirror
     }
 
     // The worst of the last 10 round trips, or the age of the oldest unanswered ping (sent one interval after the newest answered
-    // one) when longer, so it climbs through a stall; below 0 once nothing has answered for the link's silence timeout.
+    // one) when longer, so it climbs through a stall; below 0 once the link is down or nothing has answered for its silence timeout.
     private Duration GetLatency()
     {
         Duration latency = _roundTrips.Append(Timestamp.StopwatchNow - _pongedPingTimestamp - s_pingInterval).Max();
-        return latency < RemoteClient.s_silenceTimeout ? latency : Duration.FromNanoseconds(-1);
+        return _tcpLink.IsConnected && latency < RemoteClient.s_silenceTimeout ? latency : Duration.FromNanoseconds(-1);
     }
 
     // The Local end's answer for a GUI waiting in AllocateClientId: its id, or a negative ConnectRefusal saying why not.
@@ -156,6 +156,8 @@ public sealed class RemoteMirror
         if (mirrorHeartbeat.LocalStartTimestamp != _localStartTimestamp)
         {
             Console.WriteLine("RemoteMirror: the Local end restarted. Close the Workspaces on this machine; the Mirror starts again once they are closed.");
+            // Why: this process stops rewriting the latency, so its last value would freeze on every Workspace until the 10 s age check
+            _serverContext.GetLatency(0).Write(Duration.FromNanoseconds(-1));
             Environment.Exit(1);
         }
 

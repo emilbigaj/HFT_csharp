@@ -117,11 +117,14 @@ public struct ServerHeader()
 
     // Client sockets outlive their client process: a dropped client goes Detached instead of being
     // disposed, so the server keeps writing into its ring and the audit tap keeps reading.
-    // WIRE FIELD — mirrors Provider/Allocate.hpp byte-for-byte: offset 172, sizeof(ServerHeader) 173.
+    // WIRE FIELD — mirrors Provider/Allocate.hpp byte-for-byte: offset 172, sizeof(ServerHeader) 177.
     // MarshalAs(U1) pins it to 1 byte: the managed layout Unsafe.SizeOf/MemoryMarshal use already
     // treats bool as 1, but interop marshalling would otherwise default it to a 4-byte BOOL.
     [MarshalAs(UnmanagedType.U1)]
     public bool Persistance = true;
+
+    // WIRE FIELD, offset 173: the publishing server's process id, stamped by ServerContext.Connect; a new value means the server restarted.
+    public int ServerProcessId;
 
     public int OrdersCapacity => OrdersPerClient * ClientIds.Length;
     public int LocalPositionsCapacity => InstrumentIds.Length * ClientIds.Length;
@@ -131,8 +134,8 @@ public struct ServerHeader()
         // The C++ server publishes this struct into shared memory. A silent size drift here means
         // every field after the drift is read from the wrong offset.
         int size = Unsafe.SizeOf<ServerHeader>();
-        if (size != 173)
-            throw new InvalidOperationException($"ServerHeader must be 173 bytes to match Provider/Allocate.hpp, was {size}.");
+        if (size != 177)
+            throw new InvalidOperationException($"ServerHeader must be 177 bytes to match Provider/Allocate.hpp, was {size}.");
     }
 
     public override string ToString()
