@@ -226,6 +226,13 @@ namespace Data
             bool isNewZero = quantity == 0;
             bool isBetter = bestOffset < 0;
 
+            // Why: nothing is better than the best, so deleting it changes nothing; within the window its slot holds a worse level (see Spec.md)
+            if (isBetter && isNewZero)
+            {
+                delta = 0;
+                return false;
+            }
+
             // far-worse (>= capacity): ignore
             if (!isBetter && bestOffset >= Capacity)
             {
@@ -238,12 +245,6 @@ namespace Data
             // remeber negative bestOffset means the price is better
             if (isBetter && bestOffset <= -Capacity)
             {
-                if (isNewZero) // ignore it
-                {
-                    delta = 0;
-                    return false;
-                }
-
                 // clear active mask (O(1)); quantities can remain stale if reads gate on bitset
                 _bitset.ClearAll();
 
