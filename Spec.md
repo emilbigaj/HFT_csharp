@@ -914,6 +914,25 @@ strings computed once per headerId for the process lifetime) depends on this; if
 identity rewrites are ever introduced, the cache needs a generation check. Mutable header fields
 (`TradingStatus`, `TickSize`, `InstrumentId`) are outside the cache and always read live.
 
+## The 64-level book: deleting a price better than the best changes nothing
+
+`SideByPrice64` is a 64-slot ring indexed from the best, so a price 1 to 63 ticks better than the
+best shares its slot with the price 64 ticks further back (1 to 63 ticks worse). Nothing can rest
+better than the best, but feeds do send deletes for such prices, and the delete path used to run
+on the shared slot: it cleared the worse, real level there and reported delta 0. A delta of 0 is
+not broadcast (`TrySetAsDeltas` returns false, `Server` skips the write), so the server's book lost
+the level while every client kept it, and the two books stayed different until that price was set
+again; a stale level can later cross the book. Example: best bid 13230 with 13190 resting
+(40 ticks back); a delete for 13254 (24 better) lands on 13190's slot and wiped it. Now
+`TrySetQuantity` returns false with delta 0 for any delete of a better price, which also covers
+the far-better (64+) delete the code already ignored. Found by the self-crossing investigation of
+2026-10-13: a server-to-client replica fuzz diverged in 616 of 3,000 runs before, 0 after.
+Cost, measured (BenchmarkDotNet, JIT, dev PC, 4,096 mixed updates): about +1 ns per update
+(19.9 → 21.4 ns with identical work, 18.6 → 19.5 ns with 2% better-price deletes), within about one
+standard deviation per run, no allocation; kept, because correctness comes first. Not measured
+under NativeAOT. The C++ server is a port of this type and needs the same change
+(cpp_alignment_report_2026-10-12.md P23).
+
 ## Session state is the exchange's TradingStatus
 
 Whether an instrument is trading is what the exchange says, not what a timetable predicts. The
@@ -935,7 +954,20 @@ created from the first allocated instrument's `Sessions[0]`. Each allocated `Ins
 subscribes to its exchange's manager and, on every open or close, sets its own `TradingStatus` at
 once (a close cancels every order and clears the queues first) and sends a `TradingStatusUpdate`
 through the exchange-to-NIC latency queue, so the server hears it when a real one would arrive.
-The simulator produces Open and Closed only; auctions are not modelled.
+
+**A crossed book in session is an auction (2026-10-13).** The timetable alone said Open through
+CME's pre-open, so on 2025-11-28 (the Globex outage) the replayed 6E/6A/6C books, crossed by up to
+50 ticks from 13:02 to the 13:30 reopen, reached algos as a valid Open quote, and `Algo.Target`
+threw "self-crossing targets" for every quote Make built from them (61% of 8,309 alerts in that
+run). Live CME reports that window as PreOpen, mapped to `Auction`. Now `InstrumentSimulator` keeps the
+timetable's verdict (`_sessionTradingStatus`, via `OnSessionChanged`) and publishes `Auction` while
+that verdict is Open and its book is crossed (`UpdateTradingStatus`, also run on every market-data
+update just before the book is published: status and book share the instrument's queue, so a
+client hears Auction before it sees the crossed book). It publishes only on a change; Auction cancels
+nothing (only Closed does), and the simulator's matching already skips a crossed book. As live,
+anything not Open is refused (`RiskLayer`, the simulated exchange), cancels included; CME itself
+accepts cancels in pre-open. Accepted gap: a halt with an uncrossed book (that day 02:49 to 13:02)
+still reads Open, since the data carries no status.
 
 ## Socket close protocol (server side)
 
@@ -1051,8 +1083,10 @@ writer's hot thread; worth it only if a measurement shows those remaining penalt
 People outside the colo (arb's risk desk, the home office) run the normal Workspace against a copy of the CME server, with
 full order entry. The CME box accepts no inbound connections, so its end dials out.
 
-- **Two ends, one program.** `Mirror.exe` reads `MirrorConfig.json` beside itself; a missing file is written with defaults
-  and the program stops, naming it. `MirrorRole Local` runs beside the real server, `Remote` where people sit. Either end may
+- **Two ends, one program.** `Mirror.exe <absolute config path>` reads that file; with no argument it reads
+  `MirrorConfig.json` in the working directory. A missing file is written with defaults and the program stops, naming its
+  full path. One build can so serve both roles from two files (a relative path would resolve from the working directory;
+  it is not checked). `MirrorRole Local` runs beside the real server, `Remote` where people sit. Either end may
   listen (`ListenPort`), dial (`ConnectAddresses`, redialled every second), or both; a Local end refuses to listen while
   links are unauthenticated: whoever reached it would get full order entry.
 - **Rows down.** The Local end attaches read-only and publishes on the pass a remote connects (its snapshot: a new Remote pings only once it has the server header, so waiting for its ping would deadlock), on the pass a remote's ping arrives (every 100 ms, so at least that often while a remote is connected; with none connected nothing is published, and there is no timer), or when a stand-in ManualClient reads an order state from the server (a fill's too: `Server.OnFill` writes the state and position rows before it sends the stand-in the state, and the fills themselves go to the strategy's channel) or a GUI waits on its `AllocatedClientId` (`LocalMirror.IsPublishDue`; still one publish per pass, so the server pays one extra row scan per pass with news, not one per message), sends each remote
@@ -1202,14 +1236,16 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
 
 ### Setting up a remote desk
 
-- Ship the Build output folder (Mirror, Workspace and their libraries; Logging is not run there) with its `MirrorConfig.json`:
+- Ship the Build output folder (Mirror, Workspace and their libraries; Logging is not run there) with a `MirrorConfig.json`,
+  and start `Mirror.exe` from that folder or with the file's absolute path:
   `{ "MirrorRole": "Remote", "ServerName": "<server leaf>", "ClockMode": "Realtime", "ListenPort": 7400, "IPWhitelist": ["<CME box egress IP>"], "DirectoriesRoot": "Data" }`.
   Nothing lives outside that folder: `DirectoriesRoot` is relative to the executables, so no S: drive is needed. Keep the
   folder near the drive root: every name (folder included) must fit 128 characters, and the Mirror stops with a message
   naming the path that does not. A remote GUI's name also carries `@<machine>` (up to 15 characters on Windows).
   Workspace shortcut: `Workspace.exe -s <server leaf> -m Realtime [-c <strategy>] -d Data`.
-- The CME box's `MirrorConfig.json`, beside its Mirror: `MirrorRole Local`, the same server name and mode, and each
-  remote's address in `ConnectAddresses`. The CME deploy never ships a `MirrorConfig.json`; it would replace the box's.
+- The CME box's config: `MirrorRole Local`, the same server name and mode, and each remote's address in
+  `ConnectAddresses`. Whatever starts the Local Mirror (the C++ server's main) passes the file's absolute path, since its
+  working directory may be anywhere. The CME deploy never ships a `MirrorConfig.json`; it would replace the box's.
 - A listening end accepts only `IPWhitelist` (`TcpLinkConnector.AcceptTcpLinks` closes any other connection at once; `MirrorConfig.ThrowIfInvalid` refuses to start a listener with the list empty). Why: on a Remote any new link replaces the live one, and the Local end then closes that desk's stand-ins, so the server cancels every remote order; an internet scanner touching the port would do that several times a day. Firewall the port to the same address too: links are still plain TCP, unauthenticated and
   unencrypted for now.
 

@@ -2,10 +2,10 @@
 
 This handoff is for the engineer or agent who maintains the C++ server and the C++ `Client`. It is self-contained: you
 do not need the C# conversation, `patch_log.md` or `Spec.md` to act on it. C# is the source of truth. Every name below was
-checked against the C# working tree on 2026-10-12.
+checked against the C# working tree on 2026-10-13.
 
 - **Baseline:** C# commit `9d6f3ab` ("Align with C++ (csharp_alignment_report_2026-10-05)"), which the C++ branch
-  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-12.
+  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-13 (P22, P23, C15 and C16 were added on 2026-10-13).
 - **Supersedes** `cpp_alignment_report_2026-10-07.md`, which was written piecemeal from 2026-10-07 to 2026-10-12 and never
   handed over. Everything in it that still holds is folded in here; what later work made stale is listed in §9. Read this
   report, not that one. Earlier reports (`2026-10-04` and before) stay valid for their own items, except where §9 says
@@ -52,7 +52,8 @@ Words used throughout:
 | P20 | `LeggedHeader` | PORT-IF | no | `GetLegHeader` is set by the first `ServerContext` only and cleared by its `Dispose` |
 | P21 | Client names | PORT-IF | no | GUI names are `<principal>_GUI<n>`, and on a remote desk `<principal>_GUI<n>@<machine>`; the C++ server must accept them |
 | P22 | `ServerHeader` | PORT | **yes** | New field `int32 ServerProcessId` at offset 173 (size 173 → 177), stamped when the header is posted; a refused post names "already running" or "previous server exited"; never overwrite |
-| C1-C14 | Mirror, Workspace, widgets, harness | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
+| P23 | `SideByPrice64` | PORT | no | `TrySetQuantity`: a delete of a price better than the best is a no-op; it used to wipe the worse level sharing its ring slot, unbroadcast |
+| C1-C16 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
 **Kinds.** PORT: change the C++ code. PORT-IF: change it only if C++ has the same construct (the item says what to look
@@ -718,7 +719,8 @@ struct ServerHeader (Pack = 1, 177 bytes; was 173):
   (`ProcessId::IsAlive`, every pass), and a C# Workspace on the CME box shows "Disconnected – server stopped" once it has
   exited. **A C++ header that leaves it 0 makes the Local Mirror exit the moment it starts, and every Workspace on the box
   show "Disconnected".**
-  The C++ server's `main` is to start the Local Mirror, after the header is posted: one started earlier waits until a
+  The C++ server's `main` is to start the Local Mirror, after the header is posted, as `Mirror <absolute path of its
+  MirrorConfig.json>` (with no argument it reads `MirrorConfig.json` in its working directory): one started earlier waits until a
   header is posted, and one started on a dead run's header exits at once. On a remote desk's copy the field holds the CME
   box's process id, so it must never be tested against local processes.
 - **Accepted residual: a bare process id.** If a dead server's id has been given to another process by the time of the
@@ -737,6 +739,29 @@ struct ServerHeader (Pack = 1, 177 bytes; was 173):
   Local Mirror outliving the server kept the regions mapped, which blocked the restart with an unexplained error.
 
 **Verify:** §11 scenario 18.
+
+### P23. `SideByPrice64::TrySetQuantity`: a delete of a price better than the best is a no-op (C# `Data/MarketByPrice.cs`)
+
+The 64-slot ring is indexed from the best, so a price 1 to 63 ticks **better** than the best shares its slot with a price
+1 to 63 ticks **worse**. A delete (quantity 0) for such a better price, which feeds do send, ran the normal delete on that
+slot: it cleared the worse, real level and reported delta 0. A zero delta is not broadcast, so the server's book lost the
+level while every client kept it. Example: best bid 13230, 13190 resting; a delete for 13254 wiped 13190.
+
+```
+TrySetQuantity(ticks, quantity, out delta):
+  ... bestOffset, isNewZero, isBetter computed as before
+  if isBetter and isNewZero: delta = 0; return false        // new, before the far-worse check
+  ... far-worse check unchanged
+  if isBetter and bestOffset <= -Capacity:                    // far-better: its own "if isNewZero: ignore" is deleted (covered above)
+  ... rest unchanged
+```
+
+- **Live impact:** the C++ server applies exchange market data through this type, so it can lose a level on a stray
+  better-price delete and its clients keep it: books that differ until that price is set again.
+- **Cost (C#, JIT, dev PC):** about +1 ns per update, no allocation. Measure the C++ build.
+- No layout or wire change; no lockstep.
+
+**Verify:** §11 scenario 19.
 
 ---
 
@@ -812,6 +837,15 @@ listed.
   `Provider/Position.cs`, `Socket/Protocol.cs` and `Socket/SharedArray.cs` (`PendingNew` → `InFlight`, `CancelAllOrders` →
   `TryCloseOutOrders`). The local `sameOrder` is renamed `isSameOrder` in `Position` and `Client::OnOrderRejected`, with the
   same logic. Mirroring these renames is optional.
+- **C15. 2026-10-13, Mirror, Workspace and Logging** (C# processes only; what the C++ side must do for them is in P22):
+  the Local Mirror checks `ServerProcessId` right after attaching and every pass and exits with the server; it takes its
+  config's absolute path as its only argument (`MirrorConfig.json` in the working directory without one); the Remote writes
+  -1 into `Latency[0]` as soon as its link drops and before it exits on a Local restart; a Workspace on the CME box shows
+  "Disconnected – server stopped, close this Workspace" once the server's process has exited; the C# Logging server polls
+  each ring once per 100 ms live (§12).
+- **C16. 2026-10-13, simulator: a crossed book in session is `Auction`.** `InstrumentSimulator` publishes
+  `TradingStatus::Auction` while its exchange's session is open and its book is crossed (CME's pre-open), Open/Closed
+  otherwise. Port it only if the C++ side has its own simulator; live, the status comes from the exchange.
 
 ---
 
@@ -942,6 +976,9 @@ server reader has seen its close message (answered, not hung).
     "Connection broken" at once. Start a second server under a live one's name: it throws "already running as process
     <pid>". Kill the server while an algo still maps its regions and restart it: it throws "previous server … has exited";
     close the algo and it starts (P22, L9).
+19. **Better-price delete.** On one side, set the best at 13230 and a level at 13190, then delete 13254: 13190 keeps its
+    quantity and the call reports no change (false, delta 0). A fuzz that applies random updates, including such deletes,
+    to a server book and forwards its deltas to a replica book ends with the two identical (P23).
 
 ---
 

@@ -4,6 +4,39 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-13 — "self-crossing targets" in the Forex simulation: two book fixes
+
+- Symptom: the Testing scenario's Make threw `Self-crossing targets` thousands of times on 2025-11-28 (8,309 alerts),
+  because its quote showed the bid 10 or more ticks above the ask. Diagnosis in Spec.md; harnesses in the session
+  scratchpad (`selfcross`).
+- `Simulator/ServerSimulator.cs` — `InstrumentSimulator` publishes `TradingStatus.Auction` while the session is open and
+  its book is crossed (`OnSessionChanged` replaces the timetable's direct `OnTradingStatus` calls; `UpdateTradingStatus`
+  runs on every market-data update before the book is published). Why: on the Globex-outage day the real 6E/6A/6C books
+  were crossed in CME's pre-open, which live CME reports as PreOpen; the simulator said Open (61% of the alerts).
+  Status is now published only on a change.
+- `Data/MarketByPrice.cs` — `SideByPrice64.TrySetQuantity`: a delete of a price better than the best is a no-op. It used
+  to clear the worse level sharing that ring slot, without a broadcast, so the server's and clients' books diverged
+  (replica fuzz: 616 of 3,000 runs before, 0 after). The old far-better-delete special case folds into it. Hot path:
+  about +1 ns per update measured (JIT), no allocation.
+- Not fixed by these two: a rerun the same day still shows the 6B alerts (13:11, bid 13239 against ask 13224). That 39%
+  (6B 13:04 to 13:33, 6C after the reopen) comes from a stale level the real data never had, not, or not only, the ring
+  defect; the remaining candidate is Make's own moved order left in the simulator's published book. Open.
+- Breaks: nothing on the wire. The C++ server needs the ring fix (cpp_alignment_report_2026-10-12.md P23).
+
+---
+
+## 2026-10-13 — the Mirror takes its config path on the command line
+
+- `Mirror/Program.cs`, `Mirror/MirrorConfig.cs` — `Mirror <absolute config path>` reads that file; with no argument,
+  `MirrorConfig.json` in the working directory (was: always beside the executable). `LoadOrCreate` and `ThrowIfInvalid`
+  take the path, and every refusal names its full path. Why: one build serves both roles from separate files, and the C++
+  server's main can start the Local Mirror with its config wherever its working directory is. `DirectoriesRoot` still
+  resolves a relative folder beside the executable, as the Workspace's `-d` does.
+- Breaks: a Mirror started from another folder with no argument no longer finds the file beside the executable; start it
+  from that folder or pass the path.
+
+---
+
 ## 2026-10-13 — Logging polls every 100 ms live
 
 - `Logging/LoggingServer.cs` — `PollerLoop` sleeps 100 ms after each pass in `Realtime` (was a continuous spin). Why:
