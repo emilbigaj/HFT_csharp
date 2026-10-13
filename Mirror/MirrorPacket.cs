@@ -14,7 +14,7 @@ public enum MirrorPacketType : byte
 {
     Row = 1,         // Local → Remote: one shared-memory row whose bytes changed (every row, the first time)
     Message = 2,     // Remote → Local: a call one GUI wrote
-    Heartbeat = 3,   // Local → Remote: closes each publish pass; carries when the Local end started
+    Heartbeat = 3,   // Local → Remote: closes each publish pass (the first completes a remote's copy)
     GuiList = 4,     // Remote → Local, every second: the GUIs attached on the remote
     AllocatedClientId = 5,    // Local → Remote: a listed GUI's id (its ManualClient's), or a negative ConnectRefusal saying why not
     ServerHeader = 6,  // Local → Remote: opens each publish pass; a remote sizes its copy from the first and posts it in its LetterBox
@@ -49,7 +49,6 @@ public struct MirrorMessageHeader()        // + the message's bytes
 public struct MirrorHeartbeat()
 {
     public Header<MirrorPacketType> Header = new(MirrorPacketType.Heartbeat);
-    public Timestamp LocalStartTimestamp;   // a new value means the Local end restarted, and the copy must be rebuilt
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]

@@ -685,6 +685,37 @@ public class Server : IDisposable
         ref InstrumentHeader128 instrumentHeader = ref _serverContext.GetInstrumentHeader(instrumentHeaderId).GetRef();
         instrumentHeader.AsInstrumentHeader().TradingStatus = tradingStatusUpdate.TradingStatus;
         WriteToInstrumentData(in tradingStatusUpdate);
+
+        // The exchange closing the instrument ends its product group's message-efficiency day (see Spec.md)
+        if (tradingStatusUpdate.TradingStatus == TradingStatus.Closed)
+            EndMessageEfficiencyDay(in instrumentHeader.AsInstrumentHeader(), in tradingStatusUpdate);
+    }
+
+    // Starts the next message-efficiency day of this instrument's product group; in Realtime the day that ended is posted on the
+    // audit channel and Logging appends it to the group's file. CoreGroup thread: no I/O.
+    private void EndMessageEfficiencyDay(in InstrumentHeader instrumentHeader, in TradingStatusUpdate tradingStatusUpdate)
+    {
+        ref MessageEfficiency messageEfficiency = ref _serverContext.GetMessageEfficiency(instrumentHeader.ProductGroupId).GetRef();
+        MessageEfficiency endedMessageEfficiency = messageEfficiency;
+        DateTime local = Session.CME.ConvertToLocal(tradingStatusUpdate.TickHeader.ExchangeTimestamp);
+        // Why only on a change: every instrument of the group closes; the first ends the day, the rest find it already ended
+        if (messageEfficiency.Reset(local) && Clock.Mode == ClockMode.Realtime)
+            WriteToAudit(instrumentHeader.CoreGroupId, in endedMessageEfficiency);
+    }
+
+    // Posts every product group's message-efficiency row on the audit channel at shutdown; Logging appends each to its group's file,
+    // read back when the group is next allocated. Call before the audit link closes: Logging drains it on close.
+    private void PostMessageEfficiencies()
+    {
+        int productGroupCount = _serverContext.ServerHeader.GetReadonlyRef().InstrumentIds.Length;
+        for (int productGroupId = 0; productGroupId < productGroupCount; productGroupId++)
+        {
+            ref SharedArrayEntry<MessageEfficiency> messageEfficiencyEntry = ref _serverContext.GetMessageEfficiency(productGroupId);
+            if (messageEfficiencyEntry.IsEmpty())
+                return;
+            // Why a plain read: a strategy that died mid-write would make a seqlocked read spin for ever and hang the close
+            WriteToAudit(SocketChannel.Admin, in messageEfficiencyEntry.GetReadonlyRef());
+        }
     }
 
     public void OnMarketByPrice(in MarketByPrice marketByPrice, Span<byte> src)
@@ -787,6 +818,9 @@ public class Server : IDisposable
         foreach (WriteOnlySocket? instrumentData in _instrumentData)
             instrumentData?.Dispose();
 
+        // Why after the server socket: its admin thread, the admin channel's only other writer, has stopped
+        if (Clock.Mode == ClockMode.Realtime)
+            PostMessageEfficiencies();
         _audit.Dispose();
         _loggingServer.Dispose();
         _serverContext.Dispose();

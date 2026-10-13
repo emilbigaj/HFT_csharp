@@ -38,7 +38,6 @@
 					<MenuItem Header="_Widgets">
 						<MenuItem Header="Instruments" Click="OnAddInstrumentHeadersWidgetClick"/>
 						<MenuItem Header="Chart" Click="OnAddChartWidgetClick"/>
-						<MenuItem Header="Ladder" Click="OnAddLadderWidgetClick"/>
 						<MenuItem Header="Fills" Click="OnAddFillsWidgetClick"/>
 						<MenuItem Header="Positions" Click="OnAddPositionsWidgetClick"/>
 						<MenuItem Header="Orders" Click="OnAddOrdersWidgetClick"/>

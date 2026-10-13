@@ -24,8 +24,9 @@ public interface IGetWeightedMessage
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
-public struct MessageEfficiency(String4 productGroup)
+public struct MessageEfficiency()
 {
+    public Header<OrderType> Header = new(OrderType.MessageEfficiency);   // Why: the server posts the row itself on its audit channel (see Spec.md)
     public bool Reset(DateTime dateTime)
     {
         DateTime tradeDateTime = TradeDate.Add(TradeTime);
@@ -46,7 +47,7 @@ public struct MessageEfficiency(String4 productGroup)
     public MessageEfficiencyTier Tier1;
     public MessageEfficiencyTier Tier2;
     public MessageEfficiencyTier Tier3;
-    public String4 ProductGroup = productGroup;
+    public String4 ProductGroupRoot;
     public int ProductGroupId = -1;
     public int RawMessages = 0;
     public double WeightedMessages = 0;
@@ -63,8 +64,9 @@ public struct MessageEfficiency(String4 productGroup)
     
 
     // Permissive default (simulation): tiers so high TrySend always falls through to "allowed".
-    public static MessageEfficiency GetMaxLimits(String4 productGroup) => new MessageEfficiency(productGroup)
+    public static MessageEfficiency GetMaxLimits(String4 productGroupRoot) => new MessageEfficiency()
     {
+        ProductGroupRoot = productGroupRoot,
         Tier0 = new MessageEfficiencyTier { DailyRawMessages = int.MaxValue, Benchmark = int.MaxValue },
         Tier1 = new MessageEfficiencyTier { DailyRawMessages = int.MaxValue, Benchmark = int.MaxValue },
         Tier2 = new MessageEfficiencyTier { DailyRawMessages = int.MaxValue, Benchmark = int.MaxValue },
@@ -72,8 +74,9 @@ public struct MessageEfficiency(String4 productGroup)
     };
 
     // Restrictive default (live until configured): zero tiers => TrySend blocks every message.
-    public static MessageEfficiency GetMinLimits(String4 productGroup) => new MessageEfficiency(productGroup)
+    public static MessageEfficiency GetMinLimits(String4 productGroupRoot) => new MessageEfficiency()
     {
+        ProductGroupRoot = productGroupRoot,
         Tier0 = new MessageEfficiencyTier { DailyRawMessages = 0, Benchmark = 0 },
         Tier1 = new MessageEfficiencyTier { DailyRawMessages = 0, Benchmark = 0 },
         Tier2 = new MessageEfficiencyTier { DailyRawMessages = 0, Benchmark = 0 },

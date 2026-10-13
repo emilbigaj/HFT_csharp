@@ -1484,6 +1484,7 @@ public class ServerSimulator
                 InstrumentHeaderId = instrumentHeaderId,
                 Exchange = new String8(instrumentDetails.Exchange),
                 Root = new String8(instrumentDetails.Root),
+                ProductGroupRoot = new String4(instrumentDetails.ProductGroupRoot),
                 InverseTickSize = instrumentDetails.InverseTickSize,
                 TickSize = instrumentDetails.TickSize,
             };

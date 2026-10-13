@@ -102,11 +102,13 @@ public sealed class AlertManager : IDisposable
     private readonly byte[] _buffer = new byte[64 * 1024];
     private volatile bool _disposed;
 
-    public AlertManager(Context context)
+    // Alerts go to Logging as "<directoryPath>.alert" (default: the context's own folder); a second process on the same context
+    // needs its own, since Logging holds one connection per name (the Local Mirror beside the trading server).
+    public AlertManager(Context context, FileSystemPath? directoryPath = null)
     {
         Context = context;
         MachineName = Platform.Name;
-        _logger = new ClientSocket(Context.DirectoryPath + ".alert", Context.LoggingServerName, [SocketChannel.ExecutionChannelLength], [SocketChannel.AdminChannelLength]);
+        _logger = new ClientSocket((directoryPath ?? Context.DirectoryPath) + ".alert", Context.LoggingServerName, [SocketChannel.ExecutionChannelLength], [SocketChannel.AdminChannelLength]);
         _logger.Connect();
 
         _thread = LowLatency.StartBackgroundThread("AlertManager", ConsumeLoop);

@@ -51,7 +51,8 @@ static void RunLocal(FileSystemPath serverName, TcpLinkConnector tcpLinkConnecto
     LowLatency.StartBackgroundThread("Clock", Clock.Start);
 
     // Step 2: remotes' packets every millisecond; rows when a remote's ping (every 100 ms), a stand-in's news or a GUI's id waits; alerts from here (a remote desk has no Logging)
-    AlertManager alertManager = new(ContextManager.ServerContext);
+    // Why its own name: the trading server already connects to Logging as "<server>.alert"
+    AlertManager alertManager = new(ContextManager.ServerContext, ContextManager.ServerContext.DirectoryPath / "LocalMirror");
     LocalMirror localMirror = new(ContextManager.ServerContext, tcpLinkConnector, alertManager);
     tcpLinkConnector.Start();
     bool isServerAlive = ProcessId.IsAlive(serverProcessId);
@@ -93,14 +94,20 @@ static void RunRemote(FileSystemPath serverName, TcpLinkConnector tcpLinkConnect
     if (localLayoutHash != serverContext.GetLayoutHash())
         throw new InvalidDataException($"Mirror.RunRemote: the CME box's array layout is {localLayoutHash:X8}, this desk's is {serverContext.GetLayoutHash():X8}, must match; deploy the same build to both ends");
 
-    // Step 3: keep the copy current
-    RemoteMirror remoteMirror = new(serverContext, tcpLinkConnector, tcpLink);
+    // Step 3: keep the copy current; a restarted server gets a fresh RemoteMirror over the same copy and link (see Spec.md "Remote workspaces")
+    RemoteMirror remoteMirror = new(serverContext, tcpLinkConnector, tcpLink, newServerHeader: null);
     while (!Application.IsExiting)
     {
         // Why: one bad packet must not stop the copy for everyone
         try
         {
             remoteMirror.Read();
+            if (remoteMirror.NewServerHeader is ServerHeader newServerHeader)
+            {
+                Console.WriteLine($"Mirror.RunRemote: the server restarted (process {serverContext.ServerHeader.GetReadonlyRef().ServerProcessId} is now {newServerHeader.ServerProcessId}); the copy is rebuilt and the Workspaces rebuild themselves");
+                remoteMirror.Dispose();
+                remoteMirror = new RemoteMirror(serverContext, tcpLinkConnector, remoteMirror.TcpLink, newServerHeader);
+            }
         }
         catch (Exception exception)
         {

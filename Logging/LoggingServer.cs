@@ -116,7 +116,7 @@ public class ClientSocketReader : IReader
     }
 
 
-    // Sort key: the NicTimestamp every order record carries; RiskLimit has no OrderHeader, so its own Timestamp; control requests carry none, so the high-water mark.
+    // Sort key: the NicTimestamp every order record carries; RiskLimit has no OrderHeader, so its own Timestamp; control requests and message-efficiency rows carry none, so the high-water mark.
     protected static Timestamp GetNicTimestamp(ReadOnlySpan<byte> rsrc, Timestamp @default)
     {
         Timestamp nicTimestamp;
@@ -125,9 +125,10 @@ public class ClientSocketReader : IReader
             case (byte)OrderType.RiskLimit:
                 nicTimestamp = MemoryMarshal.AsRef<RiskLimit>(rsrc).Timestamp;
                 break;
+            case (byte)OrderType.MessageEfficiency:
             case (byte)ControlType.AlgoStatus:
             case (byte)ControlType.RiskLimit:
-                return @default; // requests carry no timestamp: sort at the high-water mark, arrival order kept
+                return @default; // requests and message-efficiency rows carry no timestamp: sort at the high-water mark, arrival order kept
             default:
                 nicTimestamp = MemoryMarshal.AsRef<OrderHeader>(rsrc.Slice(Unsafe.SizeOf<Header<OrderType>>())).NicTimestamp;
                 break;
@@ -1060,6 +1061,14 @@ public class AuditWriter : ObjectWriter
                     string line = Json.SerializeToLine(riskLimit);
                     line = line.Insert(1, $"\"Symbol\":\"{symbol}\",");
                     writer.Write(line);
+                    return line;
+                }
+            case (byte)OrderType.MessageEfficiency:
+                {
+                    ref readonly MessageEfficiency messageEfficiency = ref MemoryMarshal.AsRef<MessageEfficiency>(rsrc);
+                    // The server posts the row at a session's close and at shutdown; it reads the last line back at allocation, so the path must match Context's
+                    string line = Json.SerializeToLine(messageEfficiency);
+                    File.AppendAllLines(Context.GetMessageEfficiencyFilePath(_filePath, messageEfficiency.ProductGroupRoot.ToString()), [line]);
                     return line;
                 }
             case (byte)OrderType.OrderState:

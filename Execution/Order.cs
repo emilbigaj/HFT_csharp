@@ -18,6 +18,7 @@ public enum OrderType : byte
     AheadOfOrder = 15,
     RiskLimit = 16,
     WorkingRisk = 17,
+    MessageEfficiency = 18,   // a MessageEfficiency row the server posts on its audit channel at a session's close and at shutdown
 }
 
 [RegisterJson]

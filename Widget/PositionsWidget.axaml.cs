@@ -272,39 +272,11 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
         PerformChangeAllAlgoStatus(AlgoStatus.Live);
     }
 
-    private void PerformCreateOrder(WidgetPosition pos)
-    {
-        var host = this.FindAncestorOfType<Window>() as IWidgetHost;
-        if (host != null)
-        {
-            var sendOrder = new SendOrderWidget(_context);
-            sendOrder.SetCreateOrder(pos._position.Instrument);
-            host.AddWidget(sendOrder);
-        }
-    }
+    private void PerformCreateOrder(WidgetPosition pos) => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, pos._position.Instrument));
 
-    private void PerformClosePosition(WidgetPosition pos)
-    {
-        var host = this.FindAncestorOfType<Window>() as IWidgetHost;
-        if (host != null)
-        {
-            int closingQty = -pos.Quantity;
-            var sendOrder = new SendOrderWidget(_context);
-            sendOrder.SetCreateOrder(pos._position.Instrument, null, closingQty);
-            host.AddWidget(sendOrder);
-        }
-    }
+    private void PerformClosePosition(WidgetPosition pos) => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, pos._position.Instrument, quantity: -pos.Quantity));
 
-    private void PerformOpenLadder(WidgetPosition pos)
-    {
-        var host = this.FindAncestorOfType<Window>() as IWidgetHost;
-        if (host != null)
-        {
-            var ladder = new LadderWidget(_context);
-            ladder.SetInstrument(pos.InstrumentId);
-            host.AddWidget(ladder);
-        }
-    }
+    private void PerformOpenLadder(WidgetPosition pos) => this.AddToHost(LadderWidget.NewLadder(_context, pos.InstrumentId));
 
     private void OnRefresh(object? sender, ElapsedEventArgs e)
     {

@@ -71,6 +71,8 @@ public sealed class RemoteClient : IManualClient
             return;
         _clientSocket.Close();
         _clientSocket.Dispose();
-        Context?.Dispose();
+        // Why retire, not dispose: a widget's late callback (a dialog it awaited) may still read it after a rebuild; unmapped at exit
+        if (Context != null)
+            ContextManager.Retire(Context);
     }
 }

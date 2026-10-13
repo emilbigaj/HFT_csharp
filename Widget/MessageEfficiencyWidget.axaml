@@ -34,7 +34,7 @@
 		</DataGrid.ContextMenu>
 
 		<DataGrid.Columns>
-			<DataGridTextColumn Header="ProductGroup"     Binding="{Binding ProductGroup}"           Width="Auto"/>
+			<DataGridTextColumn Header="ProductGroupRoot" Binding="{Binding ProductGroupRoot}"           Width="Auto"/>
 			<DataGridTextColumn Header="TradeDate"      Binding="{Binding TradeDate}"            Width="Auto"/>
 			<DataGridTextColumn Header="TradeTime"      Binding="{Binding TradeTime}"            Width="Auto" IsVisible ="false"/>
 			<DataGridTextColumn Header="RawMessages"      Binding="{Binding RawMessages}"            Width="Auto"/>

@@ -169,6 +169,7 @@ public sealed class InstrumentDetails
     public InstrumentType InstrumentType { get; set; }
     public string Exchange { get; set; } = string.Empty;
     public string Root { get; set; } = string.Empty;
+    public string ProductGroupRoot { get; set; } = string.Empty;   // CME's security group (tag 1151), which message efficiency counts under; NQ for MNQ, RY for RTY
     public string Ticker => Symbology.Ticker;
     public string Symbol => Symbology.Symbol;
     public string Currency { get; set; } = string.Empty;
@@ -324,6 +325,7 @@ public sealed class InstrumentDetails
             {
                 Exchange = new String8(Exchange),
                 Root = new String8(Root),
+                ProductGroupRoot = new String4(ProductGroupRoot),
                 InstrumentType = InstrumentType,
                 TickSize = TickSize,
                 InverseTickSize = InverseTickSize,

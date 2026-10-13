@@ -30,16 +30,19 @@ namespace Workspace;
 /// </summary>
 public partial class Workspace : Window, IWidgetHost
 {
-    public Context Context { get; } = null!;
-    public IManualClient ManualClient { get; } = null!;
-    public AlertManager? AlertManager { get; }   // null on a remote desk: no Logging there; its stand-in alerts beside the server
-    public WorkspaceContext WorkspaceContext { get; } = null!;
+    public Context Context { get; private set; } = null!;
+    public IManualClient ManualClient { get; private set; } = null!;
+    public AlertManager? AlertManager { get; private set; }   // null on a remote desk: no Logging there; its stand-in alerts beside the server
+    public WorkspaceContext WorkspaceContext { get; private set; } = null!;
     private readonly System.Timers.Timer _refreshTimer = null!;
     private string? _currentWorkspacePath;
     private Thread _clientThread = null!;
-    private volatile bool _isClosing = false;
+    private volatile bool _isClientStopping;                                  // tells the client thread to end (Disconnect)
+    private bool _isConnected;                                                // a client is open and its thread runs (UI thread); Disconnect does nothing otherwise
     private ulong _latencySeq;                                                // the Latency[0] row's seq when last seen to change (UI thread)
     private Timestamp _latencyTimestamp = Timestamp.StopwatchNow;             // when it last changed
+    private int _serverProcessId;                                             // the server process this window last connected to; a remote desk rebuilds on a new one
+    private int _guiNumber;                                                   // this window's GUI number on a remote desk; a rebuild asks for the same one first
     public Workspace()
     {
         InitializeComponent();
@@ -48,45 +51,7 @@ public partial class Workspace : Window, IWidgetHost
     public Workspace(Context context)
     {
         Context = context ?? throw new ArgumentNullException(nameof(context));
-
-        // Idempotent: sizes the symbology-string cache and warms it off-thread (see Spec.md).
-        SymbolCache.Initialize(ContextManager.ServerContext);
-
-        // The server as principal selects server mode: the GUI still connects as its own "<server>_GUI<n>"
-        // client, but shadows every client instead of one algo and books manual orders to the reserved house
-        // strategy. Open takes the first free number, so any number of workspaces may share a principal.
-        ManualClient = Provider.ManualClient.Open(context is ClientContext clientContext ? clientContext.ClientName : Context.ServerName, Context.ServerName);
-
-        if (ManualClient is Provider.ManualClient manualClient)
-        {
-            AlertManager = new AlertManager(ManualClient.Context);
-            Clock.Exception += AlertManager.OnException;
-            manualClient.OrderRejected += (in OrderRejected orderRejected) => AlertManager!.OnOrderRejected(orderRejected, "");
-        }
-
-        _clientThread = LowLatency.StartBackgroundThread($"{ManualClient.Context.ClientName}", () =>
-        {
-            while (!Tools.Application.IsExiting && !_isClosing)
-            {
-                try
-                {
-                    ManualClient.WriteSocket();
-                    ManualClient.ReadSocket();
-                }
-                catch(Exception exception)
-                {
-                    // Why: the console too: a remote desk has no AlertManager
-                    Console.WriteLine($"Workspace client thread: {exception}");
-                    AlertManager?.OnException(exception);
-                }
-                Thread.Sleep(1);
-            }
-        });
-
-
-
-
-        WorkspaceContext = new WorkspaceContext(Context, ManualClient);
+        Connect();
 
         InitializeComponent();
 
@@ -106,16 +71,75 @@ public partial class Workspace : Window, IWidgetHost
         _refreshTimer.Start();
     }
 
-    private void OnWorkspaceClosed(object? sender, EventArgs e)
+    // Opens this window's client under its principal and starts its thread: at construction, and again when a remote desk rebuilds
+    // on a restarted server. Throws when the client cannot connect (ManualClient.Open's refusals).
+    private void Connect()
     {
-        _isClosing = true;
-        _clientThread.Join();
+        // Step 1: the server process this connection belongs to, and its symbol strings warmed off-thread
+        _serverProcessId = Context.ServerHeader.GetReadonlyRef().ServerProcessId;
+        ContextManager.ServerContext.WarmSymbolStrings();
 
+        // Step 2: the client.
+        // The server as principal selects server mode: the GUI still connects as its own "<server>_GUI<n>"
+        // client, but shadows every client instead of one algo and books manual orders to the reserved house
+        // strategy. Open takes the first free number, so any number of workspaces may share a principal.
+        ManualClient = Provider.ManualClient.Open(Context is ClientContext clientContext ? clientContext.ClientName : Context.ServerName, Context.ServerName, _guiNumber);
+        Provider.ManualClient.TryParseRemoteGuiName(ManualClient.Context.ClientName.ToString(), out _, out _guiNumber);
+        if (ManualClient is Provider.ManualClient manualClient)
+        {
+            AlertManager = new AlertManager(ManualClient.Context);
+            Clock.Exception += AlertManager.OnException;
+            manualClient.OrderRejected += (in OrderRejected orderRejected) => AlertManager!.OnOrderRejected(orderRejected, "");
+        }
+
+        // Step 3: its thread, and the context its widgets are built with
+        _isClientStopping = false;
+        _clientThread = LowLatency.StartBackgroundThread($"{ManualClient.Context.ClientName}", () =>
+        {
+            while (!Tools.Application.IsExiting && !_isClientStopping)
+            {
+                try
+                {
+                    ManualClient.WriteSocket();
+                    ManualClient.ReadSocket();
+                }
+                catch(Exception exception)
+                {
+                    // Why: the console too: a remote desk has no AlertManager
+                    Console.WriteLine($"Workspace client thread: {exception}");
+                    AlertManager?.OnException(exception);
+                }
+                Thread.Sleep(1);
+            }
+        });
+        WorkspaceContext = new WorkspaceContext(Context, ManualClient);
+        _isConnected = true;
+    }
+
+    // Stops this window's client thread and disposes its widgets and client: when it closes, and before a rebuild connects anew.
+    private void Disconnect()
+    {
+        if (!_isConnected)
+            return;
+        _isConnected = false;
+        _isClientStopping = true;
+        _clientThread.Join();
+        foreach ((_, IWidget widget) in EnumerateWidgets())
+            (widget as IDisposable)?.Dispose();
         if (AlertManager != null)
         {
             Clock.Exception -= AlertManager.OnException;
             AlertManager.Dispose();
+            AlertManager = null;
         }
+        ManualClient.Dispose();
+    }
+
+    private void OnWorkspaceClosed(object? sender, EventArgs e)
+    {
+        // Why: a closed window's clock would otherwise keep refreshing
+        _refreshTimer.Dispose();
+        Disconnect();
 
         if (Avalonia.Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
@@ -133,7 +157,6 @@ public partial class Workspace : Window, IWidgetHost
             {
                 desktop.Shutdown();
             }
-            ManualClient?.Dispose();
         }
     }
 
@@ -142,6 +165,13 @@ public partial class Workspace : Window, IWidgetHost
         Dispatcher.UIThread.Post(() =>
         {
             TimestampText.Text = Context.ServerHeader.GetReadonlyRef().Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff");
+            // Why: a restarted server is a new run (client ids, instrument ids), so a remote desk rebuilds every Workspace on it (see Spec.md "Remote workspaces")
+            bool isServerRestarted = _isConnected && ManualClient is RemoteClient && Context.ServerHeader.GetReadonlyRef().ServerProcessId != _serverProcessId;
+            if (isServerRestarted && Avalonia.Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            {
+                RestartWorkspaces(desktop);
+                return;
+            }
             // A remote desk shows its Mirror link's latency beside the clock, a Workspace beside the server whether the server's process has exited (see Spec.md "Remote workspaces")
             if (ManualClient is RemoteClient)
                 TimestampText.Text = GetLatencyText() + "    " + TimestampText.Text;
@@ -579,6 +609,19 @@ public partial class Workspace : Window, IWidgetHost
         Position = new PixelPoint((int)layout.WindowX, (int)layout.WindowY);
         WindowState = layout.WindowMaximized ? WindowState.Maximized : WindowState.Normal;
 
+        RestoreWidgets(layout);
+
+        foreach (var childLayout in layout.ChildWindows)
+        {
+            var ws = new Workspace(Context);
+            ws.RestoreLayout(childLayout);
+            ws.Show();
+        }
+    }
+
+    // The layout's widgets in this window, replacing its own; its size, position and state are left alone (a rebuild keeps them).
+    private void RestoreWidgets(WorkspaceLayout layout)
+    {
         DockHost.Children.Clear();
 
         foreach (var wl in layout.Widgets)
@@ -599,12 +642,34 @@ public partial class Workspace : Window, IWidgetHost
         }
 
         UpdateHeader();
+    }
 
-        foreach (var childLayout in layout.ChildWindows)
+    // Rebuilds every Workspace of this process in place for a restarted server: each window keeps itself, its menus, size and
+    // position, and swaps its context, client, connection and widgets (see Spec.md "Remote workspaces"). UI thread.
+    private static void RestartWorkspaces(IClassicDesktopStyleApplicationLifetime desktop)
+    {
+        // Step 1: fresh contexts over the same copy; the old stay mapped, so nothing still reading them touches freed memory
+        ContextManager.Renew();
+
+        // Step 2: every window's layout, then every window disconnected. Why all first: no window can then reconnect under a name another still holds
+        List<(Workspace Workspace, WorkspaceLayout WorkspaceLayout)> workspaceLayouts = desktop.Windows.OfType<Workspace>().Select(workspace => (workspace, workspace.CaptureLayout())).ToList();
+        foreach ((Workspace workspace, _) in workspaceLayouts)
+            workspace.Disconnect();
+
+        // Step 3: each window: its context anew, a client under its own GUI number, its widgets back; one that cannot reconnect closes, saying why
+        foreach ((Workspace workspace, WorkspaceLayout workspaceLayout) in workspaceLayouts)
         {
-            var ws = new Workspace(Context);
-            ws.RestoreLayout(childLayout);
-            ws.Show();
+            try
+            {
+                workspace.Context = workspace.Context is ClientContext clientContext ? ContextManager.GetClientContext(clientContext.ClientName) : ContextManager.ServerContext;
+                workspace.Connect();
+                workspace.RestoreWidgets(workspaceLayout);
+            }
+            catch (Exception exception)
+            {
+                Console.WriteLine($"Workspace.RestartWorkspaces: {workspace.Title} could not reconnect, closing it: {exception}");
+                workspace.Close();
+            }
         }
     }
 
@@ -668,26 +733,6 @@ public partial class Workspace : Window, IWidgetHost
         catch (Exception ex)
         {
             Console.WriteLine($"Error loading workspace '{path}': {ex.Message}");
-        }
-    }
-
-    private async void OnAddLadderWidgetClick(object? sender, RoutedEventArgs e)
-    {
-        try
-        {
-            var searchDialog = new SearchWidget(Context);
-            Instrument? selectedInstrument = await searchDialog.ShowDialog<Instrument?>(this);
-
-            if (selectedInstrument != null)
-            {
-                var ladder = new LadderWidget(WorkspaceContext);
-                ladder.SetInstrument(selectedInstrument.InstrumentId);
-                AddWidget(ladder);
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error in OnAddLadderWidgetClick: {ex}");
         }
     }
 

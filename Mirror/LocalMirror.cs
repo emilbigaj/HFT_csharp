@@ -24,7 +24,6 @@ public sealed class LocalMirror
     private readonly List<MirrorSession> _mirrorSessions = new();
     private readonly byte[]?[] _publishedRowsByArrayId;          // per array, the row bytes last published
     private readonly byte[] _rowPacket = new byte[64 * 1024];   // one row packet at a time; the link copies it
-    private readonly Timestamp _localStartTimestamp = Timestamp.UtcNow;     // in every heartbeat: a new value tells a remote this side restarted
     private readonly GuiManualClient?[] _guiManualClients;                   // by client id: the ManualClient serving each attached GUI
     private readonly Dictionary<string, (Timestamp Timestamp, ConnectRefusal ConnectRefusal)> _failedStartByClientName = new();   // the last refusal per GUI name
     private bool _isStandInUpdated;                              // a stand-in read an order state since the last Publish (main thread only)
@@ -104,7 +103,7 @@ public sealed class LocalMirror
             PublishRows(arrayId, hasUnsyncedSession);
 
         // Step 3: queued packets after the rows they depend on, then the heartbeat that closes the pass
-        MirrorHeartbeat mirrorHeartbeat = new() { LocalStartTimestamp = _localStartTimestamp };
+        MirrorHeartbeat mirrorHeartbeat = new();
         ReadOnlySpan<byte> heartbeatPacket = MemoryMarshal.AsBytes(new ReadOnlySpan<MirrorHeartbeat>(in mirrorHeartbeat));
         foreach (MirrorSession mirrorSession in _mirrorSessions)
         {
@@ -267,7 +266,7 @@ public sealed class LocalMirror
         ManualClient? manualClient = null;
         try
         {
-            if (!ManualClient.TryGetPrincipalName(clientName, out string principalName))
+            if (!ManualClient.TryParseRemoteGuiName(clientName, out string principalName, out _))
                 throw new InvalidDataException($"LocalMirror.StartGuiManualClient: {clientName} is not a GUI name");
             manualClient = new ManualClient(clientName, principalName, _serverContext.ServerName);
             foreach (int instrumentId in manualClient.Context.InstrumentIds)

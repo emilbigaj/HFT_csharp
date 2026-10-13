@@ -29,7 +29,7 @@ public sealed class WidgetMessageEfficiency : INotifyPropertyChanged
 
     private MessageEfficiency _messageEfficiency;
 
-    public string ProductGroup => _messageEfficiency.ProductGroup.ToString();
+    public string ProductGroupRoot => _messageEfficiency.ProductGroupRoot.ToString();
     public string RawMessages => _messageEfficiency.RawMessages.ToString("N0");
     public string WeightedMessages => _messageEfficiency.WeightedMessages.ToString("N2");
     public string QuantityTraded => _messageEfficiency.QuantityTraded.ToString("N0");
@@ -271,11 +271,11 @@ public sealed partial class MessageEfficiencyWidget : UserControl, IWidget, IDis
         }
         else if (hitRow != null && hitRow.DataContext is WidgetMessageEfficiency messageEfficiency)
         {
-            var headerItem = new MenuItem { Header = messageEfficiency.ProductGroup, FontWeight = Avalonia.Media.FontWeight.Bold, IsEnabled = false };
+            var headerItem = new MenuItem { Header = messageEfficiency.ProductGroupRoot, FontWeight = Avalonia.Media.FontWeight.Bold, IsEnabled = false };
             menu.Items.Add(headerItem);
             menu.Items.Add(new Separator());
 
-            FileSystemPath filePath = Context.GetMessageEfficiencyFilePath(serverContext.MessageEfficiencyDirectoryPath, messageEfficiency.ProductGroup);
+            FileSystemPath filePath = Context.GetMessageEfficiencyFilePath(serverContext.DirectoryPath, messageEfficiency.ProductGroupRoot);
             var copyPathItem = new MenuItem { Header = "Copy Server .messageefficiency File Path", Icon = new TextBlock { Text = "📋" } };
             copyPathItem.Click += async (_, _) =>
             {

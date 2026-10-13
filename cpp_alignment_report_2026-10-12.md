@@ -5,7 +5,7 @@ do not need the C# conversation, `patch_log.md` or `Spec.md` to act on it. C# is
 checked against the C# working tree on 2026-10-13.
 
 - **Baseline:** C# commit `9d6f3ab` ("Align with C++ (csharp_alignment_report_2026-10-05)"), which the C++ branch
-  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-13 (P22, P23, C15 and C16 were added on 2026-10-13).
+  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-13 (P22, P23, P24 and C15 to C17 were added on 2026-10-13).
 - **Supersedes** `cpp_alignment_report_2026-10-07.md`, which was written piecemeal from 2026-10-07 to 2026-10-12 and never
   handed over. Everything in it that still holds is folded in here; what later work made stale is listed in §9. Read this
   report, not that one. Earlier reports (`2026-10-04` and before) stay valid for their own items, except where §9 says
@@ -53,7 +53,8 @@ Words used throughout:
 | P21 | Client names | PORT-IF | no | GUI names are `<principal>_GUI<n>`, and on a remote desk `<principal>_GUI<n>@<machine>`; the C++ server must accept them |
 | P22 | `ServerHeader` | PORT | **yes** | New field `int32 ServerProcessId` at offset 173 (size 173 → 177), stamped when the header is posted; a refused post names "already running" or "previous server exited"; never overwrite |
 | P23 | `SideByPrice64` | PORT | no | `TrySetQuantity`: a delete of a price better than the best is a no-op; it used to wipe the worse level sharing its ring slot, unbroadcast |
-| C1-C16 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
+| P24 | Message efficiency | PORT | **yes** (L10) | `InstrumentHeader` gains `ProductGroupId` (int8, offset 7) and `ProductGroupRoot` (tag 1151, offset 60); the `MessageEfficiency` row gains a type header (84 bytes); the server assigns rows, ends the day on `Closed` and alone appends `<group>.messageefficiency` (type 18 via Logging at a close, directly at shutdown) |
+| C1-C17 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
 **Kinds.** PORT: change the C++ code. PORT-IF: change it only if C++ has the same construct (the item says what to look
@@ -719,9 +720,11 @@ struct ServerHeader (Pack = 1, 177 bytes; was 173):
   (`ProcessId::IsAlive`, every pass), and a C# Workspace on the CME box shows "Disconnected – server stopped" once it has
   exited. **A C++ header that leaves it 0 makes the Local Mirror exit the moment it starts, and every Workspace on the box
   show "Disconnected".**
-  The C++ server's `main` is to start the Local Mirror, after the header is posted, as `Mirror <absolute path of its
-  MirrorConfig.json>` (with no argument it reads `MirrorConfig.json` in its working directory): one started earlier waits until a
-  header is posted, and one started on a dead run's header exits at once. On a remote desk's copy the field holds the CME
+  The C++ server's `main` is to start the Local Mirror **after it has loaded its clients and instruments** (`LoadClients`,
+  `LoadInstruments`), not merely after posting the header, as `Mirror <absolute path of its MirrorConfig.json>` (with no
+  argument it reads `MirrorConfig.json` in its working directory). Why: on a server restart the remote desks rebuild their
+  Workspaces on the first snapshot the new Local Mirror publishes, and a snapshot taken before the instruments are loaded
+  has none. One started before any header waits until a header is posted, and one started on a dead run's header exits at once. On a remote desk's copy the field holds the CME
   box's process id, so it must never be tested against local processes.
 - **Accepted residual: a bare process id.** If a dead server's id has been given to another process by the time of the
   restart, the refusal below reads it as alive and names that process as "already running". C# accepts this (Linux ids
@@ -762,6 +765,68 @@ TrySetQuantity(ticks, quantity, out delta):
 - No layout or wire change; no lockstep.
 
 **Verify:** §11 scenario 19.
+
+### P24. The server owns message efficiency; groups come from CME's security group (C# `Data/Instrument.cs`, `Data/InstrumentDetails.cs`, `Provider/Context.cs`, `Provider/Server.cs`, `Execution/Order.cs`, `Execution/RateLimit.cs`)
+
+Each product group has one shared row in `<server>/MessageEfficiency`; strategies count into it. Before, every client
+scanned for its group's row, claimed an empty one (two clients could claim the same), loaded the file, flipped the day on
+the first instrument it allocated, and appended the row at each close and at exit, so the file got one copy per process.
+Now the server does all of it, and the group is CME's security group (MDP3 tag 1151), not the root.
+
+```
+InstrumentHeader (64 bytes, unchanged size):
+  offset 7:  int8  ProductGroupId   // was reserved. -1 until the instrument is allocated, then its MessageEfficiency row
+  offset 60: char[4] ProductGroupRoot  // was reserved. tag 1151 from the security definition: NQ for MNQ, RY for RTY/M2K,
+                                    // NK for NKD/MNK, BF for BTC/MBT, EZ for ETH/MET, MS for MES. Zero-padded.
+
+enum OrderType : uint8 { ..., WorkingRisk = 17, MessageEfficiency = 18 }
+struct MessageEfficiency (Pack = 1) {                 // the shared row: 84 bytes, was 80
+  Header<OrderType> Header = MessageEfficiency;       // new, offset 0; every other field moves 4 bytes on
+  ...                                                 // ProductGroup renamed ProductGroupRoot; layout otherwise unchanged
+}
+
+building a header (feed):          header.ProductGroupRoot = security definition tag 1151 (must not be empty)
+ServerContext::OnInstrumentHeader: header.ProductGroupId = -1            // beside InstrumentId = -1
+ServerContext::AllocateInstrument: header.ProductGroupId = AllocateProductGroupId(header)   // beside the risk-limit/position loads
+AllocateProductGroupId(header):
+  if header.ProductGroupRoot empty: throw
+  for each row from 0 while not empty: if row.ProductGroupRoot == header.ProductGroupRoot: return row id
+  claim the next empty row (throw if none): load the last line of <server>/MessageEfficiency/<group>.messageefficiency
+    (else Min limits live, Max in simulation), ProductGroupRoot/ProductGroupId set, Reset(local now), Write; return its id
+
+Server::OnTradingStatusUpdate(update):            // after writing the status byte and broadcasting, as before
+  if update.TradingStatus == Closed:
+    row = MessageEfficiency[header.ProductGroupId]; copy = row
+    if row.Reset(local exchange time of the update) and realtime: WriteToAudit(header.CoreGroupId, copy)
+
+Server::Dispose():
+  ... server socket and instrument data disposed, as before
+  if realtime: for each non-empty row: WriteToAudit(Admin, row)    // new, just before the audit link is disposed
+  ... audit link disposed, as before
+
+Client: GetInstrument no longer allocates a product group; Instrument::ProductGroupId reads header.ProductGroupId.
+  Delete the client's AllocateProductGroupId (scan, claim, load), its Closed handler and every append.
+```
+
+- **Why `Reset`'s result gates the post:** every instrument of the group closes; the first resets the row, the rest find
+  the day already ended, so the group's file gets one line per close.
+- **Why a plain read** (no seqlock) for both copies: a client that died mid-write must not hang the close or shutdown.
+- **Why `Dispose` posts after the server socket:** the admin thread, the audit admin channel's other writer, has stopped.
+  The C# Logging drains a link on close, so rows written before the close message reach the files.
+- **A JSON load must run the row's field initialisers** (the header); C# gave `MessageEfficiency` a parameterless
+  constructor for this. Lines written before the header existed have no `Header` key.
+- **The array is written by both sides:** the server claims, loads and resets rows; strategies count. Map it writable in
+  the server.
+- **Hot-path cost:** at a `Closed` only, one row copy, one time-zone conversion and at most one audit write. A client's
+  per-order count now reads `ProductGroupId` from the header instead of a field on its own object: one load.
+- **File names follow the group:** a group whose code is not its old root (RY, NK, BF, EZ, MS) starts a new file.
+- **`MessageEfficiency.ProductGroup` is renamed `ProductGroupRoot`** (layout unchanged), so the files' JSON key changes. A
+  line written before the rename still loads: the server sets the field itself after reading the line.
+- The C# Logging appends the posted row and sorts it at the high-water mark; nothing to port unless C++ has its own Logging.
+
+**Verify:** two clients allocate MNQ and NQ: both headers carry `ProductGroup` NQ and the same `ProductGroupId`; one row
+exists. In Realtime, close the NQ session: one line in `NQ.messageefficiency` with the closing day's counts, and the row
+starts the next day; stop the server: one more line per group.
 
 ---
 
@@ -818,7 +883,7 @@ listed.
   mid-write). `CompositeOrderEnumerable` and the per-context overrides are deleted. GUI only.
 - **C8. `ManualClient`**: `Open(principal, server)` takes the lowest free `_GUI<n>` (skips `AlreadyConnected`; asks a
   `NotReady` name again once a second for up to 5 s; at most 8; on `RemoteDesk` reopens as a `RemoteClient`), `GetGuiName`,
-  `TryGetPrincipalName`; the constructor takes the GUI name and the principal explicitly instead of adding or stripping
+  `TryParseRemoteGuiName`; the constructor takes the GUI name and the principal explicitly instead of adding or stripping
   `_GUI`.
 - **C9. Row struct code generation** (`OrderRejected`, `OrderState`, `OrderTarget`, `Fill`, `TickHeader`, `Header<T>`):
   `fixed` padding became plain `byte` fields (`Fill` pads with `Size = 64`), static constructors became constants or moved
@@ -840,12 +905,20 @@ listed.
 - **C15. 2026-10-13, Mirror, Workspace and Logging** (C# processes only; what the C++ side must do for them is in P22):
   the Local Mirror checks `ServerProcessId` right after attaching and every pass and exits with the server; it takes its
   config's absolute path as its only argument (`MirrorConfig.json` in the working directory without one); the Remote writes
-  -1 into `Latency[0]` as soon as its link drops and before it exits on a Local restart; a Workspace on the CME box shows
+  -1 into `Latency[0]` as soon as its link drops; a Local Mirror restart over the same server is a link drop, and a server
+  restart (a new `ServerProcessId` in the copied header) makes the Remote wipe its copy and every remote Workspace rebuild
+  itself in place (the heartbeat no longer carries a Local start time: both C# ends deploy together); a Workspace on the CME box shows
   "Disconnected – server stopped, close this Workspace" once the server's process has exited; the C# Logging server polls
   each ring once per 100 ms live (§12).
 - **C16. 2026-10-13, simulator: a crossed book in session is `Auction`.** `InstrumentSimulator` publishes
   `TradingStatus::Auction` while its exchange's session is open and its book is crossed (CME's pre-open), Open/Closed
   otherwise. Port it only if the C++ side has its own simulator; live, the status comes from the exchange.
+- **C17. 2026-10-13, Workspace, widgets and Mirror** (C# processes only, nothing to port): the search widget is deleted;
+  Instrument Headers opens Create Order and a ladder from its right-click menu for an instrument allocated to the
+  Workspace's principal; widgets still restore by `InstrumentId`; the Local Mirror's alerts connect to Logging as
+  `<server>/LocalMirror.alert`, since the C++ server holds `<server>.alert` (on the box, the C++ server must keep that
+  name); `SharedArray.Clear(index)` (sequence 0, payload zeroed) is used by the Remote to wipe its copy on a server
+  restart.
 
 ---
 
@@ -914,6 +987,13 @@ listed.
 - **L9. `ServerHeader` grew to 177 bytes (P22): the C++ server and every C# process in one deploy.** The C# static check
   throws on any other size, and a 173-byte header posted by an old C++ server leaves the C# readers' last 4 bytes
   unwritten (or the reverse). Both Mirror ends deploy with it too: the server-header packet carries the whole header.
+- **L10. Message efficiency (P24): the C++ server and the C# processes on the box together; the C# Logging no later.**
+  C# clients read their row from `InstrumentHeader.ProductGroupId`: against an old C++ server those bytes are 0, so every
+  instrument counts into row 0, and an empty `ProductGroupRoot` means no row was ever loaded for it. The shared
+  `MessageEfficiency` row grew from 80 to 84 bytes (the header): both sides must agree on it, or each reads the other's
+  counts 4 bytes off. An old C# Logging writes
+  a type-18 record as an empty line and never appends the row. The new C# processes on the box (Mirror, Workspace) no
+  longer append at all.
 
 ---
 

@@ -4,6 +4,102 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-13 — the server owns message efficiency; groups come from CME's security group
+
+- `Data/Instrument.cs` — `InstrumentHeader` gains `sbyte ProductGroupId` (offset 7, was reserved; -1 until allocated)
+  and `String4 ProductGroupRoot` (offset 60, was reserved); still 64 bytes. `Instrument.ProductGroupId` reads the header.
+- `Data/InstrumentDetails.cs` — new `ProductGroupRoot`: CME's security group (tag 1151), which is not always the root (MNQ
+  is NQ, M2K is RY). Databento fills it (the user is adding it there). `Simulator/ServerSimulator.cs` copies it into the
+  header. Details files without it can no longer be allocated: regenerate them.
+- `Provider/Context.cs` — `ServerContext.AllocateInstrument` assigns the row (`AllocateProductGroupId`, moved from
+  `ClientContext`: the group's first instrument claims the next row and loads the group's file). Clients no longer scan,
+  claim, load, reset or append; `SaveMessageEfficiceny` is deleted. Why: one shared row was appended by every process
+  that allocated it (strategies, Workspaces, the Local Mirror's stand-ins); the day flipped only on the first instrument
+  the first client allocated; two clients could claim the same row. The array is writable by the server now (it was
+  mapped read-only there).
+- `Provider/Server.cs` — on `Closed`, `OnTradingStatusUpdate` resets the instrument's group row, and in Realtime posts the
+  day that ended on the audit channel only when the reset changed the row, so once per group. `Dispose` posts every
+  group's row on the audit admin channel just before closing the audit link; Logging drains it on close.
+- `Execution/RateLimit.cs` — the row is its own record: `MessageEfficiency` starts with `Header<OrderType>` (new
+  `OrderType.MessageEfficiency = 18`, `Execution/Order.cs`), 84 bytes, and its constructor is parameterless so a JSON load
+  runs the initialisers (an old line, with no `Header` key, loads as type 18; checked in a scratch harness against
+  `S:/CME/MessageEfficiency/6B.messageefficiency`).
+- `Logging/LoggingServer.cs` — `AuditWriter` appends a posted row to `<server>/MessageEfficiency/<group>.messageefficiency`;
+  the sort key puts it at the high-water mark (it has no `OrderHeader`).
+- `Execution/RateLimit.cs` — `MessageEfficiency.ProductGroup` renamed `ProductGroupRoot` (one name with the header and the
+  details), and the widget's column with it. The files' JSON key changes; an old line still loads, as the server sets the
+  field after reading it.
+- `Testing/Scenario.cs` — its MNQ/M2K/MYM group dictionary is gone; the details carry the group.
+- `Widget/MessageEfficiencyWidget.axaml.cs`, `Widget/RiskLimitsWidget.axaml.cs` — "Copy … File Path" gave
+  `<server>/MessageEfficiency/MessageEfficiency/<group>…` (and the same for `RiskLimits`): each passed the folder to a
+  helper that adds it again. Both now pass the server's directory.
+- Deploy: the C++ server first fills both header fields (report P24, L10); until then C# clients on the box count every
+  instrument into row 0. Untested end to end; all projects build.
+
+---
+
+## 2026-10-13 — the Local Mirror's alerts connect under their own name
+
+- `Provider/AlertManager.cs` — an optional `directoryPath` names the Logging connection (`<directoryPath>.alert`; default
+  the context's folder, as before). `Mirror/Program.cs` — the Local Mirror passes `<server>/LocalMirror`. Why: on the CME
+  box the Local Mirror stopped at startup with `ConnectRefusedException … CME_NewRelease.alert: AlreadyConnected`; the
+  C++ server (`CmeServer`) holds `<server>.alert` itself, and Logging keeps one connection per name. Its alerts now go to
+  `<server>/LocalMirror/Alerts/<date>.alert` and the same Telegram chat. Deploy the new Mirror to the box.
+
+---
+
+## 2026-10-13 — Instrument Headers opens order entry and ladders; the search widget is gone
+
+- `Widget/InstrumentHeadersWidget.axaml.cs` — right-click a row: "Create Order" and "Open Ladder" after "Allocate X",
+  greyed out unless the instrument is allocated to this Workspace's principal (order entry and the ladder need its id
+  there).
+- Deleted `Widget/SearchWidget` (Instrument Headers finds and filters instruments better), with its two openers: the
+  Workspace's Widgets → Ladder menu item and the ladder's "Set Instrument" title-bar item. Ladders are opened from
+  Instrument Headers or Positions.
+- `Widget/Widget.cs` — `WidgetHost.AddToHost(control, widget)`, with `SendOrderWidget.NewCreateOrder`/`NewAmendOrder` and
+  `LadderWidget.NewLadder`, replaces the six copies of "find the Workspace window, build the widget, add it" in Ladder,
+  Orders and Positions (each is now one line). A widget outside a Workspace window now logs that it opened nothing.
+- Net about −180 lines. Not covered by the restart harness (it has no widgets): check in a Workspace.
+
+---
+
+## 2026-10-13 — restarts: a Mirror restart is a link drop; a server restart rebuilds the desk in place
+
+- `Mirror/RemoteMirror.cs`, `Mirror/Program.cs` — the server's process id in each server header decides: the same server
+  means a restarted Local Mirror is just a link drop (Workspaces carry on, stand-ins restart under the same names and
+  ids). Another one: that `RemoteMirror` stops reading and `RunRemote` replaces it with a fresh one over the same copy and
+  link, which resets every row of the copy to unwritten, applies the new snapshot, and writes the new header and starts
+  listening at the heartbeat that closes it. One object per server process, so no old GUI slot survives (a first version
+  tracked "stale" GUIs instead; the harness showed a reconnecting GUI landing in another name's old slot and its calls
+  lost). Every header's `LayoutHash` is checked; a mismatch, or a server restart on a simulation desk, stops the Remote.
+  Nothing goes up a new link until its first header is checked. The start-time check
+  (`MirrorHeartbeat.LocalStartTimestamp`, `_localStartTimestamp` on both ends) is deleted.
+- `Socket/SharedArray.cs` — `Clear(index)`: a row back to unwritten (sequence 0, zero bytes, frame kept), for the wipe.
+- `Workspace/Workspace.axaml.cs` — a remote Workspace that sees a new `ServerProcessId` rebuilds every Workspace of its
+  process in place (`RestartWorkspaces`): `ContextManager.Renew()`, then per window capture its layout, `Disconnect()`, take
+  the renewed context for its principal, `Connect()` asking for its own GUI number first, `RestoreWidgets` (size,
+  position and state untouched; `RestoreLayout` now calls it). The constructor and close handler use
+  `Connect()`/`Disconnect()`; closing a window disposes its widgets and stops its refresh timer (they used to run on after
+  it closed). A second round of the harness found two GUIs rebuilding seconds apart could swap names (the lowest free one)
+  and hit each other's rings; asking for the own number fixes it. A third review: every window is disconnected before any
+  reconnects (a fallback number could otherwise be another window's that had not rebuilt), `Open` wraps round the 8
+  numbers, only a connected window starts a rebuild (a closed one's queued refreshes started another), and
+  `RemoteClient.Dispose` retires its context (`ContextManager.Retire`) instead of unmapping it (a dialog awaited across
+  a rebuild read the unmapped view and killed the desk).
+- `Provider/Context.cs` — `ContextManager.Renew()`: fresh contexts over the same copy (a strategy context's client id,
+  cached instruments, positions and symbol strings start over); the replaced ones stay mapped until exit, so nothing reading
+  them can touch freed memory. The GUI's symbol strings move from the static `SymbolCache` (deleted) to
+  `ServerContext.GetSymbolStrings` and `WarmSymbolStrings`. `Provider/Client.cs` — `ManualClient.Open` takes the GUI
+  number to try first; `TryGetPrincipalName` is renamed `TryParseRemoteGuiName` and also returns that number.
+  (`Widget/SearchWidget` is deleted: see the next entry.)
+- Kept by design: widgets restore by instrument id (declined: by symbol). Residual: a reader descheduled across the wipe
+  and the row's first rewrite could accept a torn row. Start order on the CME box: the Local Mirror after the server has
+  loaded its clients and instruments.
+- Breaks: the heartbeat packet shrank 8 bytes, so both Mirror ends deploy together. Nothing for C++ beyond the start order
+  (P22, C15).
+
+---
+
 ## 2026-10-13 — "self-crossing targets" in the Forex simulation: two book fixes
 
 - Symptom: the Testing scenario's Make threw `Self-crossing targets` thousands of times on 2025-11-28 (8,309 alerts),

@@ -48,7 +48,7 @@ public struct InstrumentHeader()
     public InstrumentType InstrumentType;
     public byte CoreGroupId;
     public TradingStatus TradingStatus;
-    private unsafe fixed byte _reserved[1];
+    public sbyte ProductGroupId;   // its row in <server>/MessageEfficiency, set by the server at allocation; -1 until then
     public String8 Exchange;
     public String8 Root;
     public double TickSize;
@@ -57,7 +57,7 @@ public struct InstrumentHeader()
     public int InstrumentHeaderId;
     public int InstrumentId;
     public int ExchangeInstrumentId;
-    private unsafe fixed byte _reserved1[4];
+    public String4 ProductGroupRoot;   // the group CME counts its message efficiency under (MDP3 SecurityGroup), set by whoever builds the header
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -214,7 +214,7 @@ public delegate void TradingStatusUpdateEvent(in TradingStatusUpdate tradingStat
 
 public abstract class Instrument
 {
-    public int ProductGroupId { get; set; } = -1;
+    public int ProductGroupId => Header.ProductGroupId;
 
     protected SharedArrayEntry<InstrumentHeader128> _headerEntry;
     public ref readonly InstrumentHeader Header => ref _headerEntry.GetReadonlyRef().AsInstrumentHeader();

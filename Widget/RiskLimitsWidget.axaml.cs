@@ -305,7 +305,7 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
             menu.Items.Add(editItem);
             menu.Items.Add(new Separator());
 
-            FileSystemPath filePath = Context.GetRiskLimitsFilePath(serverContext.RiskLimitsDirectoryPath, riskLimit.Symbol);
+            FileSystemPath filePath = Context.GetRiskLimitsFilePath(serverContext.DirectoryPath, riskLimit.Symbol);
             var copyPathItem = new MenuItem { Header = "Copy Server .risklimit File Path", Icon = new TextBlock { Text = "📋" } };
             copyPathItem.Click += async (_, _) =>
             {

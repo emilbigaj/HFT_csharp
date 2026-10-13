@@ -191,6 +191,7 @@ public abstract class SharedArray : IDisposable
 
     public abstract void Write(int index, ReadOnlySpan<byte> src);
     public abstract void RecoveryWrite(int index, ReadOnlySpan<byte> src);
+    public abstract void Clear(int index);
 
     public abstract void Dispose();
     public abstract bool IsDense { get; }
@@ -293,6 +294,15 @@ public sealed class SharedArray<T> : SharedArray where T : unmanaged
     public override void Write(int index, ReadOnlySpan<byte> srcObj) => GetEntry(index).Write(in AsValue(srcObj));
 
     public override void RecoveryWrite(int index, ReadOnlySpan<byte> srcObj) => GetEntry(index).RecoveryWrite(in AsValue(srcObj));
+
+    // The row back to unwritten (sequence 0, zero bytes; its frame stays), as a fresh region has it. Only for a copy whose one
+    // writer is the caller (the Remote Mirror's): the sequence goes first, so a reader mid-copy sees it change and reads Empty.
+    public override unsafe void Clear(int index)
+    {
+        Protocol.Header64* header = (Protocol.Header64*)GetEntry(index).GetEntryPtr();
+        Volatile.Write(ref header->Sequence, 0UL);
+        new Span<byte>((byte*)header + Protocol.HeaderLength, TypeSize).Clear();
+    }
 
     // The bytes of one T, checked for length.
     private ref readonly T AsValue(ReadOnlySpan<byte> srcObj)

@@ -598,6 +598,22 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
         }
     }
 
+    /// An order-entry widget set to create an order on this instrument, at this price and quantity when given.
+    public static SendOrderWidget NewCreateOrder(WorkspaceContext context, Instrument instrument, int? tick = null, int? quantity = null)
+    {
+        SendOrderWidget sendOrderWidget = new(context);
+        sendOrderWidget.SetCreateOrder(instrument, tick, quantity);
+        return sendOrderWidget;
+    }
+
+    /// An order-entry widget set to amend this order.
+    public static SendOrderWidget NewAmendOrder(WorkspaceContext context, ulong clientOrderId)
+    {
+        SendOrderWidget sendOrderWidget = new(context);
+        sendOrderWidget.SetOrderToAmend(clientOrderId);
+        return sendOrderWidget;
+    }
+
     public void SetOrderToAmend(ulong clientOrderId)
     {
         // Must run on dispatcher to modify Bound Properties and Collections

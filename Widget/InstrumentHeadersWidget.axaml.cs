@@ -20,68 +20,7 @@ using System.Linq;
 
 namespace Widget;
 
-// Process-wide cache of symbology-derived display strings, indexed by instrumentHeaderId.
-// Header identity is immutable and slots are never reused (see Spec.md), so each entry is computed
-// exactly once for the process lifetime; Symbology construction never runs in a binding getter.
-public static class SymbolCache
-{
-    public sealed record SymbolStrings(string Symbol, string ShortSymbol);
-
-    private static readonly SymbolStrings s_unknown = new("?", "?");
-    private static SymbolStrings?[] s_strings = Array.Empty<SymbolStrings?>();
-    private static ServerContext? s_context;
-
-    // Idempotent; call at workspace startup. Sizes the slot array and warms it off-thread so the
-    // headers widget opens against a hot cache.
-    public static void Initialize(ServerContext context)
-    {
-        if (s_context != null)
-            return;
-        s_context = context;
-        s_strings = new SymbolStrings?[context.ServerHeader.GetReadonlyRef().InstrumentsCapacity];
-        System.Threading.Tasks.Task.Run(Warm);
-    }
-
-    public static void Warm()
-    {
-        ServerContext? context = s_context;
-        if (context == null)
-            return;
-        int count = context.ServerHeader.GetReadonlyRef().InstrumentsCount;
-        for (int instrumentHeaderId = 0; instrumentHeaderId < count; instrumentHeaderId++)
-            _ = Get(instrumentHeaderId);
-    }
-
-    // Lazy: covers headers written after startup and widgets opening before the warm completes.
-    // Benign race: concurrent fills compute identical values.
-    public static SymbolStrings Get(int instrumentHeaderId)
-    {
-        SymbolStrings?[] strings = s_strings;
-        if (s_context == null || (uint)instrumentHeaderId >= (uint)strings.Length)
-            return Compute(instrumentHeaderId);
-        return strings[instrumentHeaderId] ??= Compute(instrumentHeaderId);
-    }
-
-    private static SymbolStrings Compute(int instrumentHeaderId)
-    {
-        ServerContext? context = s_context;
-        if (context == null)
-            return s_unknown;
-        try
-        {
-            InstrumentHeader128 header128 = context.GetInstrumentHeader(instrumentHeaderId).Read();
-            Symbology symbology = header128.Symbology;
-            return new SymbolStrings(symbology.Symbol, symbology.ShortSymbol);
-        }
-        catch
-        {
-            // Unknown instrument type (Symbology getter throws) — mark, never take down a widget.
-            return s_unknown;
-        }
-    }
-}
-
-// All values are cached: identity (symbology strings) once via SymbolCache, state per Update().
+// All values are cached: identity (symbology strings) once via ServerContext.GetSymbolStrings, state per Update().
 // Nothing here constructs a Symbology or formats a string inside a binding getter — that was the
 // multi-second freeze on grids with thousands of spreads. Typed properties (int?, enum?, Timestamp?)
 // sort correctly and feed the column filters; nullable renders as a blank cell.
@@ -124,7 +63,7 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
     public WidgetInstrumentHeader(int headerId, in InstrumentHeader128 header128)
     {
         InstrumentHeaderId = headerId;
-        SymbolCache.SymbolStrings symbols = SymbolCache.Get(headerId);
+        SymbolStrings symbols = ContextManager.ServerContext.GetSymbolStrings(headerId);
         Symbol = symbols.Symbol;
         ShortSymbol = symbols.ShortSymbol;
         Recompute(in header128);
@@ -171,7 +110,7 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
             int legIndex = 0;
             foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
             {
-                legTexts[legIndex++] = LeggedSymbology.GetSignedWeight(legHeader.Weight) + SymbolCache.Get(legHeader.InstrumentHeaderId).ShortSymbol;
+                legTexts[legIndex++] = LeggedSymbology.GetSignedWeight(legHeader.Weight) + ContextManager.ServerContext.GetSymbolStrings(legHeader.InstrumentHeaderId).ShortSymbol;
             }
             Leg0 = legTexts[0]; Leg1 = legTexts[1]; Leg2 = legTexts[2]; Leg3 = legTexts[3]; Leg4 = legTexts[4]; Leg5 = legTexts[5];
         }
@@ -415,8 +354,25 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
                 allocateItem.Click += (_, _) => _context.Manual.OnAllocateInstrument(instrumentHeaderId);
             }
             menu.Items.Add(allocateItem);
+
+            // Why only when allocated: order entry and the ladder need the instrument's id in this workspace's principal
+            int instrumentId = -1;
+            bool isAllocated = row != null && _context.Primary.TryGetInstrumentId(row.InstrumentHeaderId, out instrumentId) && _context.Primary.InstrumentIds[instrumentId];
+            menu.Items.Add(new Separator());
+
+            var createItem = new MenuItem { Header = "Create Order", Icon = new TextBlock { Text = "📝" }, IsEnabled = isAllocated };
+            createItem.Click += (_, _) => PerformCreateOrder(instrumentId);
+            menu.Items.Add(createItem);
+
+            var ladderItem = new MenuItem { Header = "Open Ladder", Icon = new TextBlock { Text = "🪜" }, IsEnabled = isAllocated };
+            ladderItem.Click += (_, _) => PerformOpenLadder(instrumentId);
+            menu.Items.Add(ladderItem);
         }
     }
+
+    private void PerformCreateOrder(int instrumentId) => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, _context.Primary.GetInstrument(instrumentId)));
+
+    private void PerformOpenLadder(int instrumentId) => this.AddToHost(LadderWidget.NewLadder(_context, instrumentId));
 
     private bool FilterRow(object item)
     {

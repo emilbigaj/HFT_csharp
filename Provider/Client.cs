@@ -33,17 +33,18 @@ public sealed class ManualClient : Client, IManualClient
     private const int s_maximumNotReadyWaitSeconds = 5;   // Why: a cancel normally completes in milliseconds; longer means the exchange is out, and a GUI must still open
 
     // Opens the first GUI name no live GUI holds, for a principal (a strategy, or the server for a server workspace):
-    // "<principal>_GUI0", then "_GUI1" and on; throws past the 8th. A name whose previous GUI's orders are still being
-    // cancelled is asked again once a second for up to 5 s before the next number is tried. On a remote desk (the Remote Mirror
-    // answers RemoteDesk) the name is opened as a RemoteClient, a pass-through to the ManualClient the Mirror runs beside the server.
-    public static IManualClient Open(string principalName, string serverName)
+    // "<principal>_GUI<firstGuiNumber>", then the next number, wrapping round; throws after all 8. A name whose previous GUI's orders are
+    // still being cancelled is asked again once a second for up to 5 s before the next number is tried. On a remote desk (the Remote
+    // Mirror answers RemoteDesk) the name is opened as a RemoteClient, a pass-through to the ManualClient the Mirror runs beside the
+    // server. A Workspace rebuilt on a restarted server asks for its own number first, so two Workspaces never swap names.
+    public static IManualClient Open(string principalName, string serverName, int firstGuiNumber = 0)
     {
         bool _isRemoteDesk = false;
-        int _guiNumber = 0;
+        int _guiAttempt = 0;   // numbers tried after the first; wraps past the last, so a window starting high can still take a lower one
         int _notReadyWaitSeconds = 0;
         while (true)
         {
-            string guiName = GetGuiName(principalName, _guiNumber, _isRemoteDesk);
+            string guiName = GetGuiName(principalName, (firstGuiNumber + _guiAttempt) % s_maximumGuiCount, _isRemoteDesk);
             try
             {
                 return _isRemoteDesk ? new RemoteClient(guiName, serverName) : new ManualClient(guiName, principalName, serverName);
@@ -62,9 +63,9 @@ public sealed class ManualClient : Client, IManualClient
                 Thread.Sleep(1000);
             }
             catch (ConnectRefusedException connectRefusedException) when (connectRefusedException.ConnectRefusal is ConnectRefusal.AlreadyConnected or ConnectRefusal.NotReady
-                && _guiNumber < s_maximumGuiCount - 1)
+                && _guiAttempt < s_maximumGuiCount - 1)
             {
-                _guiNumber++;
+                _guiAttempt++;
                 _notReadyWaitSeconds = 0;
             }
         }
@@ -73,12 +74,14 @@ public sealed class ManualClient : Client, IManualClient
     // GUI number n of a principal: "<principal>_GUI<n>"; on a remote desk "<principal>_GUI<n>@<machine>", a name no Workspace elsewhere can hold.
     public static string GetGuiName(string principalName, int guiNumber, bool isRemoteDesk) => $"{principalName}_GUI{guiNumber}{(isRemoteDesk ? "@" + Environment.MachineName : "")}";
 
-    // The principal a remote desk's GUI name serves: the name before its "_GUI<n>@<machine>"; false for a name that is no remote GUI's.
-    public static bool TryGetPrincipalName(string remoteGuiName, out string principalName)
+    // The principal a remote desk's GUI name serves (the name before its "_GUI<n>@<machine>") and its number n; false for a name
+    // that is no remote GUI's.
+    public static bool TryParseRemoteGuiName(string remoteGuiName, out string principalName, out int guiNumber)
     {
         int machineIndex = remoteGuiName.LastIndexOf('@');
         int suffixIndex = machineIndex > 0 ? remoteGuiName.LastIndexOf("_GUI", machineIndex, StringComparison.Ordinal) : -1;
-        bool isGuiName = suffixIndex > 0 && int.TryParse(remoteGuiName.AsSpan(suffixIndex + 4, machineIndex - suffixIndex - 4), out _);
+        guiNumber = 0;
+        bool isGuiName = suffixIndex > 0 && int.TryParse(remoteGuiName.AsSpan(suffixIndex + 4, machineIndex - suffixIndex - 4), out guiNumber);
         principalName = isGuiName ? remoteGuiName[..suffixIndex] : "";
         return isGuiName;
     }
@@ -394,8 +397,6 @@ public abstract class Client
         OpenInstrumentDataSocket(instrumentId, instrument.Symbol.ToString());
         _coreGroupIds.Set(instrument.Header.CoreGroupId);
         Instrument?.Invoke(instrument);
-        if (instrument.ProductGroupId < 0)
-            Context.AllocateProductGroupId(instrument, instrument.Symbology.Root);
         return instrument;
     }
 

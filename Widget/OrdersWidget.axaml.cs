@@ -335,20 +335,7 @@ public sealed partial class OrdersWidget : UserControl, IWidget, IDisposable
         _context.Manual.OnOrderTarget(ref target);
     }
 
-    private void PerformAmend(WidgetOrder order)
-    {
-        var host = this.FindAncestorOfType<Window>() as IWidgetHost;
-
-        if (host == null)
-        {
-            Console.WriteLine("OrdersWidget: Could not find IWidgetHost parent window.");
-            return;
-        }
-
-        var sendOrder = new SendOrderWidget(_context);
-        sendOrder.SetOrderToAmend(order.ClientOrderId);
-        host.AddWidget(sendOrder);
-    }
+    private void PerformAmend(WidgetOrder order) => this.AddToHost(SendOrderWidget.NewAmendOrder(_context, order.ClientOrderId));
 
     public string? SaveStateJson()
     {

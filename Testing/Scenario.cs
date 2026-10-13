@@ -77,23 +77,6 @@ public class TestingScenario : Scenario
         if (Clock.Mode == ClockMode.Simulation)
             strategy.OpenWorkspace("default");
 
-        Dictionary<string, string> ProductGroups = new Dictionary<string, string>()
-        {
-            ["MNQ"] = "NQ",
-            ["M2K"] = "RTY",
-            ["MYM"] = "YM",
-        };
-
-        Client.Instrument += (Instrument instrument) =>
-        {
-            if (!ProductGroups.TryGetValue(instrument.Root, out string? productGroup))
-                productGroup = instrument.Root;
-            Client.Context.AllocateProductGroupId(instrument, productGroup);
-        };
-
-
-
-
         int[] months = new int[] { 3, 6, 9, 12 };
         if (CMECoreGroup == CMECoreGroupId.SandP500)
         {

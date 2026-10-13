@@ -104,6 +104,14 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         LadderControl.RightClick += OnLadderRightClick;
     }
 
+    /// A ladder on this instrument (shown only if it is allocated to the workspace's principal).
+    public static LadderWidget NewLadder(WorkspaceContext context, int instrumentId)
+    {
+        LadderWidget ladderWidget = new(context);
+        ladderWidget.SetInstrument(instrumentId);
+        return ladderWidget;
+    }
+
     public void SetInstrument(int instrumentId)
     {
         if (_context.Primary.InstrumentIds[instrumentId])
@@ -127,10 +135,6 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
 
     public IEnumerable<MenuItem> GetTitleBarMenuItems()
     {
-        MenuItem item = new MenuItem { Header = "Set Instrument" };
-        item.Click += (_, _) => PromptForInstrument();
-        yield return item;
-
         MenuItem ordersItem = new MenuItem
         {
             Header = "Show My Orders",
@@ -157,22 +161,6 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         if (_lockCenter)
         {
             _autoScrollPending = true;   // snap to center immediately when the lock is engaged
-        }
-    }
-
-    private async void PromptForInstrument()
-    {
-        if (VisualRoot is not Window window)
-        {
-            return;
-        }
-
-        SearchWidget search = new SearchWidget(_context.Primary);
-        Instrument? result = await search.ShowDialog<Instrument?>(window);
-
-        if (result != null)
-        {
-            SetInstrument(result.InstrumentId);
         }
     }
 
@@ -281,31 +269,12 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         _context.Manual.OnOrderTarget(ref target);
     }
 
-    private void PerformAmend(ulong orderId)
-    {
-        IWidgetHost? host = this.FindAncestorOfType<Window>() as IWidgetHost;
-        if (host != null)
-        {
-            SendOrderWidget sendOrder = new SendOrderWidget(_context);
-            sendOrder.SetOrderToAmend(orderId);
-            host.AddWidget(sendOrder);
-        }
-    }
+    private void PerformAmend(ulong orderId) => this.AddToHost(SendOrderWidget.NewAmendOrder(_context, orderId));
 
     private void PerformCreate(int tick, int quantity)
     {
-        if (Instrument == null)
-        {
-            return;
-        }
-
-        IWidgetHost? host = this.FindAncestorOfType<Window>() as IWidgetHost;
-        if (host != null)
-        {
-            SendOrderWidget sendOrder = new SendOrderWidget(_context);
-            sendOrder.SetCreateOrder(Instrument, tick, quantity);
-            host.AddWidget(sendOrder);
-        }
+        if (Instrument != null)
+            this.AddToHost(SendOrderWidget.NewCreateOrder(_context, Instrument, tick, quantity));
     }
 
     private void OnRefresh(object? sender, System.Timers.ElapsedEventArgs? e)

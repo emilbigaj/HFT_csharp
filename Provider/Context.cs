@@ -18,6 +18,7 @@ public static class ContextManager
 {
     private static readonly object s_lock = new object();
     private static readonly Dictionary<string, ClientContext> s_clientContexts = new Dictionary<string, ClientContext>();
+    private static readonly List<Context> s_retiredContexts = new();   // contexts a Renew replaced: still mapped, disposed with the rest
 
     public static FileSystemPath ServerName { get; private set; } = null!;
     public static ServerContext ServerContext { get; private set; } = null!;
@@ -53,6 +54,27 @@ public static class ContextManager
         }
     }
 
+    // Fresh contexts for a remote desk rebuilt on a restarted server: everything a context learnt of the old run (its cached
+    // instruments, positions, symbol strings, a client's id) starts over. The old ones stay mapped, views of the same copy, so a
+    // thread still reading through one never touches freed memory; they are disposed at exit (see Spec.md "Remote workspaces").
+    public static void Renew()
+    {
+        lock (s_lock)
+        {
+            s_retiredContexts.Add(ServerContext);
+            s_retiredContexts.AddRange(s_clientContexts.Values);
+            s_clientContexts.Clear();
+            ServerContext = new ServerContext(ServerName, Access.Read);
+        }
+    }
+
+    // Keeps a context its owner is done with mapped until exit, like those Renew replaces: something may still read through it.
+    public static void Retire(Context context)
+    {
+        lock (s_lock)
+            s_retiredContexts.Add(context);
+    }
+
     public static void Dispose()
     {
         lock (s_lock)
@@ -65,6 +87,9 @@ public static class ContextManager
                 }
                 s_clientContexts.Clear();
                 ServerContext.Dispose();
+                foreach (Context retiredContext in s_retiredContexts)
+                    retiredContext.Dispose();
+                s_retiredContexts.Clear();
                 IsInitialized = false;
             }
         }
@@ -132,9 +157,9 @@ public abstract class Context
         return Path.Combine(directoryPath, "RiskLimits", symbol + ".risklimit");
     }
 
-    public static FileSystemPath GetMessageEfficiencyFilePath(FileSystemPath directoryPath, string symbol)
+    public static FileSystemPath GetMessageEfficiencyFilePath(FileSystemPath directoryPath, string productGroupRoot)
     {
-        return Path.Combine(directoryPath, "MessageEfficiency", symbol + ".messageefficiency");
+        return Path.Combine(directoryPath, "MessageEfficiency", productGroupRoot + ".messageefficiency");
     }
 
     public static FileSystemPath GetRateLimitFilePath(FileSystemPath directoryPath, string coreGroupName)
@@ -255,7 +280,8 @@ public abstract class Context
         // single line keeps the array-id ordering (mirror-safe) while giving each context its own book.
         _marketsByPrice = NewSharedArray<MarketByPrice64>(directoryPath / "MarketsByPrice", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
         _riskLimits = NewSharedArray<RiskLimit>(serverName / "RiskLimits", serverHeader.InstrumentIds.Length, ServerAccess);
-        _messageEfficiency = NewSharedArray<MessageEfficiency>(serverName / "MessageEfficiency", serverHeader.InstrumentIds.Length, ClientAccess);
+        // Why writable on both sides: the server claims, loads and ends each group's day; strategies count into it
+        _messageEfficiency = NewSharedArray<MessageEfficiency>(serverName / "MessageEfficiency", serverHeader.InstrumentIds.Length, ServerAccess == Access.Write ? Access.Write : ClientAccess);
         _rateLimits = NewSharedArray<RollingRateLimit>(serverName / "RateLimits", serverHeader.CoreGroupIds.Length, ServerAccess);
         _coreGroups = NewSharedArray<CoreGroup>(serverName / "CoreGroups", serverHeader.CoreGroupIds.Length, ServerAccess);
 
@@ -684,14 +710,6 @@ public sealed class ClientContext : Context
         _clientId = GetClientIdFromMap(ClientName);
     }
 
-    private void SaveMessageEfficiceny(in MessageEfficiency messageEfficiency)
-    {
-        string messageEfficiencyFilePath = GetMessageEfficiencyFilePath(ServerName, messageEfficiency.ProductGroup.ToString()).ToString();
-        string messageEfficiencyLine = Json.SerializeToLine(messageEfficiency);
-        Console.WriteLine($"ClientContext::SaveMessageEfficieny({messageEfficiencyFilePath}):{Environment.NewLine}{messageEfficiencyLine}");
-        File.AppendAllLines(messageEfficiencyFilePath, new string[] { messageEfficiencyLine });
-    }
-
     public static void ThrowIfInvalidClientName(FileSystemPath clientName)
     {
         string validDirectoryPath = GetDirectoryPath("");
@@ -707,65 +725,6 @@ public sealed class ClientContext : Context
     {
         clientName = Path.GetFileName(clientName);
         return Path.Combine(DirectoriesPath, clientName);
-    }
-
-    public void AllocateProductGroupId(Instrument instrument, String4 productGroup)
-    {
-        int maxProductGroupId = ServerHeader.GetReadonlyRef().InstrumentIds.Length;
-        for (int productGroupId = 0; productGroupId < maxProductGroupId; productGroupId++)
-        {
-            ref SharedArrayEntry<MessageEfficiency> messageEfficiencyEntry = ref _messageEfficiency.GetEntry(productGroupId);
-            String4 thisProductGroup = messageEfficiencyEntry.GetReadonlyRef().ProductGroup;
-            if (thisProductGroup == productGroup)
-            {
-                instrument.ProductGroupId = productGroupId;
-                return;
-            }
-            else if (thisProductGroup == "")
-            {
-                instrument.ProductGroupId = productGroupId;
-                {
-                    string messageEfficiencyFilePath = GetMessageEfficiencyFilePath(ServerName, productGroup.ToString()).ToString();
-                    string? messageEfficiencyLine = Tools.Tools.ReadLastLine(messageEfficiencyFilePath);
-                    MessageEfficiency loadedMessageEfficiency = messageEfficiencyLine != null ? Json.Deserialize<MessageEfficiency>(messageEfficiencyLine) : Clock.Mode == ClockMode.Simulation ? MessageEfficiency.GetMaxLimits(productGroup) : MessageEfficiency.GetMinLimits(productGroup);
-                    if (Clock.Mode == ClockMode.Simulation)
-                    {
-                        loadedMessageEfficiency.TradeDate = DateTime.MinValue;
-                    }
-                    loadedMessageEfficiency.ProductGroup = productGroup;
-                    loadedMessageEfficiency.ProductGroupId = productGroupId;
-                    DateTime local = Session.CME.ConvertToLocal(Clock.Now);
-                    loadedMessageEfficiency.Reset(local);
-                    messageEfficiencyEntry.Write(in loadedMessageEfficiency);
-                }
-                
-                if (Clock.Mode == ClockMode.Realtime)
-                {
-                    Application.AddExitAction($"Save {productGroup} Message Efficiency", () =>
-                    {
-                        ref SharedArrayEntry<MessageEfficiency> messageEfficiencyEntry = ref _messageEfficiency.GetEntry(instrument.ProductGroupId);
-                        SaveMessageEfficiceny(in messageEfficiencyEntry.GetReadonlyRef());
-                    });
-                }
-                
-
-                // The exchange closing the instrument ends its message-efficiency day.
-                instrument.TradingStatusUpdateEvent += (in TradingStatusUpdate tradingStatusUpdate) =>
-                {
-                    if (tradingStatusUpdate.TradingStatus != TradingStatus.Closed)
-                        return;
-                    ref MessageEfficiency messageEfficiency = ref _messageEfficiency.GetEntry(instrument.ProductGroupId).GetRef();
-                    DateTime local = Session.CME.ConvertToLocal(tradingStatusUpdate.TickHeader.ExchangeTimestamp);
-                    MessageEfficiency messageEfficiencyCopy = messageEfficiency;
-                    if (messageEfficiency.Reset(local) && Clock.Mode == ClockMode.Realtime)
-                    {
-                        SaveMessageEfficiceny(in messageEfficiencyCopy);
-                    }
-                };
-                return;
-            }
-        }
-        throw new InvalidOperationException($"{GetType()}.AllocateProductGroupId({productGroup}), ProductGroupIds is Full. ProductGroupIds.Length: {maxProductGroupId}");
     }
 
 
@@ -833,9 +792,14 @@ public sealed class ClientContext : Context
     }
 }
 
+/// A header's symbology strings, as GUI grids show them.
+public sealed record SymbolStrings(string Symbol, string ShortSymbol);
+
 public sealed class ServerContext : Context
 {
+    private static readonly SymbolStrings s_unknownSymbolStrings = new("?", "?");
     private readonly SharedArray<PositionHeader> _serverPositionHeaders;
+    private SymbolStrings?[]? _symbolStrings;   // per instrument header id, built on first use (a GUI's; the trading server never asks)
 
     // Server-only: the durable record of which clients and instruments were allocated, replayed at
     // startup. Shared memory is never the durable store — it is unlinked once the last mapper drops.
@@ -1030,6 +994,7 @@ public sealed class ServerContext : Context
         
         ref InstrumentHeader header = ref header128.AsInstrumentHeader();
         header.InstrumentId = -1;
+        header.ProductGroupId = -1;
         header.InstrumentHeaderId = serverHeader.InstrumentsCount;
 
         ref SharedArrayEntry<InstrumentHeader128> header128Entry = ref _instrumentHeaders[header.InstrumentHeaderId];
@@ -1082,12 +1047,43 @@ public sealed class ServerContext : Context
         _serverPositionHeaders.GetEntry(instrumentId).Write(positionHeader);
         _workingRisks.GetEntry(instrumentId).Write(new WorkingRisk { Position = positionHeader.Quantity });
 
+        header.ProductGroupId = (sbyte)AllocateProductGroupId(in header);   // Why a byte fits: one row per instrument id, at most 64
         header.InstrumentId = instrumentId;
         serverHeader.InstrumentIds.Set(instrumentId);
 
         serverHeaderEntry.ReleaseLock();
 
         return instrumentId;
+    }
+
+    // Returns the message-efficiency row of this instrument's product group, claiming the first empty row and loading the group's
+    // file into it on the group's first instrument. Admin thread, at allocation only.
+    private int AllocateProductGroupId(in InstrumentHeader header)
+    {
+        // Step 1: an instrument of a group already claimed shares its row
+        String4 productGroupRoot = header.ProductGroupRoot;
+        if (productGroupRoot == "")
+            throw new InvalidOperationException($"ServerContext.AllocateProductGroupId: instrument header {header.InstrumentHeaderId} ({header.Root}) has no ProductGroupRoot, must have one; the feed or simulator that builds the header sets it");
+        int productGroupCount = ServerHeader.GetReadonlyRef().InstrumentIds.Length;
+        int productGroupId = 0;
+        for (; productGroupId < productGroupCount && !_messageEfficiency[productGroupId].IsEmpty(); productGroupId++)
+        {
+            if (_messageEfficiency[productGroupId].GetReadonlyRef().ProductGroupRoot == productGroupRoot)
+                return productGroupId;
+        }
+        if (productGroupId == productGroupCount)
+            throw new InvalidOperationException($"ServerContext.AllocateProductGroupId: {productGroupRoot} needs a row, but all {productGroupCount} are taken; raise InstrumentIds' capacity");
+
+        // Step 2: the group's first instrument claims the next row and loads the group's last day from its file
+        string? messageEfficiencyLine = Tools.Tools.ReadLastLine(GetMessageEfficiencyFilePath(DirectoryPath, productGroupRoot.ToString()).ToString());
+        MessageEfficiency messageEfficiency = messageEfficiencyLine != null ? Json.Deserialize<MessageEfficiency>(messageEfficiencyLine) : Clock.Mode == ClockMode.Simulation ? MessageEfficiency.GetMaxLimits(productGroupRoot) : MessageEfficiency.GetMinLimits(productGroupRoot);
+        if (Clock.Mode == ClockMode.Simulation)
+            messageEfficiency.TradeDate = DateTime.MinValue;
+        messageEfficiency.ProductGroupRoot = productGroupRoot;
+        messageEfficiency.ProductGroupId = productGroupId;
+        messageEfficiency.Reset(Session.CME.ConvertToLocal(Clock.Now));
+        _messageEfficiency.GetEntry(productGroupId).Write(in messageEfficiency);
+        return productGroupId;
     }
 
     public void AllocateInstrument(int clientId, int instrumentId)
@@ -1215,6 +1211,36 @@ public sealed class ServerContext : Context
         {
             ref SharedArrayEntry<T> entry = ref sharedArray.GetEntry(i);
             Console.WriteLine($"[{i}] seq={entry.GetSeq()} {entry.GetReadonlyRef()}");
+        }
+    }
+
+    // The header's symbol strings, computed once. Why cached: building them in a grid binding froze grids of thousands of spreads.
+    public SymbolStrings GetSymbolStrings(int instrumentHeaderId)
+    {
+        SymbolStrings?[] symbolStrings = _symbolStrings ??= new SymbolStrings?[ServerHeader.GetReadonlyRef().InstrumentsCapacity];
+        if ((uint)instrumentHeaderId >= (uint)symbolStrings.Length)
+            return NewSymbolStrings(instrumentHeaderId);
+        return symbolStrings[instrumentHeaderId] ??= NewSymbolStrings(instrumentHeaderId);   // a race computes the same value twice: benign
+    }
+
+    // Computes every written header's strings off-thread, so a grid opens against a warm cache. A GUI calls it when it connects.
+    public void WarmSymbolStrings() => System.Threading.Tasks.Task.Run(() =>
+    {
+        int instrumentsCount = ServerHeader.GetReadonlyRef().InstrumentsCount;
+        for (int instrumentHeaderId = 0; instrumentHeaderId < instrumentsCount; instrumentHeaderId++)
+            _ = GetSymbolStrings(instrumentHeaderId);
+    });
+
+    private SymbolStrings NewSymbolStrings(int instrumentHeaderId)
+    {
+        try
+        {
+            Symbology symbology = GetInstrumentHeader(instrumentHeaderId).Read().Symbology;
+            return new SymbolStrings(symbology.Symbol, symbology.ShortSymbol);
+        }
+        catch
+        {
+            return s_unknownSymbolStrings;   // Why: an instrument type with no Symbology (or an unwritten header) must never take down a widget
         }
     }
 

@@ -909,9 +909,11 @@ the Init thread and kills the process. Known; listed under Open items.
 ## Instrument header immutability
 
 Instrument headers are append-only: a header's identity (exchange, root, type, maturities) never
-changes after it is written, and header slots are never reused. The GUI's `SymbolCache` (symbology
-strings computed once per headerId for the process lifetime) depends on this; if slot reuse or
-identity rewrites are ever introduced, the cache needs a generation check. Mutable header fields
+changes after it is written, and header slots are never reused within a server's run. The symbol strings a
+GUI shows (`ServerContext.GetSymbolStrings`, computed once per headerId and cached on the server context) depend
+on this; a restarted server is a new run, so a remote desk rebuilt on it renews its contexts and so starts them over (`ContextManager.Renew`, see
+"Restarts" under Remote workspaces). If slot reuse or identity rewrites within a run are ever introduced, the
+cache needs a generation check. Mutable header fields
 (`TradingStatus`, `TickSize`, `InstrumentId`) are outside the cache and always read live.
 
 ## The 64-level book: deleting a price better than the best changes nothing
@@ -945,8 +947,40 @@ status from the snapshot at startup. Amends and cancels are not session-checked,
 
 The status reaches every process the same way live and in simulation: `Server.OnTradingStatusUpdate`
 writes the header byte and broadcasts a `TradingStatusUpdate` on the instrument ring, and the client
-raises `Instrument.TradingStatusUpdateEvent` on a change. Message efficiency ends its day on that
-event's `Closed`, converted to local time with `Session.CME`.
+raises `Instrument.TradingStatusUpdateEvent` on a change. The server ends message efficiency's day on a `Closed`,
+converted to local time with `Session.CME` (below).
+
+**The server owns message efficiency (2026-10-13).** Each product group (CME's message-efficiency group, which MDP3
+calls `SecurityGroup`) has one row in `<server>/MessageEfficiency` shared memory. Strategies only count into it; the
+server does everything else:
+- **Naming the group.** CME's security definition carries it (tag 1151), and it is not always the root: MNQ counts
+  under NQ, M2K under RY, MBT under BF, MES under MS. It reaches `InstrumentDetails.ProductGroupRoot` (Databento's instrument
+  definitions carry it), and whoever builds the instrument header copies it into `InstrumentHeader.ProductGroupRoot` (a
+  `String4`): the C++ server live, `ServerSimulator` in simulation. A header without one cannot be allocated
+  (`ServerContext.AllocateProductGroupId` throws), so details files written before the field existed must be regenerated.
+  The group's file is named after the group, so a group whose code is not its old root (RY, NK, BF, EZ) starts a new file.
+- **Assigning the row.** `ServerContext.AllocateInstrument` gives each instrument its group's row in
+  `InstrumentHeader.ProductGroupId` (-1 until allocated; a byte, as there is at most one row per instrument id). The
+  group's first instrument claims the next empty row and loads the last line of
+  `<server>/MessageEfficiency/<group>.messageefficiency` into it. A client reads its instrument's row from the header, so
+  only one thread ever claims rows (before, each client scanned and claimed, and two clients could claim the same row).
+- **Ending the day.** On a `Closed` status, `Server.OnTradingStatusUpdate` resets the group's row
+  (`MessageEfficiency.Reset`). Only when the reset changes the row (the group's first instrument to close) does the server
+  post the day that ended on its audit channel, and Logging appends it to the group's file. The CoreGroup thread does no
+  I/O. The row itself is the record: it starts with `Header<OrderType>` (`OrderType.MessageEfficiency = 18`).
+- **Shutdown.** `Server.Dispose` posts every group's row on the audit link's admin channel just before closing that link
+  (after the server socket, whose admin thread is that channel's other writer). Logging drains a link on close: the pass
+  that reads the close message still writes what it read, and the reader's `Dispose` reads once more and flushes what the
+  watermark held, so the rows reach the files.
+
+`MessageEfficiency` has a parameterless constructor so its field initialisers, the header among them, run on every
+construction, JSON loads included: a line written before the header existed still loads as type 18.
+
+Only Realtime writes the files. Clients never write them: before, every process that allocated the group (each
+strategy, each Workspace, each Local Mirror stand-in) appended its view of the same shared row at every close and at
+exit. Both of the server's copies are plain reads, not seqlocked (a strategy that died mid-write must not hang the close),
+so a strategy writing at that instant can leave a torn line, which the next load takes as it is. Accepted: the counts are
+off by at most the message being written.
 
 The simulator has no exchange feed for status, so it keeps timetables at the exchange:
 `ServerSimulator.SessionManagerByExchange` holds one `SessionManager` per exchange (XCME, XCBT, ...),
@@ -1125,7 +1159,7 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
   that server reads. A remote desk's GUI names end `@<machine>` (`ManualClient.GetGuiName`): no Workspace on the CME box or
   on another desk can hold one, so after a link loss nobody else can take a remote GUI's name, and with it its client id,
   before its stand-in is started again. The Local end reads the principal from the name before `_GUI<n>@`
-  (`ManualClient.TryGetPrincipalName`). Names still fit 128 characters, folder included (see "Setting up a remote desk").
+  (`ManualClient.TryParseRemoteGuiName`). Names still fit 128 characters, folder included (see "Setting up a remote desk").
 - **A `RemoteClient` holds nothing.** Each call (order target, allocation, algo status, risk limit) goes unchanged into its
   socket's admin channel; the Remote Mirror forwards it, and the Local end makes the same call on the stand-in, which takes
   the slot, runs the RiskLayer, writes the target row and sends. Nothing comes back down the GUI's socket. The
@@ -1171,16 +1205,63 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
   GUI's calls are dropped. When the link returns the remote gets a full snapshot (a row skipped mid-write during it is
   sent the next pass) and its GUIs are listed again; a call that reaches the Local end before its GUI's stand-in is started
   again is dropped (a residual: the latency is the link's, not that GUI's, so it does not show this). Nothing is reconciled: the remote holds no order state, and every
-  order's end is in the copied rows. A restarted Local end (a new start time in the heartbeat) ends the Remote: client ids
-  may differ, so the Workspaces must be reopened, and the Remote waits for the last run's Workspaces to close before it
-  starts. The copy's header is left as it was (a simulation Workspace's clock holds there). Before it exits the Remote
-  writes -1 ns into `Latency[0]`, so every Workspace reads "Connection broken" at once instead of a frozen number until
-  its 10 s age check. A Remote stopped any other way (killed, closed) leaves its last value, and that check catches it.
+  order's end is in the copied rows. A Remote started anew waits for the last run's Workspaces to close before it starts
+  (the copy's header is left as it was; a simulation Workspace's clock holds there).
+- **Restarts (2026-10-13).** The Remote tells them apart by the server's process id in each server header, which opens every
+  publish pass, so it is checked before any row from a new link is applied; until a link's first header is checked,
+  nothing goes up it (no GUI calls, no GuiList). Every header's `LayoutHash` must also equal this desk's, or the Remote stops
+  (a Local end of another build would put rows in the wrong arrays). **A Local Mirror restarted over the same server is a
+  link drop**: its stand-ins died with it (the server cancels what they left working), the new one gets a full snapshot and
+  the GuiList, and starts stand-ins under the same names, which the same server gives the same client ids; every Workspace
+  carries on. **A restarted server is a new run** (client ids handed out in whatever order GUIs reconnect, instrument ids
+  that can shift when an instrument is no longer listed, rows it has not written yet), and the desk rebuilds on it in
+  place:
+  - *The Remote.* One `RemoteMirror` object serves one server process. Seeing another process id, it stops reading (the
+    rest of the link is the new server's) and `RunRemote` disposes it (its `ServerSocket`, every GUI slot, the pending
+    table; a GUI waiting in `AllocateClientId` is answered NotReady and asks again) and builds a fresh one over the same copy
+    and the same link. The fresh one resets every row of the copy to unwritten (`SharedArray.Clear`: sequence 0, zero bytes,
+    frame kept, so none of the old run's orders or positions shows where the new server has not written), applies the new
+    server's snapshot, and at the heartbeat that closes it writes the new header and starts listening. Old GUIs are attached
+    to no socket, so their calls are never read and they are never listed, as long as no other window takes their names (each
+    rebuilds under its own GUI number, below): there is nothing stale to track. Why one object
+    per server: the Remote's slots are indexed by the server's client ids, and a new server can give a GUI an id another
+    GUI's old slot holds, whose socket was built for the other name (tested: calls silently lost).
+  - *Each remote Workspace.* On its next refresh after that header (so against a complete copy) it sees the new process id
+    and rebuilds every Workspace of its process in place (`Workspace.RestartWorkspaces`): `ContextManager.Renew()` once
+    (fresh contexts: everything a context learnt of the old run starts over, its cached instruments and positions, the
+    server context's symbol strings, a strategy context's client id); every window's layout captured and **every** window
+    `Disconnect()`ed (stop its client thread, dispose its widgets and client) before any reconnects, so no window can take a
+    name another still holds; then per window: take the renewed context for its principal, `Connect()` (a new client asking
+    for the window's **own GUI number first**, wrapping round the 8 if it must fall back, its id from the new server), and
+    restore its widgets only (`RestoreWidgets`: its size, position and state are left alone). The window and its menus
+    never close; one that cannot reconnect (or whose strategy is not in the new run) closes, saying why. Only a connected
+    window starts a rebuild, so refreshes such a closed window had queued cannot start another. Nothing is unmapped: the
+    replaced contexts, and the GUI client's own context (`RemoteClient.Dispose` retires it, `ContextManager.Retire`), stay
+    mapped until exit, views of the same copy, so a timer, the simulation clock thread, a warm-up or a widget's late
+    callback (a dialog it awaited) still reading through an old one reads valid memory, and nothing waits. Why its own GUI
+    number: a GUI's ring is named after it, and the fresh RemoteMirror holds no record of who had which name; a Workspace
+    asking for the lowest free name could take another window's that has not rebuilt yet, so its stale calls would reach the
+    wrong stand-in and one window's close would end the other's session (tested with two GUIs rebuilding seconds apart).
+  - *Widgets restore by instrument id, by design.* A ladder or other widget that saved an `InstrumentId` reopens on that
+    id, also after a rebuild: if the restarted server allocated its instruments in another order (one no longer listed
+    shifts the later ids), the widget shows whatever that id holds now. Declined (2026-10-13): restoring by symbol.
+  - *Start order on the CME box.* A rebuild uses the first complete snapshot of the new run, so the Local Mirror must start
+    after the server has loaded its clients and instruments (`LoadClients`, `LoadInstruments`), not merely after it posts
+    its header; otherwise Workspaces rebuild against a run with no instruments yet.
+  - *Residual: a torn row across the wipe.* `Clear` returns a row's sequence to 0, so a Workspace reader descheduled between
+    reading a row's sequence before the wipe and re-reading it after the new run's first write (which can reach the same
+    even value) could accept a row mixing both runs. It needs a stall of milliseconds at exactly that moment, during a
+    rebuild that discards that Workspace's view anyway; accepted.
+  A simulation desk stops instead (the process clock cannot run back to a restarted simulation's earlier time), as does a
+  layout change: both write -1 ns into `Latency[0]` first, so every Workspace reads "Connection broken" at once, and are
+  restarted by hand. A Remote stopped any other way (killed, closed) leaves its last latency value, and the 10 s age check
+  catches it. A server restart still cancels every working order (the old run's state is gone). Replaced: the heartbeat's
+  Local start time, which ended the desk on any Local restart.
 - **The Local Mirror lives and dies with the server.** It reads `ServerHeader.ServerProcessId` once at startup and stops
   when that process has exited (`ProcessId.IsAlive`, every pass): a dead server's stand-ins would be read by no one, and
   the server cannot restart while this process maps its header (next bullet). Its exit closes its TCP links, so a remote
-  sees the link end within one network trip and shows "Connection broken" at once; once the server is back, a new Local end's start time ends
-  the Remote and the Workspaces are reopened. Each server run needs its own Local Mirror (on the CME box the C++ server's
+  sees the link end within one network trip and shows "Connection broken" at once; once the server is back, the new Local
+  end's server header carries the new process id and the desk rebuilds on it ("Restarts" above). Each server run needs its own Local Mirror (on the CME box the C++ server's
   main starts it after posting its header). One started before any server waits in `EnsureConnected` until a header is
   posted, which blocks nothing (an empty box takes the server's post). One started on a dead run's header (still posted
   because some process maps it), or on a `ServerProcessId` of 0, exits at once: it checks right after attaching, before
@@ -1210,7 +1291,10 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
 - **No Logging on a remote desk.** The Remote starts none, taps no GUI socket, and a Workspace running a `RemoteClient`
   creates no `AlertManager` (its client thread's exceptions go to its console). Rejects alert beside the server: the Local
   Mirror runs one `AlertManager` on the server's context, subscribed to every stand-in's `OrderRejected`, and reports its own
-  exceptions to it too (so the Local Mirror starts only once the server's Logging listens). The stand-ins' sockets are tapped by the server's Logging like any client's, so the CME box has
+  exceptions to it too (so the Local Mirror starts only once the server's Logging listens). It connects as
+  `<server>/LocalMirror.alert`, not the context's default `<server>.alert`, which the trading server itself holds: Logging
+  keeps one connection per name and refused the Mirror `AlreadyConnected` (seen on the CME box, 2026-10-13); its alerts
+  land in `<server>/LocalMirror/Alerts/`. The stand-ins' sockets are tapped by the server's Logging like any client's, so the CME box has
   the full audit; the remote Audit Trail stays empty (the menu entry is kept). The `AlertManager` also alerts
   `TaskScheduler.UnobservedTaskException`, so the dial loop cancels a connect that times out (`TcpLinkConnector.DialTcpLink`,
   a 2 s `CancellationTokenSource`) instead of abandoning it: an abandoned connect task faulted unobserved, and with the home
