@@ -23,8 +23,9 @@ public class InstrumentSimulator
 
     public InstrumentDetails InstrumentDetails { get; }
 
-    // Set by the exchange's SessionManager in ServerSimulator; Unknown until the first open or close.
+    // Set by the exchange's SessionManager in ServerSimulator, refined by the book (Auction while crossed in session); Unknown until the first open or close.
     public TradingStatus TradingStatus { get; private set; } = TradingStatus.Unknown;
+    private TradingStatus _sessionTradingStatus = TradingStatus.Unknown;   // Open or Closed from the exchange's session hours; Unknown until the first
 
 
     public int _bidMask = 0;
@@ -84,6 +85,21 @@ public class InstrumentSimulator
         }
         TradingStatusUpdate tradingStatusUpdate = new TradingStatusUpdate(InstrumentId, timestamp, tradingStatus);
         ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Tick(ref Unsafe.As<TradingStatusUpdate, Tick>(ref tradingStatusUpdate));
+    }
+
+    // The session's hours set the status; in session, a crossed book is the exchange's pre-open auction (see Spec.md).
+    public void OnSessionChanged(Timestamp timestamp, TradingStatus sessionTradingStatus)
+    {
+        _sessionTradingStatus = sessionTradingStatus;
+        UpdateTradingStatus(timestamp);
+    }
+
+    // Publishes the status the session and the book imply, when it changes.
+    private void UpdateTradingStatus(Timestamp timestamp)
+    {
+        TradingStatus tradingStatus = _sessionTradingStatus == TradingStatus.Open && _marketByPrice64.IsCrossed ? TradingStatus.Auction : _sessionTradingStatus;
+        if (tradingStatus != TradingStatus)
+            OnTradingStatus(timestamp, tradingStatus);
     }
 
     private void OnBidChanged(Level level)
@@ -449,6 +465,8 @@ public class InstrumentSimulator
             OverwriteAsk(ref _asks, new Level(queueManager.Ticks, adjustedQty));
         }
 
+        // Why before the book: both share the instrument's queue, so the client hears Auction before it sees the crossed book
+        UpdateTradingStatus(update.TickHeader.ExchangeTimestamp);
         FromExchangeToNic_MarketByPriceAggregatedUpdate(in update.TickHeader, _bids, _asks);
 
     }
@@ -1269,10 +1287,10 @@ public class ServerSimulator
             SessionManagerByExchange[details.Exchange] = sessionManager;
         }
         InstrumentSimulator instrumentSimulator = ExchangeSimulator.GetInstrument(allocateInstrument.InstrumentId);
-        sessionManager.Changed += timestamp => instrumentSimulator.OnTradingStatus(timestamp, sessionManager.IsInSession ? TradingStatus.Open : TradingStatus.Closed);
+        sessionManager.Changed += timestamp => instrumentSimulator.OnSessionChanged(timestamp, sessionManager.IsInSession ? TradingStatus.Open : TradingStatus.Closed);
         // Before the clock starts, SessionManager's start-of-clock check raises Changed; after, send the current state now.
         if (Clock.IsRunning)
-            instrumentSimulator.OnTradingStatus(Clock.Now, sessionManager.IsInSession ? TradingStatus.Open : TradingStatus.Closed);
+            instrumentSimulator.OnSessionChanged(Clock.Now, sessionManager.IsInSession ? TradingStatus.Open : TradingStatus.Closed);
     }
 
     
