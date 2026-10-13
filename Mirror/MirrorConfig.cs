@@ -13,12 +13,12 @@ public enum MirrorRole : byte
 }
 
 /// What one end of the mirror runs as, how it reaches its peer, and where it keeps its directories. Static JSON, read once at
-/// startup from MirrorConfig.json beside the executable (see Spec.md "Remote workspaces"). Either direction can be used on
-/// either end: listen, dial, or both.
+/// startup from the file named on the command line, or MirrorConfig.json in the working directory (see Spec.md "Remote
+/// workspaces"). Either direction can be used on either end: listen, dial, or both.
 [RegisterJson]
 public sealed class MirrorConfig
 {
-    private const string s_fileName = "MirrorConfig.json";
+    public const string s_fileName = "MirrorConfig.json";
 
     public MirrorRole MirrorRole;
     public string ServerName = "";                      // the trading server's leaf name; the remote copies it under the same name
@@ -28,10 +28,9 @@ public sealed class MirrorConfig
     public string[] ConnectAddresses = [];              // "host:port", each dialled every second until connected
     public string DirectoriesRoot = "";                 // "" keeps S:\ (/mnt/S/); a relative folder is beside the executable ("Data" on a risk desk)
 
-    /// The MirrorConfig.json beside the executable; a missing one is written with the defaults, to be filled in.
-    public static MirrorConfig LoadOrCreate()
+    /// The MirrorConfig at this path; a missing one is written with the defaults, to be filled in.
+    public static MirrorConfig LoadOrCreate(string mirrorConfigPath)
     {
-        string mirrorConfigPath = Path.Combine(AppContext.BaseDirectory, s_fileName);
         if (File.Exists(mirrorConfigPath))
             return Json.Deserialize<MirrorConfig>(File.ReadAllText(mirrorConfigPath));
         MirrorConfig mirrorConfig = new();
@@ -40,17 +39,18 @@ public sealed class MirrorConfig
     }
 
     /// Throws on a config that cannot work, before anything starts; a freshly written default always does, naming the file.
-    public void ThrowIfInvalid()
+    public void ThrowIfInvalid(string mirrorConfigPath)
     {
+        string mirrorConfigFullPath = Path.GetFullPath(mirrorConfigPath);
         if (string.IsNullOrWhiteSpace(ServerName))
-            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: ServerName is empty; fill in {s_fileName} beside the executable");
+            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: ServerName is empty; fill in {mirrorConfigFullPath}");
         if (ListenPort <= 0 && ConnectAddresses.Length == 0)
-            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: set ListenPort, ConnectAddresses or both in {s_fileName}");
+            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: set ListenPort, ConnectAddresses or both in {mirrorConfigFullPath}");
         // Why: links are not authenticated yet, and whoever reached a listening Local end would get full order entry
         if (MirrorRole == MirrorRole.Local && ListenPort > 0)
             throw new InvalidDataException("MirrorConfig.ThrowIfInvalid: a Local mirror only dials out until links are authenticated");
         // Why: an unknown peer must never get a link: on a Remote a new link replaces the live one, which cancels every remote order
         if (ListenPort > 0 && (IPWhitelist.Length == 0 || !Array.TrueForAll(IPWhitelist, address => IPAddress.TryParse(address, out _))))
-            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: IPWhitelist is [{string.Join(", ", IPWhitelist)}], must list the IP addresses allowed to connect (the CME box's egress address); fill it in {s_fileName}");
+            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: IPWhitelist is [{string.Join(", ", IPWhitelist)}], must list the IP addresses allowed to connect (the CME box's egress address); fill it in {mirrorConfigFullPath}");
     }
 }
