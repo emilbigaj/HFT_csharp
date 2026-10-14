@@ -5,7 +5,7 @@ do not need the C# conversation, `patch_log.md` or `Spec.md` to act on it. C# is
 checked against the C# working tree on 2026-10-13.
 
 - **Baseline:** C# commit `9d6f3ab` ("Align with C++ (csharp_alignment_report_2026-10-05)"), which the C++ branch
-  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-13 (P22, P23, P24 and C15 to C17 were added on 2026-10-13).
+  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-14 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14).
 - **Supersedes** `cpp_alignment_report_2026-10-07.md`, which was written piecemeal from 2026-10-07 to 2026-10-12 and never
   handed over. Everything in it that still holds is folded in here; what later work made stale is listed in §9. Read this
   report, not that one. Earlier reports (`2026-10-04` and before) stay valid for their own items, except where §9 says
@@ -918,7 +918,8 @@ listed.
   Workspace's principal; widgets still restore by `InstrumentId`; the Local Mirror's alerts connect to Logging as
   `<server>/LocalMirror.alert`, since the C++ server holds `<server>.alert` (on the box, the C++ server must keep that
   name); `SharedArray.Clear(index)` (sequence 0, payload zeroed) is used by the Remote to wipe its copy on a server
-  restart.
+  restart; a remote Workspace's `RemoteClient` sends no close message once the server it connected to has restarted
+  (2026-10-14).
 
 ---
 

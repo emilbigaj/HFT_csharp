@@ -26,6 +26,7 @@ public sealed class RemoteClient : IManualClient
     public static readonly Duration s_silenceTimeout = Duration.FromSeconds(10);   // a link silent this long is broken: the Mirrors' TcpLink and the latency display
 
     private readonly ClientSocket _clientSocket;   // admin channel only: calls up to the Remote Mirror
+    private readonly int _serverProcessId;         // the server the name was opened on; after a restart the copy's header names another
 
     public ClientContext Context { get; }
 
@@ -37,6 +38,7 @@ public sealed class RemoteClient : IManualClient
         try
         {
             Context = new ClientContext(guiName, serverName, Access.Read);
+            _serverProcessId = Context.ServerHeader.GetReadonlyRef().ServerProcessId;
             _clientSocket.Recover();
         }
         catch
@@ -69,7 +71,10 @@ public sealed class RemoteClient : IManualClient
     {
         if (_clientSocket.IsDisposed)
             return;
-        _clientSocket.Close();
+        // Why: after a server restart the name's old session is gone and another Workspace may hold it; a close would end that one (see Spec.md)
+        bool isSameServer = Context == null || Context.ServerHeader.GetReadonlyRef().ServerProcessId == _serverProcessId;
+        if (isSameServer)
+            _clientSocket.Close();
         _clientSocket.Dispose();
         // Why retire, not dispose: a widget's late callback (a dialog it awaited) may still read it after a rebuild; unmapped at exit
         if (Context != null)

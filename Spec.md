@@ -1242,6 +1242,11 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
     number: a GUI's ring is named after it, and the fresh RemoteMirror holds no record of who had which name; a Workspace
     asking for the lowest free name could take another window's that has not rebuilt yet, so its stale calls would reach the
     wrong stand-in and one window's close would end the other's session (tested with two GUIs rebuilding seconds apart).
+  - *A rebuild never closes the old name (2026-10-14).* A new window can take a name in the fresh copy before the window
+    that held it on the old server notices the restart (the copy's header, with the new process id, is posted before the
+    Remote listens). `RemoteClient` remembers the server process it connected to and its `Dispose` skips the close message
+    when the copy's header names another: the old session already ended with its server, and the close would end the new
+    window's. Before, it did: the new window's stand-in closed and its calls went nowhere (restart harness T4b).
   - *Widgets restore by instrument id, by design.* A ladder or other widget that saved an `InstrumentId` reopens on that
     id, also after a rebuild: if the restarted server allocated its instruments in another order (one no longer listed
     shifts the later ids), the widget shows whatever that id holds now. Declined (2026-10-13): restoring by symbol.

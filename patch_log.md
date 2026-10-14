@@ -4,6 +4,17 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-14 — a Workspace rebuilt after a server restart no longer closes another window's name
+
+- `Provider/RemoteClient.cs` — remembers the copy header's `ServerProcessId` at connect; `Dispose` skips the close message
+  when the header now names another process. Why: after a server restart a new window can take the old window's GUI name
+  before the old window rebuilds; the old window's close then ended the new window's session on the box (its stand-in
+  closed, its calls went nowhere). The old session needs no close: it ended with its server.
+- Verified with the restart harness rebuilt on today's code: every check passes, T4b included (it failed before); the new
+  window's allocation now takes effect in about 1.1 s instead of timing out.
+
+---
+
 ## 2026-10-13 — the server owns message efficiency; groups come from CME's security group
 
 - `Data/Instrument.cs` — `InstrumentHeader` gains `sbyte ProductGroupId` (offset 7, was reserved; -1 until allocated)
