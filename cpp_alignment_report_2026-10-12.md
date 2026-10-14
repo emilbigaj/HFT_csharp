@@ -53,7 +53,7 @@ Words used throughout:
 | P21 | Client names | PORT-IF | no | GUI names are `<principal>_GUI<n>`, and on a remote desk `<principal>_GUI<n>@<machine>`; the C++ server must accept them |
 | P22 | `ServerHeader` | PORT | **yes** | New field `int32 ServerProcessId` at offset 173 (size 173 → 177), stamped when the header is posted; a refused post names "already running" or "previous server exited"; never overwrite |
 | P23 | `SideByPrice64` | PORT | no | `TrySetQuantity`: a delete of a price better than the best is a no-op; it used to wipe the worse level sharing its ring slot, unbroadcast |
-| P24 | Message efficiency | PORT | **yes** (L10) | `InstrumentHeader` gains `ProductGroupId` (int8, offset 7) and `ProductGroupRoot` (tag 1151, offset 60); the `MessageEfficiency` row gains a type header (84 bytes); the server assigns rows, ends the day on `Closed` and alone appends `<group>.messageefficiency` (type 18 via Logging at a close, directly at shutdown) |
+| P24 | Message efficiency | PORT (all of it, not C#-only; needs a CME change) | **yes** (L10) | `InstrumentHeader` gains `ProductGroupId` (int8, offset 7) and `ProductGroupRoot` (tag 1151, offset 60); the `MessageEfficiency` row gains a type header (84 bytes); the server assigns rows, ends the day on `Closed` and alone appends `<group>.messageefficiency` (type 18 via Logging at a close, directly at shutdown) |
 | C1-C17 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
@@ -772,6 +772,67 @@ Each product group has one shared row in `<server>/MessageEfficiency`; strategie
 scanned for its group's row, claimed an empty one (two clients could claim the same), loaded the file, flipped the day on
 the first instrument it allocated, and appended the row at each close and at exit, so the file got one copy per process.
 Now the server does all of it, and the group is CME's security group (MDP3 tag 1151), not the root.
+
+**Port all of it: P24 is not C#-only.** It replaces any earlier decision, in a C++-side review, that message efficiency
+stays C#-only. C# no longer has a client that claims, loads or ends the day of a row: on a C++ server without P24 every C#
+strategy counts into row 0, which no server has loaded: every group's counts mix in one row, under no tiers, and nothing is
+ever written to the files. (The counts are records only: `Client` calls `Send` and ignores its result, so nothing throttles
+on them today, in C# or C++.) The port has five parts:
+1. The `MessageEfficiency` row type, byte for byte, with its JSON line (layout below).
+2. The two `InstrumentHeader` fields.
+3. The server claims and loads each group's row at allocation and stamps `ProductGroupId`.
+4. The server ends the day on `Closed`, in CME local time, and posts the ended row to the audit channel; at shutdown it
+   posts every row.
+5. **CME change:** the C++ code that builds instrument headers (the CME security-definition path; `BookBuilder` already
+   reads tag 1151 as `SecurityGroup`) sets `ProductGroupRoot` from it. Until it does, allocation refuses every instrument
+   (an empty `ProductGroupRoot` throws in C#).
+
+Counting stays in the clients: a strategy calls `Send` on every order action and `OnFill` on every fill, on the row
+`header.ProductGroupId` names. A C++ strategy, if there is one, does the same; the server never counts.
+
+**The row, 84 bytes, `Pack = 1`** (C# `Execution/RateLimit.cs`; offsets measured):
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `Header<OrderType>` (4) | `Header` | `Type = 18`; the other 3 bytes zero |
+| 4 | .NET `DateTime` (8) | `TradeDate` | uint64: ticks of 100 ns since 0001-01-01 in the low 62 bits, `Kind` in the top 2 (0 here: local, unspecified) |
+| 12 | .NET `TimeSpan` (8) | `TradeTime` | int64 ticks of 100 ns |
+| 20, 28, 36, 44 | `{ int32 DailyRawMessages; int32 Benchmark; }` (8 each) | `Tier0` … `Tier3` | |
+| 52 | `char[4]` | `ProductGroupRoot` | zero-padded |
+| 56 | int32 | `ProductGroupId` | |
+| 60 | int32 | `RawMessages` | |
+| 64 | double | `WeightedMessages` | |
+| 72 | double | `InverseQuantityTraded` | `1 / QuantityTraded`, 1 when nothing traded |
+| 80 | int32 | `QuantityTraded` | |
+
+The JSON line, as `GetMinLimits("NQ")` writes it (one line per record; `Efficiency` is computed, written, never read):
+
+```
+{"Efficiency":0,"Header":{"Type":"MessageEfficiency"},"TradeDate":"0001-01-01T00:00:00","TradeTime":"00:00:00","Tier0":{"DailyRawMessages":0,"Benchmark":0},"Tier1":{"DailyRawMessages":0,"Benchmark":0},"Tier2":{"DailyRawMessages":0,"Benchmark":0},"Tier3":{"DailyRawMessages":0,"Benchmark":0},"ProductGroupRoot":"NQ","ProductGroupId":-1,"RawMessages":0,"WeightedMessages":0,"InverseQuantityTraded":1,"QuantityTraded":0}
+```
+
+A loaded line missing `Header` (written before 2026-10-13) still loads as type 18; a line's `ProductGroupRoot` and
+`ProductGroupId` are overwritten by the server after loading. `GetMaxLimits` sets every tier to `int.MaxValue`;
+`GetMinLimits` sets every tier to 0.
+
+```
+Reset(local):                          // local = CME local time ("Central Standard Time", DST observed)
+  if local >= TradeDate + TradeTime:
+    TradeDate = local.Date + 1 day; RawMessages = 0; WeightedMessages = 0; QuantityTraded = 0; InverseQuantityTraded = 1
+    return true
+  return false
+
+CanSend(action, weighter, out raw, out weighted):
+  raw = RawMessages + 1; weighted = WeightedMessages + weighter.Weight(action)
+  for tier in Tier1, Tier2, Tier3 (first whose DailyRawMessages < raw):
+    return weighted * InverseQuantityTraded < tier.Benchmark or action == Cancel
+  return true
+Send(action, weighter):    canSend = CanSend(...); RawMessages = raw; WeightedMessages = weighted; return canSend   // always counts
+TrySend(action, weighter): counts only when CanSend is true
+OnFill(quantity):          QuantityTraded += |quantity|; InverseQuantityTraded = 1.0 / QuantityTraded
+
+CMEGetWeightedMessage.Weight(action):  Create 0, Cancel 3, anything else 1; times 0.1 outside 07:00-16:00 CME local
+```
 
 ```
 InstrumentHeader (64 bytes, unchanged size):
