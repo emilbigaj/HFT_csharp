@@ -26,6 +26,7 @@ public sealed class RemoteMirror : IDisposable
 
     private readonly ServerContext _serverContext;
     private readonly ServerSocket _serverSocket;
+    private readonly LetterBox<int> _remoteMirrorProcessIdBox;   // this process's id, posted once it listens: Workspaces of an earlier Remote rebuild on it
     private readonly TcpLinkConnector _tcpLinkConnector;
     private TcpLink _tcpLink;
     private readonly uint _layoutHash;                      // this desk's array layout; every server header must carry the same
@@ -79,6 +80,7 @@ public sealed class RemoteMirror : IDisposable
         _serverSocket.Persistance = true;
         _serverSocket.AllocateClientId = AllocateClientId;
         _serverSocket.ClientOpened += clientId => _pendingClientIds.TryRemove((_mirrorGuisByClientId[clientId].ClientName.ToString(), _mirrorGuisByClientId[clientId].GuiProcessId), out _);
+        _remoteMirrorProcessIdBox = new LetterBox<int>(RemoteClient.GetRemoteMirrorProcessIdPath(serverContext.ServerName), Access.Write);
     }
 
     /// One pass: take a newer link, apply what came down, close a dead link, forward the GUIs' messages, ping, list the GUIs.
@@ -91,6 +93,10 @@ public sealed class RemoteMirror : IDisposable
             _tcpLink = tcpLink;
             _isGuiListDue = true;
             _isLinkChecked = false;
+            // Why: latency is the link's; the old link's pongs say nothing about this one, and the first ping goes now
+            Array.Clear(_roundTrips);
+            _pongedPingTimestamp = Timestamp.StopwatchNow;
+            _pingTimestamp = default;
         }
 
         // Step 2: down: the server header (checked against this server), rows, AllocatedClientId, pongs, heartbeats; a restarted server ends this object's work
@@ -211,6 +217,9 @@ public sealed class RemoteMirror : IDisposable
         {
             _serverSocket.Listen();
             _isListening = true;
+            // Why after Listen: a Workspace rebuilds on it and connects at once. RecoveryWrite keeps the LetterBox posted, as the server header's
+            int processId = Environment.ProcessId;
+            _remoteMirrorProcessIdBox.GetEntry().RecoveryWrite(in processId);
             Console.WriteLine("RemoteMirror: copy complete, Workspaces may start");
         }
     }
@@ -294,5 +303,6 @@ public sealed class RemoteMirror : IDisposable
     {
         _isDisposed = true;
         _serverSocket.Dispose();
+        _remoteMirrorProcessIdBox.Dispose();
     }
 }

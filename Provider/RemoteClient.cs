@@ -27,8 +27,19 @@ public sealed class RemoteClient : IManualClient
 
     private readonly ClientSocket _clientSocket;   // admin channel only: calls up to the Remote Mirror
     private readonly int _serverProcessId;         // the server the name was opened on; after a restart the copy's header names another
+    private readonly LetterBox<int> _remoteMirrorProcessIdBox = null!;   // the Remote Mirror serving this desk; a restarted one posts its own
+    private readonly int _remoteMirrorProcessId;   // the Remote Mirror the name was opened on
 
     public ClientContext Context { get; }
+
+    /// The letterbox where the Remote Mirror posts its process id once it listens: <server>/RemoteMirrorProcessId.
+    public static FileSystemPath GetRemoteMirrorProcessIdPath(FileSystemPath serverName) => serverName / "RemoteMirrorProcessId";
+
+    /// True once the server or the Remote Mirror this name was opened on has been replaced: its session is gone, and the Workspace rebuilds (see Spec.md "Remote workspaces").
+    public bool IsSessionEnded => Context.ServerHeader.GetReadonlyRef().ServerProcessId != _serverProcessId || _remoteMirrorProcessIdBox.GetReadonlyRef() != _remoteMirrorProcessId;
+
+    /// True while the Remote Mirror this name was opened on is running; however it ended (closed, killed, crashed), false at once.
+    public bool IsRemoteMirrorAlive => ProcessId.IsAlive(_remoteMirrorProcessId);
 
     public RemoteClient(string guiName, string serverName)
     {
@@ -39,6 +50,8 @@ public sealed class RemoteClient : IManualClient
         {
             Context = new ClientContext(guiName, serverName, Access.Read);
             _serverProcessId = Context.ServerHeader.GetReadonlyRef().ServerProcessId;
+            _remoteMirrorProcessIdBox = new LetterBox<int>(GetRemoteMirrorProcessIdPath(Context.ServerName), Access.Read);
+            _remoteMirrorProcessId = _remoteMirrorProcessIdBox.GetReadonlyRef();
             _clientSocket.Recover();
         }
         catch
@@ -71,11 +84,12 @@ public sealed class RemoteClient : IManualClient
     {
         if (_clientSocket.IsDisposed)
             return;
-        // Why: after a server restart the name's old session is gone and another Workspace may hold it; a close would end that one (see Spec.md)
-        bool isSameServer = Context == null || Context.ServerHeader.GetReadonlyRef().ServerProcessId == _serverProcessId;
-        if (isSameServer)
+        // Why: after a server or Remote Mirror restart the name's old session is gone and another Workspace may hold it; a close would end that one (see Spec.md)
+        bool isSessionEnded = _remoteMirrorProcessIdBox != null && IsSessionEnded;
+        if (!isSessionEnded)
             _clientSocket.Close();
         _clientSocket.Dispose();
+        _remoteMirrorProcessIdBox?.Dispose();
         // Why retire, not dispose: a widget's late callback (a dialog it awaited) may still read it after a rebuild; unmapped at exit
         if (Context != null)
             ContextManager.Retire(Context);

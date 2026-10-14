@@ -4,6 +4,100 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-14 — the GUI shares its plumbing: one refresh timer, row reconciliation, hit-test and menus; three thread races fixed
+
+- Three races between a widget's refresh (timer thread) and a click (UI thread), each touching one collection: Orders'
+  Cancel All copied `_active` while a refresh refilled it (could miss orders or throw); Positions' Pause/Resume All
+  enumerated `_positions` while a refresh added to it ("Collection was modified"); Send Order's wheel and middle-click
+  rebuilt the ladder on the UI thread into the buffers the timer pass was writing (`RefreshLadder`, deleted: the next pass
+  redraws within 100 ms). The first two now iterate `Rows`.
+- `Widget/Widget.cs`: `WidgetRefreshTimer` (one pass at a time; the next starts after the UI thread has applied the
+  last, so a pass never rewrites what a pending post reads; a failed pass is logged, not swallowed), `DataGridRows`
+  (`GetDataGridHit`, `ReconcileRows`, `IsScrolledNearEnd`, `CompareOrders`), `WidgetMenus` (`NewMenuItem`,
+  `NewTitleMenuItem`, `AddColumnVisibilityMenuItems`, `AddOrderMenuItems`, `NewCopyPathMenuItem`,
+  `NewOpenFolderMenuItem`, `OpenInExplorer`), `WidgetHost.OpenMenu`, `IWidget.TypeKey` defaulting to the class name.
+  Elsewhere: `OrderState.NewCancel`, `Instrument.PriceFormat`/`TicksToPriceString` (`TicKDecimals` renamed
+  `TickDecimals`), `Context.DirectoryName`, `WorkspaceContext.AllocateToManualClient`, `Palette.GetSignBrush`.
+- Every widget uses them (8 timers, 7 hit-tests, 6 row reconciliations, 8 column menus, 23 menu items). Also:
+  `ColumnRegexFilters` keeps one `Regex` per column and owns its saved state (`ColumnRegexFilterState`, same JSON as
+  before); Chart's four series bindings are one `SeriesBinding<T>`; `WidgetContainer` shares drag and resize state;
+  Workspace builds widgets in one `NewWidget(typeKey)` (the Widgets menu passes the type in `Tag`) and containers in one
+  `AddWidgetContainer`; Send Order keeps each tab's inputs in one place; row view-models notify every pass instead of
+  comparing; dead code deleted (unused colours and converter, unbound properties, events with no subscriber, the Widget
+  project's own never-run app template: Widget is now a class library).
+- Behaviour changes, approved: menu title lines are bold and disabled everywhere; rows follow the source's order; a
+  ladder redraws on the next 100 ms pass after an instrument change, the Show My Orders toggle, a wheel or a middle-click.
+  Column widths saved before today without a kind: above 1 is a hand-sized pixel width, 1 or 0 was Auto.
+- Checked: every project builds; every `{Binding}` and XAML handler resolves; the real Workspace opened all 11 widget
+  types against a simulated server (screenshots: columns restored, title-bar buttons, filter and column menus); an
+  independent review of the whole diff found no regression. Net about −1,900 lines (Widget, Workspace and helpers).
+- After the box test: while a restarted Remote Mirror (or server) refills a desk's wiped copy, the Ladder and Send Order
+  read an empty book (`Read()` throws "Slot is empty"), which now logged ten lines a second for the ~5 s refill
+  (the old code swallowed it). `Context.TryReadMarketByPrice64` returns false for an empty book; both widgets skip that
+  pass (the Ladder before flipping its row cache), and Send Order's instrument picker leaves the price blank. The shared
+  timer logs a repeated failure once, and again only after a pass succeeds.
+- Not done, by decision: a shared Fills/Audit pager (they sort differently); persisting Audit Trail's filters (new
+  behaviour). Kept: Risk Limits' unbound `LongQuantityAllowance`/`ShortQuantityAllowance` (owner to decide), the
+  widgets' design-time constructors.
+
+---
+
+## 2026-10-14 — saved grid columns keep their width's kind; one column-layout helper for five widgets
+
+- `Widget/Widget.cs` — `DataGridColumnState` (header, width, width kind, position, visibility) with
+  `NewDataGridColumnStates` / `ApplyDataGridColumnStates`, and `DataGridWidgetState` for the widgets whose state is their
+  columns only. Replaces five copies: `InstrumentHeadersWidget` (keeps its filters), `OrdersWidget`,
+  `MessageEfficiencyWidget`, `RateLimitWidget`, `RiskLimitsWidget` (their save and load are now one line each).
+- Why: every copy saved `Width.Value` without its kind, so an Auto column (value 1) came back as 1 px; on the CME desk
+  (2026-10-14) a saved default workspace reopened Instrument Headers and Orders with empty 1-px columns. A file saved
+  before this change has no `WidthUnit`, so it now loads as Auto (checked against that file: its columns, hidden ones and
+  the Instrument Headers filter all load). Net −160 lines.
+
+---
+
+## 2026-10-14 — a Remote Mirror restart rebuilds the open Workspaces; the latency number is the Remote's alone
+
+- `Mirror/Program.cs` — `RunRemote` no longer waits for the last run's Workspaces to close (`WaitForPreviousCopyToClose`
+  deleted): when the copy's header is still posted it reuses the copy, wiped as on a server restart. It stops, as before,
+  on a copy of other capacities or another build, and on a simulation desk on a copy of another run.
+- `Mirror/RemoteMirror.cs` — posts its process id in `<server>/RemoteMirrorProcessId` once it listens.
+- `Provider/RemoteClient.cs` — notes the Remote's id at connect; `IsSessionEnded` (a new server or a new Remote) replaces
+  the Workspace's own server-id check and decides whether `Dispose` closes; `IsRemoteMirrorAlive`.
+- `Workspace/Workspace.axaml.cs` — rebuilds on `IsSessionEnded`. The latency text is `Latency[0]` exactly as the Remote
+  writes it, to the microsecond (`0.000 ms`), "Connection broken – reconnecting…" below 0, "Remote Mirror offline" once
+  its process has exited (within about 100 ms, however it ended), "Remote Mirror not responding" when alive but not
+  rewriting the row for 10 s. Why: the Workspace showed the row's age when longer, so a closed Remote read as a latency
+  climbing to 10 s; and a whole-millisecond figure on a steady link looked frozen.
+- Restart harness: new R8 (two GUIs open, the Remote killed and restarted: both rebuild under their own names, both calls
+  reach the server) passes; R1 now judges the latency's return by its samples (a new link starts at exactly 0).
+
+---
+
+## 2026-10-14 — the Workspace finds its own windows: a server restart rebuilds them
+
+- `Workspace/Workspace.axaml.cs`, `Workspace/WorkspaceRunner.cs` — `Workspace.OpenWorkspaces`, a list each window joins
+  when built and leaves when closed, replaces every use of Avalonia's `desktop.Windows`: the server-restart rebuild,
+  closing (shut down after the last), saving a workspace's other windows, and `WorkspaceRunner`'s screenshot and close-all.
+  Why: Avalonia 12 lists only windows opened after the lifetime starts, and `WorkspaceRunner` opens the first one before
+  (a scratch Avalonia 12 app showed `Windows.Count` 0 with it up, 1 after a second opened). On the CME box (2026-10-14) a
+  server restart found no window to rebuild: `RestartWorkspaces` ran every 100 ms creating a `ServerContext` each time,
+  the latency text stayed blank and the window's calls went to the stand-in the Remote had closed. The same gap made
+  closing the first window shut the app with others open, and left it out of saved layouts and close-all.
+- Close-all now closes only Workspace windows; other top-level windows go when the app shuts down. Net −16 lines.
+
+---
+
+## 2026-10-14 — a Local Mirror restart no longer reads as a latency spike
+
+- `Mirror/RemoteMirror.cs` — taking a new link starts its latency afresh: the last 10 round trips are cleared, the
+  newest-answered-ping time is reset to now, and the first ping goes out at once. Why: the desk's latency includes the age
+  of the oldest unanswered ping, measured from the last pong; after a Local Mirror restart that was the old link's last
+  pong, so the reconnected desk showed the whole outage (8329 ms on the CME box, 2026-10-14) climbing until the new
+  link's first pong; the old link's round trips (high if it was degrading) also stayed on screen for 10 more pongs. Now
+  it starts at 0 and climbs only while the new link's snapshot is in flight.
+
+---
+
 ## 2026-10-14 — a Workspace rebuilt after a server restart no longer closes another window's name
 
 - `Provider/RemoteClient.cs` — remembers the copy header's `ServerProcessId` at connect; `Dispose` skips the close message

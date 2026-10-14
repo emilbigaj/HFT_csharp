@@ -1,14 +1,12 @@
 ﻿//BEGIN_FILE HFT/Widget/WidgetContainer.axaml.cs
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
-using Avalonia.Media;
-using Avalonia.Threading;
-using System.Reflection;
 
 namespace Widget;
 
@@ -17,6 +15,8 @@ public enum WidgetResizeEdge
     None, Left, Right, Top, Bottom, TopLeft, TopRight, BottomLeft, BottomRight
 }
 
+/// A widget's floating frame on the Workspace canvas: title bar, minimise and close buttons, dragging by the title bar and
+/// resizing by the edges. Its creator sets its size and position. UI thread, cold path.
 public partial class WidgetContainer : UserControl
 {
     private const double ResizeBorderThickness = 6;
@@ -29,10 +29,8 @@ public partial class WidgetContainer : UserControl
     private bool _isDragging;
     private bool _isResizing;
     private WidgetResizeEdge _resizeEdge;
-    private Point _dragStart;
-    private double _startLeft, _startTop;
-    private Point _resizeStart;
-    private double _startWidth, _startHeight, _startLeftResize, _startTopResize;
+    private Point _pointerGestureStartPoint;   // where a drag or resize started, on the canvas
+    private Rect _pointerGestureStartRect;     // the container's layout rect when it started (GetLayoutRect)
 
     public WidgetContainer()
     {
@@ -50,20 +48,16 @@ public partial class WidgetContainer : UserControl
         HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left;
         VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top;
 
-        Dispatcher.UIThread.Post(() =>
-        {
-            // FIX: If the Width/Height has been set externally (e.g. by loading a save file),
-            // do not overwrite it with defaults. Avalonia defaults are double.NaN.
-            if (!double.IsNaN(Width) && !double.IsNaN(Height))
-                return;
-
-            Width = widget.DefaultWidth;
-            Height = widget.DefaultHeight;
-        }, DispatcherPriority.Loaded);
-
         RootEvents();
     }
 
+    /// Where the container sits on its canvas (an unset position as 0) and its size: as laid out, else as set.
+    public Rect GetLayoutRect()
+    {
+        double left = Canvas.GetLeft(this);
+        double top = Canvas.GetTop(this);
+        return new Rect(double.IsNaN(left) ? 0 : left, double.IsNaN(top) ? 0 : top, Bounds.Width > 0 ? Bounds.Width : Width, Bounds.Height > 0 ? Bounds.Height : Height);
+    }
 
     private void RootEvents()
     {
@@ -74,7 +68,7 @@ public partial class WidgetContainer : UserControl
 
         this.PointerMoved += OnRootPointerMoved;
         this.PointerReleased += OnRootPointerReleased;
-        this.PointerCaptureLost += OnRootPointerCaptureLost;
+        this.PointerCaptureLost += (_, _) => EndPointerGesture();
 
         this.AttachedToVisualTree += (_, _) => BringToFront();
 
@@ -142,120 +136,107 @@ public partial class WidgetContainer : UserControl
         }
     }
 
+    /// Right button: the widget's title-bar menu, when it has one. Left button off the resize edges: a drag.
     private void OnTitleBarPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        var pt = e.GetCurrentPoint(this);
+        PointerPoint pointerPoint = e.GetCurrentPoint(this);
 
-        if (pt.Properties.IsRightButtonPressed)
+        if (pointerPoint.Properties.IsRightButtonPressed)
         {
-            var items = Widget.GetTitleBarMenuItems()?.ToList();
-
-            if (items != null && items.Count > 0)
-            {
-                var menu = new ContextMenu();
-                foreach (var item in items)
-                {
-                    menu.Items.Add(item);
-                }
-
-                TitleBar.ContextMenu = menu;
-                menu.Open(TitleBar);
-                e.Handled = true;
-            }
+            List<MenuItem> titleBarMenuItems = Widget.GetTitleBarMenuItems().ToList();
+            TitleBar.OpenMenu(titleBarMenuItems);
+            e.Handled = titleBarMenuItems.Count > 0;
             return;
         }
 
-        if (!pt.Properties.IsLeftButtonPressed) return;
-        Point local = e.GetPosition(this);
-        if (HitTestResizeEdge(local) == WidgetResizeEdge.None)
+        if (!pointerPoint.Properties.IsLeftButtonPressed) return;
+        if (HitTestResizeEdge(e.GetPosition(this)) == WidgetResizeEdge.None)
             StartDrag(e);
     }
 
+    /// Any press brings the container to the front; a left press on an edge resizes, on the title bar drags, in the content focuses it.
     private void OnRootPointerPressed(object? sender, PointerPressedEventArgs e)
     {
         BringToFront();
 
         if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
 
-        Point local = e.GetPosition(this);
-        WidgetResizeEdge edge = HitTestResizeEdge(local);
+        Point containerPoint = e.GetPosition(this);
+        WidgetResizeEdge resizeEdge = HitTestResizeEdge(containerPoint);
 
-        if (edge != WidgetResizeEdge.None)
+        if (resizeEdge != WidgetResizeEdge.None)
         {
-            StartResize(e, edge);
+            StartResize(e, resizeEdge);
             e.Handled = true;
             return;
         }
 
         if (e.Handled) return;
 
-        if (local.Y <= TitleBarHeight)
-        {
-            if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-                StartDrag(e);
-        }
-        else
-        {
-            if (PART_ContentPresenter?.Content is IInputElement input)
-                input.Focus();
-        }
+        if (containerPoint.Y <= TitleBarHeight)
+            StartDrag(e);
+        else if (PART_ContentPresenter.Content is IInputElement inputElement)
+            inputElement.Focus();
     }
 
+    /// Moves the container (a drag) or moves and resizes it (a resize) by how far the pointer has gone since the gesture started.
     private void OnRootPointerMoved(object? sender, PointerEventArgs e)
     {
         Canvas? canvas = GetParentCanvas();
-        if (canvas == null) return;
+        if (canvas == null || !(_isDragging || _isResizing)) return;
 
+        // Step 1: how far the pointer has moved, and where the container started
+        Point canvasPoint = e.GetPosition(canvas);
+        double deltaX = canvasPoint.X - _pointerGestureStartPoint.X;
+        double deltaY = canvasPoint.Y - _pointerGestureStartPoint.Y;
+        Rect startRect = _pointerGestureStartRect;
+
+        // Step 2: a drag moves the whole container
         if (_isDragging)
         {
-            Point pt = e.GetPosition(canvas);
-            double dx = pt.X - _dragStart.X;
-            double dy = pt.Y - _dragStart.Y;
-            double newLeft = _startLeft + dx;
-            double newTop = _startTop + dy;
-            ClampTitleBar(canvas, ref newLeft, ref newTop);
-            Canvas.SetLeft(this, newLeft);
-            Canvas.SetTop(this, newTop);
+            double draggedLeft = startRect.X + deltaX;
+            double draggedTop = startRect.Y + deltaY;
+            ClampTitleBar(canvas, ref draggedLeft, ref draggedTop);
+            Canvas.SetLeft(this, draggedLeft);
+            Canvas.SetTop(this, draggedTop);
             return;
         }
 
-        if (_isResizing)
-        {
-            Point pt = e.GetPosition(canvas);
-            double dx = pt.X - _resizeStart.X;
-            double dy = pt.Y - _resizeStart.Y;
+        // Step 3: a resize moves the grabbed edges, a left or top edge stopping where the minimum size puts it
+        bool isLeftEdge = _resizeEdge is WidgetResizeEdge.Left or WidgetResizeEdge.TopLeft or WidgetResizeEdge.BottomLeft;
+        bool isRightEdge = _resizeEdge is WidgetResizeEdge.Right or WidgetResizeEdge.TopRight or WidgetResizeEdge.BottomRight;
+        bool isTopEdge = _resizeEdge is WidgetResizeEdge.Top or WidgetResizeEdge.TopLeft or WidgetResizeEdge.TopRight;
+        bool isBottomEdge = _resizeEdge is WidgetResizeEdge.Bottom or WidgetResizeEdge.BottomLeft or WidgetResizeEdge.BottomRight;
 
-            double newLeft = _startLeftResize;
-            double newTop = _startTopResize;
-            double newWidth = _startWidth;
-            double newHeight = _startHeight;
+        double newLeft = startRect.X;
+        double newTop = startRect.Y;
+        double newWidth = startRect.Width;
+        double newHeight = startRect.Height;
 
-            if (_resizeEdge is WidgetResizeEdge.Left or WidgetResizeEdge.TopLeft or WidgetResizeEdge.BottomLeft) { newLeft = _startLeftResize + dx; newWidth = _startWidth - dx; }
-            if (_resizeEdge is WidgetResizeEdge.Right or WidgetResizeEdge.TopRight or WidgetResizeEdge.BottomRight) { newWidth = _startWidth + dx; }
-            if (_resizeEdge is WidgetResizeEdge.Top or WidgetResizeEdge.TopLeft or WidgetResizeEdge.TopRight) { newTop = _startTopResize + dy; newHeight = _startHeight - dy; }
-            if (_resizeEdge is WidgetResizeEdge.Bottom or WidgetResizeEdge.BottomLeft or WidgetResizeEdge.BottomRight) { newHeight = _startHeight + dy; }
+        if (isLeftEdge) { newLeft = startRect.X + deltaX; newWidth = startRect.Width - deltaX; }
+        if (isRightEdge) { newWidth = startRect.Width + deltaX; }
+        if (isTopEdge) { newTop = startRect.Y + deltaY; newHeight = startRect.Height - deltaY; }
+        if (isBottomEdge) { newHeight = startRect.Height + deltaY; }
 
-            if (newWidth < ContainerMinWidth) { newWidth = ContainerMinWidth; if (_resizeEdge is WidgetResizeEdge.Left or WidgetResizeEdge.TopLeft or WidgetResizeEdge.BottomLeft) newLeft = _startLeftResize + (_startWidth - ContainerMinWidth); }
-            if (newHeight < ContainerMinHeight) { newHeight = ContainerMinHeight; if (_resizeEdge is WidgetResizeEdge.Top or WidgetResizeEdge.TopLeft or WidgetResizeEdge.TopRight) newTop = _startTopResize + (_startHeight - ContainerMinHeight); }
+        if (newWidth < ContainerMinWidth) { newWidth = ContainerMinWidth; if (isLeftEdge) newLeft = startRect.X + (startRect.Width - ContainerMinWidth); }
+        if (newHeight < ContainerMinHeight) { newHeight = ContainerMinHeight; if (isTopEdge) newTop = startRect.Y + (startRect.Height - ContainerMinHeight); }
 
-            ClampTitleBar(canvas, ref newLeft, ref newTop);
-            Width = newWidth;
-            Height = newHeight;
-            Canvas.SetLeft(this, newLeft);
-            Canvas.SetTop(this, newTop);
-        }
+        // Step 4: the new rect, its title bar kept on the canvas
+        ClampTitleBar(canvas, ref newLeft, ref newTop);
+        Width = newWidth;
+        Height = newHeight;
+        Canvas.SetLeft(this, newLeft);
+        Canvas.SetTop(this, newTop);
     }
 
     private void OnRootPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
         e.Pointer.Capture(null);
-        _isDragging = false;
-        _isResizing = false;
-        _resizeEdge = WidgetResizeEdge.None;
-        this.Cursor = Cursor.Default;
+        EndPointerGesture();
     }
 
-    private void OnRootPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    /// Ends a drag or resize: the pointer released, or its capture lost.
+    private void EndPointerGesture()
     {
         _isDragging = false;
         _isResizing = false;
@@ -263,35 +244,20 @@ public partial class WidgetContainer : UserControl
         this.Cursor = Cursor.Default;
     }
 
-    private void StartDrag(PointerPressedEventArgs e)
-    {
-        Canvas? canvas = GetParentCanvas();
-        if (canvas == null) return;
-        _isDragging = true;
-        _isResizing = false;
-        _dragStart = e.GetPosition(canvas);
-        _startLeft = Canvas.GetLeft(this);
-        _startTop = Canvas.GetTop(this);
-        if (double.IsNaN(_startLeft)) _startLeft = 0;
-        if (double.IsNaN(_startTop)) _startTop = 0;
-        e.Pointer.Capture(this);
-        e.Handled = true;
-    }
+    private void StartDrag(PointerPressedEventArgs e) => StartPointerGesture(e, isResizing: false, WidgetResizeEdge.None);
 
-    private void StartResize(PointerPressedEventArgs e, WidgetResizeEdge edge)
+    private void StartResize(PointerPressedEventArgs e, WidgetResizeEdge resizeEdge) => StartPointerGesture(e, isResizing: true, resizeEdge);
+
+    /// Starts a drag or a resize from where the pointer and the container are now, capturing the pointer; nothing off a canvas.
+    private void StartPointerGesture(PointerPressedEventArgs e, bool isResizing, WidgetResizeEdge resizeEdge)
     {
         Canvas? canvas = GetParentCanvas();
         if (canvas == null) return;
-        _isDragging = false;
-        _isResizing = true;
-        _resizeEdge = edge;
-        _resizeStart = e.GetPosition(canvas);
-        _startLeftResize = Canvas.GetLeft(this);
-        _startTopResize = Canvas.GetTop(this);
-        if (double.IsNaN(_startLeftResize)) _startLeftResize = 0;
-        if (double.IsNaN(_startTopResize)) _startTopResize = 0;
-        _startWidth = Bounds.Width > 0 ? Bounds.Width : Width;
-        _startHeight = Bounds.Height > 0 ? Bounds.Height : Height;
+        _isDragging = !isResizing;
+        _isResizing = isResizing;
+        _resizeEdge = resizeEdge;
+        _pointerGestureStartPoint = e.GetPosition(canvas);
+        _pointerGestureStartRect = GetLayoutRect();
         e.Pointer.Capture(this);
         e.Handled = true;
     }

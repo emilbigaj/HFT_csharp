@@ -2,16 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.IO;
-using System.Linq;
-using System.Timers;
-using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Input;
-using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
-using Avalonia.VisualTree;
 using Data;
 using Execution;
 using Provider;
@@ -20,6 +13,8 @@ using Tools;
 namespace Widget;
 
 
+/// One instrument's risk-limit grid row: the server's limits, working risk and position for it. Refreshed on the widget's
+/// refresh timer thread; cold path.
 public sealed class WidgetRiskLimit : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -46,95 +41,36 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
 
     public string Timestamp => _riskLimit.Timestamp == Tools.Timestamp.MinValue ? "—" : _riskLimit.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
 
-    public WidgetRiskLimit(Instrument instrument, int positionQuantity, RiskLimit riskLimit, WorkingRisk workingRisk)
+    public WidgetRiskLimit(Instrument instrument) => _instrument = instrument;
+
+    /// Takes the instrument's latest limits, working risk and position and re-evaluates every binding.
+    public void Refresh(in RiskLimit riskLimit, in WorkingRisk workingRisk, int positionQuantity)
     {
-        _instrument = instrument;
         _riskLimit = riskLimit;
         _workingRisk = workingRisk;
         _positionQuantity = positionQuantity;
-    }
-
-    /// <summary>
-    /// Pull current values from shared memory + position.
-    /// Returns true if anything changed and bindings should be re-evaluated.
-    /// </summary>
-    public bool Refresh(in RiskLimit newRiskLimit, in WorkingRisk newWorkingRisk, int newPositionQuantity)
-    {
-        bool changed =
-            !RiskLimitEquals(_riskLimit, newRiskLimit) ||
-            !WorkingRiskEquals(_workingRisk, newWorkingRisk) ||
-            _positionQuantity != newPositionQuantity;
-
-        _riskLimit = newRiskLimit;
-        _workingRisk = newWorkingRisk;
-        _positionQuantity = newPositionQuantity;
-
-        if (changed)
-        {
-            // Refresh all bindings
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
-        }
-
-        return changed;
-    }
-
-    private static bool RiskLimitEquals(in RiskLimit a, in RiskLimit b)
-    {
-        return a.MaxOrderQuantity == b.MaxOrderQuantity
-            && a.MaxPositionQuantity == b.MaxPositionQuantity
-            && a.Timestamp == b.Timestamp;
-    }
-
-    private static bool WorkingRiskEquals(in WorkingRisk a, in WorkingRisk b)
-    {
-        return a.Position == b.Position
-            && a.WorstLongWorkingQuantity == b.WorstLongWorkingQuantity
-            && a.WorstShortWorkingQuantity == b.WorstShortWorkingQuantity;
-    }
-
-    private static string FormatDuration(Duration d)
-    {
-        double seconds = d.TotalSeconds;
-        if (seconds <= 0) return "—";
-        if (seconds < 1) return $"{d.TotalMilliseconds:N0}ms";
-        if (seconds < 60) return $"{seconds:0.##}s";
-        if (seconds < 3600) return $"{seconds / 60:0.##}m";
-        return $"{seconds / 3600:0.##}h";
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));   // null: every property
     }
 }
 
 
-[RegisterJson]
-public class RiskLimitsColumnState
-{
-    public string Header { get; set; } = "";
-    public double Width { get; set; }
-    public int DisplayIndex { get; set; }
-    public bool IsVisible { get; set; }
-}
 
-[RegisterJson]
-public class RiskLimitsWidgetState
-{
-    public List<RiskLimitsColumnState> Columns { get; set; } = new();
-}
-
-
+/// Lists the server's risk limits for each instrument allocated in the workspace's principal, refreshed every 250 ms. The
+/// right-click menu toggles columns on a header, and edits the limits and offers the server's .risklimit file and folder on a
+/// row. UI thread and the refresh timer's thread; cold path.
 public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
 {
     private readonly WorkspaceContext _context;
-    private readonly Timer _refreshTimer;
-    private bool _disposed;
+    private readonly WidgetRefreshTimer _refreshTimer;
 
-    private readonly Dictionary<int, WidgetRiskLimit> _rowsByInstrumentId = new();
+    private readonly Dictionary<int, WidgetRiskLimit> _rowsByInstrumentId = new();   // refresh timer thread only
     public ObservableCollection<WidgetRiskLimit> Rows { get; } = new();
 
-    public string TypeKey => "RiskLimitsWidget";
     public string Title { get; private set; } = "Risk Limits";
     public double DefaultWidth => 820;
     public double DefaultHeight => 320;
 
-    private Avalonia.Point _lastPointerPos;
+    private Avalonia.Point _lastPointerPosition;
 
     public RiskLimitsWidget()
     {
@@ -152,12 +88,9 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
         DataContext = this;
         RiskLimitsGrid.ItemsSource = Rows;
 
-        RiskLimitsGrid.PointerMoved += (_, e) => _lastPointerPos = e.GetPosition(RiskLimitsGrid);
+        RiskLimitsGrid.PointerMoved += (_, pointerEventArgs) => _lastPointerPosition = pointerEventArgs.GetPosition(RiskLimitsGrid);
 
-        _refreshTimer = new Timer(250);
-        _refreshTimer.Elapsed += OnRefresh;
-        _refreshTimer.AutoReset = false;
-        _refreshTimer.Start();
+        _refreshTimer = new WidgetRefreshTimer(nameof(RiskLimitsWidget), 250, Refresh);
     }
 
     // Both read the server row, never Primary: limits are server-wide and RiskLayer gates them on the server position.
@@ -167,282 +100,100 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
 
     private static int GetPositionQuantity(int instrumentId) => ContextManager.ServerContext.GetPosition(instrumentId).Profit.Quantity;
 
-    private void OnRefresh(object? sender, ElapsedEventArgs e)
+    /// Refreshes each allocated instrument's row in place, creating it on first sight, and posts the active rows to the grid.
+    private void Refresh()
     {
-        if (_disposed) return;
-
-        try
+        // Step 1: each allocated instrument's row
+        List<WidgetRiskLimit> activeRows = new(_rowsByInstrumentId.Count);
+        foreach (int instrumentId in _context.Primary.InstrumentIds)
         {
-            Bitset64 subscribed = _context.Primary.InstrumentIds;
-
-            // Add brand-new instruments to the dict (timer thread only owns the dict).
-            foreach (int instrumentId in subscribed)
+            _rowsByInstrumentId.TryGetValue(instrumentId, out WidgetRiskLimit? widgetRiskLimit);
+            // Why the catch: an instrument not fully ready yet gets its row, or its row's new values, on a later pass
+            try
             {
-                if (!_rowsByInstrumentId.ContainsKey(instrumentId))
+                RiskLimit riskLimit = GetRiskLimit(instrumentId);
+                WorkingRisk workingRisk = GetWorkingRisk(instrumentId);
+                int positionQuantity = GetPositionQuantity(instrumentId);
+                if (widgetRiskLimit == null)
                 {
-                    try
-                    {
-                        Instrument instrument = _context.Primary.GetInstrument(instrumentId);
-                        int positionQuantity = GetPositionQuantity(instrumentId);
-                        RiskLimit riskLimit = GetRiskLimit(instrumentId);
-                        WorkingRisk workingRisk = GetWorkingRisk(instrumentId);
-                        _rowsByInstrumentId[instrumentId] = new WidgetRiskLimit(instrument, positionQuantity, riskLimit, workingRisk);
-                    }
-                    catch
-                    {
-                        // Instrument not fully ready yet; try next tick.
-                    }
+                    widgetRiskLimit = new WidgetRiskLimit(_context.Primary.GetInstrument(instrumentId));
+                    _rowsByInstrumentId[instrumentId] = widgetRiskLimit;
                 }
+                widgetRiskLimit.Refresh(in riskLimit, in workingRisk, positionQuantity);
             }
-
-            // Snapshot the active set + refresh in-place (PropertyChanged is safe to fire from any thread for ObservableCollection items).
-            List<WidgetRiskLimit> active = new List<WidgetRiskLimit>(_rowsByInstrumentId.Count);
-            foreach (var kvp in _rowsByInstrumentId)
-            {
-                int instrumentId = kvp.Key;
-                WidgetRiskLimit row = kvp.Value;
-                if (!subscribed[instrumentId]) continue;
-
-                try
-                {
-                    RiskLimit current = GetRiskLimit(instrumentId);
-                    WorkingRisk workingRisk = GetWorkingRisk(instrumentId);
-                    int positionQty = GetPositionQuantity(instrumentId);
-                    row.Refresh(in current, in workingRisk, positionQty);
-                }
-                catch
-                {
-                    // Skip refresh of this row this tick.
-                }
-
-                active.Add(row);
-            }
-
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (_disposed) return;
-
-                // Remove rows for instruments that are no longer subscribed.
-                for (int i = Rows.Count - 1; i >= 0; i--)
-                {
-                    if (!active.Contains(Rows[i]))
-                    {
-                        Rows.RemoveAt(i);
-                    }
-                }
-
-                // Add newly active rows.
-                foreach (var r in active)
-                {
-                    if (!Rows.Contains(r))
-                    {
-                        Rows.Add(r);
-                    }
-                }
-            });
+            catch { }
+            if (widgetRiskLimit != null)
+                activeRows.Add(widgetRiskLimit);
         }
-        catch (Exception ex)
+
+        // Step 2: the grid shows exactly the active rows
+        Dispatcher.UIThread.Post(() =>
         {
-            Console.WriteLine($"RiskLimitsWidget Error: {ex.Message}");
-        }
-        finally
-        {
-            if (!_disposed) _refreshTimer.Start();
-        }
+            if (!_refreshTimer.IsDisposed)
+                Rows.ReconcileRows(activeRows);
+        });
     }
 
+    /// Fills the grid's right-click menu: column toggles on a header; edit, the instrument's file path and the folder on a row, the folder elsewhere.
     private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
     {
-        var menu = sender as ContextMenu;
-        if (menu == null || RiskLimitsGrid == null) return;
+        if (sender is not ContextMenu contextMenu)
+            return;
+        contextMenu.Items.Clear();
 
-        menu.Items.Clear();
-
-        // Header cell hit-test → show column-toggle list.
-        var visual = RiskLimitsGrid.InputHitTest(_lastPointerPos) as Visual;
-        bool isHeader = false;
-        DataGridRow? hitRow = null;
-
-        var v = visual;
-        while (v != null)
+        // Step 1: a header lists the columns to toggle
+        DataGridHit dataGridHit = RiskLimitsGrid.GetDataGridHit(_lastPointerPosition);
+        if (dataGridHit.IsColumnHeader)
         {
-            if (v is DataGridColumnHeader)
-            {
-                isHeader = true;
-                break;
-            }
-            if (v is DataGridRow row)
-            {
-                hitRow = row;
-            }
-            v = v.GetVisualParent() as Visual;
+            contextMenu.AddColumnVisibilityMenuItems(RiskLimitsGrid);
+            return;
         }
+
+        // Step 2: a row names its instrument, edits its limits and copies its file path
         ServerContext serverContext = ContextManager.ServerContext;
-
-        if (isHeader)
+        if (dataGridHit.RowItem is WidgetRiskLimit widgetRiskLimit)
         {
-            foreach (DataGridColumn col in RiskLimitsGrid.Columns)
-            {
-                string header = col.Header?.ToString() ?? "Column";
-                MenuItem item = new MenuItem
-                {
-                    Header = header,
-                    ToggleType = MenuItemToggleType.CheckBox,
-                    IsChecked = col.IsVisible
-                };
-                item.Click += (_, _) => col.IsVisible = !col.IsVisible;
-                menu.Items.Add(item);
-            }
+            contextMenu.Items.Add(WidgetMenus.NewTitleMenuItem(widgetRiskLimit.ShortSymbol));
+            contextMenu.Items.Add(new Separator());
+            contextMenu.Items.Add(WidgetMenus.NewMenuItem("Edit RiskLimit", "✏", async () => await EditRiskLimit(widgetRiskLimit)));
+            contextMenu.Items.Add(new Separator());
+            contextMenu.Items.Add(WidgetMenus.NewCopyPathMenuItem(this, "Copy Server .risklimit File Path", Context.GetRiskLimitsFilePath(serverContext.DirectoryPath, widgetRiskLimit.Symbol)));
         }
-        else if (hitRow != null && hitRow.DataContext is WidgetRiskLimit riskLimit)
-        {
-            var headerItem = new MenuItem { Header = riskLimit.ShortSymbol, FontWeight = Avalonia.Media.FontWeight.Bold, IsEnabled = false };
-            menu.Items.Add(headerItem);
-            menu.Items.Add(new Separator());
 
-            var editItem = new MenuItem { Header = "Edit RiskLimit", Icon = new TextBlock { Text = "✏" } };
-            editItem.Click += async (_, _) => await EditRiskLimit(riskLimit);
-            menu.Items.Add(editItem);
-            menu.Items.Add(new Separator());
-
-            FileSystemPath filePath = Context.GetRiskLimitsFilePath(serverContext.DirectoryPath, riskLimit.Symbol);
-            var copyPathItem = new MenuItem { Header = "Copy Server .risklimit File Path", Icon = new TextBlock { Text = "📋" } };
-            copyPathItem.Click += async (_, _) =>
-            {
-                try
-                {
-                    var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-                    if (clipboard != null) await clipboard.SetTextAsync(filePath);
-                }
-                catch { }
-            };
-            menu.Items.Add(copyPathItem);
-
-            var openFolderItem = new MenuItem { Header = "Open Server RiskLimits Folder", Icon = new TextBlock { Text = "📁" } };
-            openFolderItem.Click += (_, _) => OpenInExplorer(serverContext.RiskLimitsDirectoryPath.ToString());
-            menu.Items.Add(openFolderItem);
-        }
-        else
-        {
-            var openFolderItem = new MenuItem { Header = "Open Server RiskLimits Folder", Icon = new TextBlock { Text = "📁" } };
-            openFolderItem.Click += (_, _) => OpenInExplorer(serverContext.RiskLimitsDirectoryPath.ToString());
-            menu.Items.Add(openFolderItem);
-        }
+        // Step 3: the folder, from anywhere off the header
+        contextMenu.Items.Add(WidgetMenus.NewOpenFolderMenuItem("Open Server RiskLimits Folder", serverContext.RiskLimitsDirectoryPath.ToString()));
     }
 
-    private async System.Threading.Tasks.Task EditRiskLimit(WidgetRiskLimit row)
+    /// Opens the edit dialog on the instrument's current limits and sends the edit to the server as a ControlRiskLimit; logs a failure.
+    private async System.Threading.Tasks.Task EditRiskLimit(WidgetRiskLimit widgetRiskLimit)
     {
+        // Why the catch: a failed edit must not take down the GUI; it is logged and the limits stay as they were
         try
         {
-            Window? window = TopLevel.GetTopLevel(this) as Window;
-            if (window == null) return;
+            // Step 1: the dialog, on a fresh read rather than the row's cached limits, which can be one refresh stale
+            if (TopLevel.GetTopLevel(this) is not Window window)
+                return;
+            RiskLimit riskLimit = GetRiskLimit(widgetRiskLimit.InstrumentId);
+            RiskLimitEditDialog riskLimitEditDialog = new(widgetRiskLimit.ShortSymbol, riskLimit);
+            ControlRiskLimit? editedControlRiskLimit = await riskLimitEditDialog.ShowDialog<ControlRiskLimit?>(window);
+            if (editedControlRiskLimit == null)
+                return;
 
-            // Read a fresh copy rather than using the row's cached value, which can be up to one
-            // refresh tick stale, so the dialog shows the current limits.
-            RiskLimit current = GetRiskLimit(row.InstrumentId);
-
-            RiskLimitEditDialog dialog = new RiskLimitEditDialog(row.ShortSymbol, current);
-            ControlRiskLimit? edited = await dialog.ShowDialog<ControlRiskLimit?>(window);
-            if (edited == null) return;
-
-            // The request travels on the instrument's execution channel, which the server polls only
-            // for clients allocated in that CoreGroup: allocate first if this GUI client is not yet
-            // (queued ahead of the request on the manual client's owner thread, blocks on the echo).
-            if (!_context.Manual.Context.InstrumentIds[row.InstrumentId])
-                _context.Manual.OnAllocateInstrument(_context.Primary.GetInstrument(row.InstrumentId).Header.InstrumentHeaderId);
-
-            // A request, not a row: the server's CoreGroup thread applies it in place and stamps the
-            // timestamp, the logging server appends the .risklimit line. The grid picks the change up
-            // on its next refresh.
-            ControlRiskLimit controlRiskLimit = edited.Value;
+            // Step 2: send the request on the instrument's execution channel; the server stamps and applies it, the logging server appends the .risklimit line, the grid shows it on its next refresh
+            _context.AllocateToManualClient(widgetRiskLimit.InstrumentId);
+            ControlRiskLimit controlRiskLimit = editedControlRiskLimit.Value;
             controlRiskLimit.ClientId = _context.Manual.Context.ClientId;
             _context.Manual.OnControlRiskLimit(in controlRiskLimit);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            Console.WriteLine($"RiskLimitsWidget.EditRiskLimit Error: {ex.Message}");
+            Console.WriteLine($"RiskLimitsWidget.EditRiskLimit: {exception.Message}");
         }
     }
 
-    private static void OpenInExplorer(string path)
-    {
-        try
-        {
-            if (!Directory.Exists(path)) return;
+    public string? SaveStateJson() => DataGridWidgetState.NewStateJson(RiskLimitsGrid);
 
-            if (OperatingSystem.IsWindows())
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = path,
-                    UseShellExecute = true
-                });
-                return;
-            }
+    public void LoadStateJson(string? json) => DataGridWidgetState.LoadStateJson(RiskLimitsGrid, json);
 
-            string opener = OperatingSystem.IsMacOS() ? "open" : "xdg-open";
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = opener,
-                ArgumentList = { path },
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            });
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"RiskLimitsWidget.OpenInExplorer Error: {ex.Message}");
-        }
-    }
-
-    public string? SaveStateJson()
-    {
-        var state = new RiskLimitsWidgetState();
-        foreach (var col in RiskLimitsGrid.Columns)
-        {
-            state.Columns.Add(new RiskLimitsColumnState
-            {
-                Header = col.Header?.ToString() ?? "",
-                Width = col.Width.Value,
-                DisplayIndex = col.DisplayIndex,
-                IsVisible = col.IsVisible
-            });
-        }
-        return Json.Serialize(state);
-    }
-
-    public void LoadStateJson(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return;
-        try
-        {
-            var state = Json.Deserialize<RiskLimitsWidgetState>(json);
-            if (state == null) return;
-
-            foreach (var colState in state.Columns)
-            {
-                var col = RiskLimitsGrid.Columns.FirstOrDefault(c => (c.Header?.ToString() ?? "") == colState.Header);
-                if (col != null)
-                {
-                    col.Width = new DataGridLength(colState.Width);
-                    col.DisplayIndex = colState.DisplayIndex;
-                    col.IsVisible = colState.IsVisible;
-                }
-            }
-        }
-        catch { }
-    }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-
-        if (_refreshTimer != null)
-        {
-            _refreshTimer.Stop();
-            _refreshTimer.Dispose();
-        }
-    }
+    public void Dispose() => _refreshTimer?.Dispose();
 }

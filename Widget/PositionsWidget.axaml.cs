@@ -1,38 +1,29 @@
 //BEGIN_FILE HFT/Widget/PositionsWidget.axaml.cs
 using System;
-using System.Collections.ObjectModel;
 using System.Collections.Generic;
-using System.Linq;
-using System.Timers;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using Data;
+using Execution;
 using Provider;
 using Tools;
 
-
-using System.ComponentModel;
-using System.Runtime.CompilerServices;
-using Data;
-using Avalonia.VisualTree;
-using Avalonia.Input;
-using Avalonia;
-using Execution;
-
 namespace Widget;
 
-
+/// One instrument's row in the Positions grid: its profit, refreshed in place by the widget's timer thread. Cold path.
 public sealed class WidgetPosition : INotifyPropertyChanged
 {
+    public Instrument Instrument => _position.Instrument;
     public string Symbol => _position.Instrument.Symbol;
     public string ShortSymbol => _position.Instrument.ShortSymbol;
     public int InstrumentId => _position.Instrument.InstrumentId;
 
     public int StrategyId => _position.PositionHeader.GetReadonlyRef().OrderHeader.OrderId.StrategyId;
-    public readonly Position _position;
-    private Profit _profit;
     public AlgoStatus AlgoStatus => _position.AlgoStatus;
-    public double AvgPrice => _profit.AvgPrice;
     public string AvgPriceStr => _profit.AvgPrice.ToString(_avgPriceFormat);
     public double Profit => _profit.Total;
     public double Floating => _profit.Floating;
@@ -42,51 +33,46 @@ public sealed class WidgetPosition : INotifyPropertyChanged
     public int QuantityTraded => _position.PositionHeader.GetReadonlyRef().QuantityTraded;
     public double ProfitPerSide => QuantityTraded == 0 ? 0 : Profit / QuantityTraded;
 
-    public Timestamp Timestamp => _profit.Timestamp;
+    private readonly Position _position;
+    private Profit _profit;
+    private readonly string _avgPriceFormat;   // Why two more decimals than the instrument's PriceFormat: an average of fills falls between ticks
 
     public event PropertyChangedEventHandler? PropertyChanged;
-    private string _avgPriceFormat;
+
     public WidgetPosition(Position position)
     {
         _position = position;
         _profit = _position.Profit;
-        _avgPriceFormat = $"N{position.Instrument.TicKDecimals + 2}";
+        _avgPriceFormat = $"N{position.Instrument.TickDecimals + 2}";
     }
 
+    /// Takes the position's latest profit and tells the grid every column changed.
     public void Refresh()
     {
-        var newProfit = _position.Profit;
-        _profit = newProfit;
-        OnPropertyChanged("");
-    }
-
-    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
-    {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        _profit = _position.Profit;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(""));
     }
 }
 
-
+/// Lists the primary client's position on each allocated instrument, with algo pause and resume, order entry and a
+/// ladder on right-click, and Pause/Resume All in the title bar. The rows are refreshed on a timer thread and applied
+/// on the UI thread. Cold path (GUI).
 public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
 {
     private readonly WorkspaceContext _context;
-    private readonly Timer _refreshTimer;
-    private bool _disposed;
-    private Dictionary<int, WidgetPosition> _positions = new Dictionary<int, WidgetPosition>();
-    private List<WidgetPosition> _active = new List<WidgetPosition>();
+    private readonly WidgetRefreshTimer _refreshTimer;
+    private readonly Dictionary<int, WidgetPosition> _widgetPositionsByInstrumentId = new();   // timer thread only
+    private readonly List<WidgetPosition> _activeWidgetPositions = new();   // timer thread writes; the UI post reads it before the next pass
 
-    public string TypeKey => "PositionsWidget";
     public string Title { get; private set; }
     public ObservableCollection<WidgetPosition> Rows { get; } = new();
 
     public double DefaultWidth => 715;
     public double DefaultHeight => 185;
 
-    // --- EXPOSE XAML RESOURCE TO WIDGET CONTAINER ---
-    public object? TitleBarContent { get; private set; }
+    public object? TitleBarContent => Resources["TitleBarButtons"];
 
-    // Cached pointer position for hit testing context menu
-    private Avalonia.Point _lastPointerPos;
+    private Avalonia.Point _lastPointerPosition;   // the pointer over the grid, where a right-click menu was asked for
 
     public PositionsWidget()
     {
@@ -104,251 +90,114 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
         InitializeComponent();
         DataContext = this;
         PositionsGrid.ItemsSource = Rows;
-
-        // Grab the buttons we designed in AXAML
-        if (this.Resources.TryGetValue("TitleBarButtons", out var buttons))
-        {
-            TitleBarContent = buttons;
-        }
-
-        // Pointer tracking for Context Menu Hit Testing
-        PositionsGrid.PointerMoved += OnPositionsGridPointerMoved;
-
-        _refreshTimer = new Timer(100);
-        _refreshTimer.Elapsed += OnRefresh;
-
-        _refreshTimer.AutoReset = false;
-        _refreshTimer.Start();
+        PositionsGrid.PointerMoved += (_, pointerEventArgs) => _lastPointerPosition = pointerEventArgs.GetPosition(PositionsGrid);
+        _refreshTimer = new WidgetRefreshTimer(nameof(PositionsWidget), 100, Refresh);
     }
 
-    private void OnPositionsGridPointerMoved(object? sender, PointerEventArgs e)
-    {
-        _lastPointerPos = e.GetPosition(PositionsGrid);
-    }
-
+    /// Fills the grid's right-click menu: the all-algo items and column toggles on a header, the position's items on a row,
+    /// the all-algo items elsewhere.
     private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
     {
-        var menu = sender as ContextMenu;
-        if (menu == null || PositionsGrid == null) return;
+        if (sender is not ContextMenu contextMenu)
+            return;
+        contextMenu.Items.Clear();
 
-        menu.Items.Clear();
-
-        var visual = PositionsGrid.InputHitTest(_lastPointerPos) as Visual;
-
-        bool isHeader = false;
-        DataGridRow? hitRow = null;
-
-        var v = visual;
-        while (v != null)
+        DataGridHit dataGridHit = PositionsGrid.GetDataGridHit(_lastPointerPosition);
+        if (dataGridHit.IsColumnHeader)
         {
-            if (v is DataGridColumnHeader)
-            {
-                isHeader = true;
-                break;
-            }
-            if (v is DataGridRow row)
-            {
-                hitRow = row;
-            }
-            v = v.GetVisualParent() as Visual;
+            AddAllAlgoStatusMenuItems(contextMenu);
+            contextMenu.Items.Add(new Separator());
+            contextMenu.AddColumnVisibilityMenuItems(PositionsGrid);
         }
-
-        if (isHeader)
-        {
-            MenuItem pauseAllItem = new MenuItem { Header = "Pause All Algos", Icon = new TextBlock { Text = "⏸" } };
-            pauseAllItem.Click += (_, _) => PerformChangeAllAlgoStatus(AlgoStatus.Paused);
-            menu.Items.Add(pauseAllItem);
-
-            MenuItem resumeAllItem = new MenuItem { Header = "Resume All Algos", Icon = new TextBlock { Text = "▶" } };
-            resumeAllItem.Click += (_, _) => PerformChangeAllAlgoStatus(AlgoStatus.Live);
-            menu.Items.Add(resumeAllItem);
-
-            menu.Items.Add(new Separator());
-
-            foreach (var col in PositionsGrid.Columns)
-            {
-                var header = col.Header?.ToString() ?? "Column";
-                var item = new MenuItem
-                {
-                    Header = header,
-                    ToggleType = MenuItemToggleType.CheckBox,
-                    IsChecked = col.IsVisible
-                };
-                item.Click += (_, _) => col.IsVisible = !col.IsVisible;
-                menu.Items.Add(item);
-            }
-        }
-        else if (hitRow != null && hitRow.DataContext is WidgetPosition pos)
-        {
-            var headerItem = new MenuItem { Header = $"{pos.ShortSymbol}" };
-            menu.Items.Add(headerItem);
-
-            menu.Items.Add(new Separator());
-
-            if (pos.AlgoStatus == AlgoStatus.Live)
-            {
-                MenuItem algoItem = new MenuItem { Header = $"Pause Algo", Icon = new TextBlock { Text = "⏸" } };
-                algoItem.Click += (_, _) => PerformChangeAlgoStatus(pos, AlgoStatus.Paused);
-                menu.Items.Add(algoItem);
-            }
-            else
-            {
-                MenuItem algoItem = new MenuItem { Header = $"Resume Algo", Icon = new TextBlock { Text = "▶" } };
-                algoItem.Click += (_, _) => PerformChangeAlgoStatus(pos, AlgoStatus.Live);
-                menu.Items.Add(algoItem);
-            }
-
-            menu.Items.Add(new Separator());
-
-            var createItem = new MenuItem { Header = $"Create Order", Icon = new TextBlock { Text = "📝" } };
-            createItem.Click += (_, _) => PerformCreateOrder(pos);
-            menu.Items.Add(createItem);
-
-            var closeItem = new MenuItem { Header = "Create Close Order", Icon = new TextBlock { Text = "❌" } };
-            closeItem.Click += (_, _) => PerformClosePosition(pos);
-            menu.Items.Add(closeItem);
-
-            menu.Items.Add(new Separator());
-
-            var ladderItem = new MenuItem { Header = "Open Ladder", Icon = new TextBlock { Text = "🪜" } };
-            ladderItem.Click += (_, _) => PerformOpenLadder(pos);
-            menu.Items.Add(ladderItem);
-        }
+        else if (dataGridHit.RowItem is WidgetPosition widgetPosition)
+            AddPositionMenuItems(contextMenu, widgetPosition);
         else
-        {
-            MenuItem pauseAllItem = new MenuItem { Header = "Pause All Algos", Icon = new TextBlock { Text = "⏸" } };
-            pauseAllItem.Click += (_, _) => PerformChangeAllAlgoStatus(AlgoStatus.Paused);
-            menu.Items.Add(pauseAllItem);
-
-            MenuItem resumeAllItem = new MenuItem { Header = "Resume All Algos", Icon = new TextBlock { Text = "▶" } };
-            resumeAllItem.Click += (_, _) => PerformChangeAllAlgoStatus(AlgoStatus.Live);
-            menu.Items.Add(resumeAllItem);
-        }
+            AddAllAlgoStatusMenuItems(contextMenu);
     }
 
-    private void PerformChangeAlgoStatus(WidgetPosition pos, AlgoStatus targetAlgoStatus)
+    /// Pause All Algos and Resume All Algos.
+    private void AddAllAlgoStatusMenuItems(ContextMenu contextMenu)
     {
-        // The control travels on the instrument's execution channel, which the server polls only
-        // for clients allocated in that CoreGroup: allocate first if this GUI client is not yet
-        // (queued ahead of the control on the manual client's owner thread, blocks on the echo).
-        if (!_context.Manual.Context.InstrumentIds[pos.InstrumentId])
-            _context.Manual.OnAllocateInstrument(_context.Primary.GetInstrument(pos.InstrumentId).Header.InstrumentHeaderId);
+        contextMenu.Items.Add(WidgetMenus.NewMenuItem("Pause All Algos", "⏸", () => PerformChangeAllAlgoStatus(AlgoStatus.Paused)));
+        contextMenu.Items.Add(WidgetMenus.NewMenuItem("Resume All Algos", "▶", () => PerformChangeAllAlgoStatus(AlgoStatus.Live)));
+    }
 
+    /// The position's title, its algo's pause or resume, order entry and the ladder.
+    private void AddPositionMenuItems(ContextMenu contextMenu, WidgetPosition widgetPosition)
+    {
+        // Step 1: title and the algo's pause or resume, whichever changes it
+        contextMenu.Items.Add(WidgetMenus.NewTitleMenuItem(widgetPosition.ShortSymbol));
+        contextMenu.Items.Add(new Separator());
+        bool isAlgoLive = widgetPosition.AlgoStatus == AlgoStatus.Live;
+        contextMenu.Items.Add(WidgetMenus.NewMenuItem(isAlgoLive ? "Pause Algo" : "Resume Algo", isAlgoLive ? "⏸" : "▶",
+            () => PerformChangeAlgoStatus(widgetPosition, isAlgoLive ? AlgoStatus.Paused : AlgoStatus.Live)));
+
+        // Step 2: order entry
+        contextMenu.Items.Add(new Separator());
+        contextMenu.Items.Add(WidgetMenus.NewMenuItem("Create Order", "📝", () => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, widgetPosition.Instrument))));
+        contextMenu.Items.Add(WidgetMenus.NewMenuItem("Create Close Order", "❌", () => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, widgetPosition.Instrument, quantity: -widgetPosition.Quantity))));
+
+        // Step 3: the ladder
+        contextMenu.Items.Add(new Separator());
+        contextMenu.Items.Add(WidgetMenus.NewMenuItem("Open Ladder", "🪜", () => this.AddToHost(LadderWidget.NewLadder(_context, widgetPosition.InstrumentId))));
+    }
+
+    /// Sends the control that pauses or resumes the algo on this position's instrument and strategy.
+    private void PerformChangeAlgoStatus(WidgetPosition widgetPosition, AlgoStatus targetAlgoStatus)
+    {
+        // Step 1: the server polls the control's execution channel only once the manual client holds the instrument
+        _context.AllocateToManualClient(widgetPosition.InstrumentId);
+
+        // Step 2: send the control
         ControlAlgoStatus controlAlgoStatus = new ControlAlgoStatus()
         {
             AlgoStatus = targetAlgoStatus,
-            InstrumentId = pos.InstrumentId,
-            StrategyId = pos.StrategyId,
+            InstrumentId = widgetPosition.InstrumentId,
+            StrategyId = widgetPosition.StrategyId,
             ClientId = _context.Manual.Context.ClientId
         };
         _context.Manual.OnControlAlgoStatus(controlAlgoStatus);
     }
 
+    /// Pauses or resumes the algo of every position the grid shows. Why Rows: only the UI thread writes it, so a click mid-refresh sees a whole list
     private void PerformChangeAllAlgoStatus(AlgoStatus targetAlgoStatus)
     {
-        foreach (var pos in _positions.Values)
-        {
-            if (!_context.Manual.Context.InstrumentIds[pos.InstrumentId])
-                _context.Manual.OnAllocateInstrument(_context.Primary.GetInstrument(pos.InstrumentId).Header.InstrumentHeaderId);
-
-            ControlAlgoStatus controlAlgoStatus = new ControlAlgoStatus()
-            {
-                AlgoStatus = targetAlgoStatus,
-                InstrumentId = pos.InstrumentId,
-                StrategyId = pos.StrategyId,
-                ClientId = _context.Manual.Context.ClientId
-            };
-            _context.Manual.OnControlAlgoStatus(controlAlgoStatus);
-        }
+        foreach (WidgetPosition widgetPosition in Rows)
+            PerformChangeAlgoStatus(widgetPosition, targetAlgoStatus);
     }
 
-    public void OnPauseAllClick(object? sender, RoutedEventArgs e)
+    public void OnPauseAllClick(object? sender, RoutedEventArgs e) => PerformChangeAllAlgoStatus(AlgoStatus.Paused);
+
+    public void OnResumeAllClick(object? sender, RoutedEventArgs e) => PerformChangeAllAlgoStatus(AlgoStatus.Live);
+
+    /// Adds a row for each instrument newly allocated to the primary client, refreshes every row and posts them to the grid. Timer thread.
+    private void Refresh()
     {
-        PerformChangeAllAlgoStatus(AlgoStatus.Paused);
-    }
-
-    public void OnResumeAllClick(object? sender, RoutedEventArgs e)
-    {
-        PerformChangeAllAlgoStatus(AlgoStatus.Live);
-    }
-
-    private void PerformCreateOrder(WidgetPosition pos) => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, pos._position.Instrument));
-
-    private void PerformClosePosition(WidgetPosition pos) => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, pos._position.Instrument, quantity: -pos.Quantity));
-
-    private void PerformOpenLadder(WidgetPosition pos) => this.AddToHost(LadderWidget.NewLadder(_context, pos.InstrumentId));
-
-    private void OnRefresh(object? sender, ElapsedEventArgs e)
-    {
-        if (_disposed)
-            return;
-
-        try
+        // Step 1: a row for each newly allocated instrument
+        Bitset64 instrumentIds = _context.Primary.InstrumentIds;
+        foreach (int instrumentId in instrumentIds)
         {
-            Bitset64 instrumentIds = _context.Primary.InstrumentIds;
-            foreach (int instrumentId in instrumentIds)
-            {
-                if (!_positions.ContainsKey(instrumentId))
-                {
-                    _positions.Add(instrumentId, new WidgetPosition(_context.Primary.GetPosition(instrumentId)));
-                }
-            }
-
-            _active.Clear();
-            foreach (var pos in _positions.Values)
-            {
-                pos.Refresh();
-                _active.Add(pos);
-            }
-
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (_disposed)
-                    return;
-
-                for (int i = Rows.Count - 1; i >= 0; i--)
-                {
-                    if (!_active.Contains(Rows[i]))
-                    {
-                        Rows.RemoveAt(i);
-                    }
-                }
-
-                foreach (var p in _active)
-                {
-                    if (!Rows.Contains(p))
-                    {
-                        Rows.Add(p);
-                    }
-                }
-
-                _refreshTimer.Start();
-            });
+            if (!_widgetPositionsByInstrumentId.ContainsKey(instrumentId))
+                _widgetPositionsByInstrumentId.Add(instrumentId, new WidgetPosition(_context.Primary.GetPosition(instrumentId)));
         }
-        catch (Exception)
+
+        // Step 2: refresh every row and post them to the grid
+        _activeWidgetPositions.Clear();
+        foreach (WidgetPosition widgetPosition in _widgetPositionsByInstrumentId.Values)
         {
-            if (!_disposed)
-                _refreshTimer.Start();
+            widgetPosition.Refresh();
+            _activeWidgetPositions.Add(widgetPosition);
         }
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_refreshTimer.IsDisposed)
+                Rows.ReconcileRows(_activeWidgetPositions);
+        });
     }
 
     public string? SaveStateJson() => null;
     public void LoadStateJson(string? json) { }
-    public void Dispose()
-    {
-        if (_disposed)
-            return;
 
-        _disposed = true;
-
-        if (PositionsGrid != null)
-            PositionsGrid.PointerMoved -= OnPositionsGridPointerMoved;
-
-        if (_refreshTimer != null)
-        {
-            _refreshTimer.Stop();
-            _refreshTimer.Dispose();
-        }
-    }
+    public void Dispose() => _refreshTimer?.Dispose();
 }
 //END_FILE HFT/Widget/PositionsWidget.axaml.cs

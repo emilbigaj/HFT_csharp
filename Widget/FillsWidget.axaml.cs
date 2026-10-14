@@ -1,16 +1,11 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
-using System.IO;
-using System.Linq;
 using System.Threading.Tasks;
 using Avalonia.Collections;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Interactivity;
-using Avalonia.Layout;
 using Avalonia.Threading;
-using Avalonia.VisualTree;
 using Data;
 using Execution;
 using Provider;
@@ -41,6 +36,8 @@ public sealed class WidgetFill
     }
 }
 
+/// A context's fills, newest first: live fills arrive at the top, older pages load as the grid scrolls near its end.
+/// UI thread; history pages parse on the thread pool. Cold path.
 public sealed partial class FillsWidget : UserControl, IWidget, IDisposable
 {
     private readonly Context _context;
@@ -49,7 +46,6 @@ public sealed partial class FillsWidget : UserControl, IWidget, IDisposable
     private LogReader? _logReader;
     private bool _isLoadingHistory = false;
     private const int BatchSize = 100;
-    public string TypeKey => "FillsWidget";
     public string Title { get; private set; }
     public double DefaultWidth => 700;
     public double DefaultHeight => 500;
@@ -65,16 +61,7 @@ public sealed partial class FillsWidget : UserControl, IWidget, IDisposable
     public FillsWidget(Context context)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
-
-        string label;
-        try
-        {
-            string trimmed = _context.DirectoryPath.Path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string name = Path.GetFileName(trimmed);
-            label = string.IsNullOrWhiteSpace(name) ? _context.DirectoryPath.Path : name;
-        }
-        catch { label = _context.DirectoryPath.Path; }
-        Title = $"Fills ({label})";
+        Title = $"Fills ({_context.DirectoryName})";
 
         InitializeComponent();
         DataContext = this;
@@ -87,31 +74,11 @@ public sealed partial class FillsWidget : UserControl, IWidget, IDisposable
         LoadHistoryAsync();
     }
 
+    /// Pages in older fills once the grid is scrolled near its end.
     private void OnScrollChanged(object? sender, ScrollEventArgs e)
     {
-        if (sender is DataGrid auditGrid)
-        {
-            var scrollbar = auditGrid.GetVisualDescendants()
-                                     .OfType<ScrollBar>()
-                                     .FirstOrDefault(s => s.Orientation == Orientation.Vertical);
-
-            if (scrollbar != null)
-            {
-                double current = scrollbar.Value;
-                double max = scrollbar.Maximum;
-                double count = Rows.Count;
-                double scollPerCount = max / count;
-
-                if (max <= 0) return;
-
-                double threshold = (max - scollPerCount * 5);
-
-                if (current >= threshold)
-                {
-                    LoadHistoryAsync();
-                }
-            }
-        }
+        if (FillsGrid.IsScrolledNearEnd(Rows.Count))
+            LoadHistoryAsync();
     }
 
     private async void LoadHistoryAsync()
@@ -180,19 +147,13 @@ public sealed partial class FillsWidget : UserControl, IWidget, IDisposable
         catch { return false; }
     }
 
+    /// The grid's menu: a checkbox per column, toggling whether it shows.
     private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
     {
-        if (sender is ContextMenu menu && FillsGrid != null)
-        {
-            menu.Items.Clear();
-            foreach (DataGridColumn col in FillsGrid.Columns)
-            {
-                string header = col.Header?.ToString() ?? "Column";
-                MenuItem item = new MenuItem { Header = header, ToggleType = MenuItemToggleType.CheckBox, IsChecked = col.IsVisible };
-                item.Click += (_, _) => col.IsVisible = !col.IsVisible;
-                menu.Items.Add(item);
-            }
-        }
+        if (sender is not ContextMenu contextMenu)
+            return;
+        contextMenu.Items.Clear();
+        contextMenu.AddColumnVisibilityMenuItems(FillsGrid);
     }
 
     public string? SaveStateJson() => null;

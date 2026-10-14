@@ -4,10 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
-using Avalonia.Layout;
-using Avalonia.Media;
 using Avalonia.Threading;
-using Avalonia.VisualTree;
 using Data;
 using Execution;
 using Provider;
@@ -89,7 +86,7 @@ public sealed class WidgetOrderAudit
         // --- Perform heavy lifting ONCE here ---
 
         Side = (Side)Math.Sign(Quantity);
-        PriceStr = Price.ToString($"N{Instrument.TicKDecimals}");
+        PriceStr = Price.ToString(Instrument.PriceFormat);
         OrderTypeName = ((Execution.OrderType)OrderType).ToString();
 
         ActionName = (Execution.OrderType)OrderType switch
@@ -107,6 +104,9 @@ public sealed class WidgetOrderAudit
     }
 }
 
+/// The workspace's audit trail (the primary context's tap and its manual client's), newest first, filtered by order type,
+/// source and column regexes; older pages load as the grid scrolls near its end. UI thread; history pages parse on the
+/// thread pool. Cold path.
 public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
 {
     private readonly WorkspaceContext _context;
@@ -141,7 +141,6 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
     private readonly List<System.Collections.Generic.Queue<WidgetOrderAudit>> _historyQueues = new List<System.Collections.Generic.Queue<WidgetOrderAudit>>();
     private bool _isLoadingHistory = false;
     private const int BatchSize = 100;
-    public string TypeKey => "AuditTrailWidget";
     public string Title { get; private set; }
     public double DefaultWidth => 800;
     public double DefaultHeight => 500;
@@ -163,20 +162,7 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
     public AuditTrailWidget(WorkspaceContext context)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
-
-        string label;
-        try
-        {
-            string trimmed = _context.Primary.DirectoryPath.Path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string name = Path.GetFileName(trimmed);
-            label = string.IsNullOrWhiteSpace(name) ? _context.Primary.DirectoryPath.Path : name;
-        }
-        catch
-        {
-            label = _context.Primary.DirectoryPath.Path;
-        }
-
-        Title = $"Audit Trail ({label})";
+        Title = $"Audit Trail ({_context.Primary.DirectoryName})";
 
         InitializeComponent();
         DataContext = this;
@@ -213,34 +199,11 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
         _historyQueues.Add(new System.Collections.Generic.Queue<WidgetOrderAudit>());
     }
 
+    /// Pages in older audit rows once the grid is scrolled near its end.
     private void OnScrollChanged(object? sender, ScrollEventArgs e)
     {
-        // 1. Identify the DataGrid
-        if (sender is DataGrid auditGrid)
-        {
-            // 2. Find the internal vertical ScrollBar by name
-            var scrollbar = auditGrid.GetVisualDescendants()
-                                     .OfType<ScrollBar>()
-                                     .FirstOrDefault(s => s.Orientation == Orientation.Vertical);
-
-            if (scrollbar != null)
-            {
-                double current = scrollbar.Value;
-                double max = scrollbar.Maximum;
-                double count = Rows.Count;
-                double scollPerCount = max / Math.Max(1, count);
-
-                if (max <= 0) return;
-
-                // 3. Calculate if we are in the bottom 100 rows
-                double threshold = (max - scollPerCount * 5);
-
-                if (current >= threshold)
-                {
-                    LoadHistoryAsync();
-                }
-            }
-        }
+        if (AuditGrid.IsScrolledNearEnd(Rows.Count))
+            LoadHistoryAsync();
     }
 
     private async void LoadHistoryAsync()
@@ -391,106 +354,46 @@ public sealed partial class AuditTrailWidget : UserControl, IWidget, IDisposable
         catch { return false; }
     }
 
+    /// A header's menu: its regex filter and the column toggles. A row's menu: the order type and source filters.
     private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
     {
-        var menu = sender as ContextMenu;
-        if (menu == null || AuditGrid == null) return;
+        if (sender is not ContextMenu contextMenu)
+            return;
+        contextMenu.Items.Clear();
 
-        menu.Items.Clear();
-
-        // Perform Hit Test
-        var visual = AuditGrid.InputHitTest(_lastPointerPos) as Visual;
-        bool isHeader = false;
-        string? clickedColumn = null;
-
-        // Walk up logic
-        var v = visual;
-        while (v != null)
+        DataGridHit dataGridHit = AuditGrid.GetDataGridHit(_lastPointerPos);
+        if (dataGridHit.IsColumnHeader)
         {
-            if (v is DataGridColumnHeader columnHeader)
-            {
-                isHeader = true;
-                clickedColumn = columnHeader.Content?.ToString();
-                break;
-            }
-            v = v.GetVisualParent() as Visual;
+            // A header: the right-clicked column's regex filter (all active filters AND together), then the column toggles
+            _columnRegexFilters.AddMenuItems(contextMenu, dataGridHit.ColumnHeaderText);
+            contextMenu.AddColumnVisibilityMenuItems(AuditGrid);
+            return;
         }
 
-        if (isHeader)
-        {
-            // Filter section for the column that was right-clicked: a regex over its display text.
-            // All active filters AND together.
-            _columnRegexFilters.AddMenuItems(menu, clickedColumn);
+        // A row: the order type filters, then the source filters
+        contextMenu.Items.Add(WidgetMenus.NewTitleMenuItem("Filter Order Types"));
+        contextMenu.Items.Add(new Separator());
+        foreach (OrderType orderType in Enum.GetValues<OrderType>())
+            contextMenu.Items.Add(NewFilterMenuItem(orderType.ToString(), _visibleOrderTypes, (int)orderType));
 
-            // --- HEADER: Column Toggles ---
-            foreach (DataGridColumn col in AuditGrid.Columns)
-            {
-                string header = col.Header?.ToString() ?? "Column";
-                MenuItem item = new MenuItem { Header = header, ToggleType = MenuItemToggleType.CheckBox, IsChecked = col.IsVisible };
-                item.Click += (_, _) => col.IsVisible = !col.IsVisible;
-                menu.Items.Add(item);
-            }
-        }
-        else
-        {
-            // --- CONTENT: Type Filters ---
-            var filterHeader = new MenuItem { Header = "Filter Order Types", FontWeight = Avalonia.Media.FontWeight.Bold, IsEnabled = false };
-            menu.Items.Add(filterHeader);
-            menu.Items.Add(new Separator());
-
-            foreach (OrderType type in Enum.GetValues<OrderType>())
-            {
-                int typeInt = (int)type;
-                var item = new MenuItem
-                {
-                    Header = type.ToString(),
-                    ToggleType = MenuItemToggleType.CheckBox,
-                    IsChecked = _visibleOrderTypes.Contains(typeInt)
-                };
-
-                item.Click += (_, _) => ToggleFilter(typeInt);
-                menu.Items.Add(item);
-            }
-
-            // --- CONTENT: Source Filters ---
-            menu.Items.Add(new Separator());
-            var sourceHeader = new MenuItem { Header = "Filter Source", FontWeight = Avalonia.Media.FontWeight.Bold, IsEnabled = false };
-            menu.Items.Add(sourceHeader);
-            menu.Items.Add(new Separator());
-
-            foreach (string source in s_sources)
-            {
-                var item = new MenuItem
-                {
-                    Header = source,
-                    ToggleType = MenuItemToggleType.CheckBox,
-                    IsChecked = _visibleSources.Contains(source)
-                };
-
-                item.Click += (_, _) => ToggleSource(source);
-                menu.Items.Add(item);
-            }
-        }
+        contextMenu.Items.Add(new Separator());
+        contextMenu.Items.Add(WidgetMenus.NewTitleMenuItem("Filter Source"));
+        contextMenu.Items.Add(new Separator());
+        foreach (string source in s_sources)
+            contextMenu.Items.Add(NewFilterMenuItem(source, _visibleSources, source));
     }
 
-    private void ToggleFilter(int orderType)
+    /// A checkbox item, ticked while value is in visibleValues, that toggles it there and refilters the rows.
+    private MenuItem NewFilterMenuItem<T>(string header, HashSet<T> visibleValues, T value)
     {
-        if (_visibleOrderTypes.Contains(orderType))
-            _visibleOrderTypes.Remove(orderType);
-        else
-            _visibleOrderTypes.Add(orderType);
-
-        ApplyFilter();
-    }
-
-    private void ToggleSource(string source)
-    {
-        if (_visibleSources.Contains(source))
-            _visibleSources.Remove(source);
-        else
-            _visibleSources.Add(source);
-
-        ApplyFilter();
+        MenuItem menuItem = new() { Header = header, ToggleType = MenuItemToggleType.CheckBox, IsChecked = visibleValues.Contains(value) };
+        menuItem.Click += (_, _) =>
+        {
+            if (!visibleValues.Remove(value))
+                visibleValues.Add(value);
+            ApplyFilter();
+        };
+        return menuItem;
     }
 
     // Row must pass the OrderType mask, the Source mask, and every active column regex (AND).

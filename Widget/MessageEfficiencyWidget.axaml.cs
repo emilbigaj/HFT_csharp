@@ -2,18 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.IO;
-using System.Linq;
-using System.Timers;
-using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
 using Avalonia.Media.Immutable;
-using Avalonia.Input;
-using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
-using Avalonia.VisualTree;
 using Data;
 using Execution;
 using Provider;
@@ -23,6 +16,8 @@ using Tools;
 namespace Widget;
 
 
+/// One product group's message-efficiency grid row: raw and weighted messages, quantity traded, efficiency against the tier
+/// benchmarks. Refreshed on the widget's refresh timer thread; cold path.
 public sealed class WidgetMessageEfficiency : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -75,76 +70,32 @@ public sealed class WidgetMessageEfficiency : INotifyPropertyChanged
         return s_safeBrush;
     }
 
-    public WidgetMessageEfficiency(MessageEfficiency messageEfficiency)
+    /// Takes the product group's latest values from shared memory and re-evaluates every binding.
+    public void Refresh(in MessageEfficiency messageEfficiency)
     {
         _messageEfficiency = messageEfficiency;
-    }
-
-    /// <summary>
-    /// Pull current values from shared memory.
-    /// Returns true if anything changed and bindings should be re-evaluated.
-    /// </summary>
-    public bool Refresh(in MessageEfficiency newMessageEfficiency)
-    {
-        bool changed = !MessageEfficiencyEquals(_messageEfficiency, newMessageEfficiency);
-
-        _messageEfficiency = newMessageEfficiency;
-
-        if (changed)
-        {
-            // Refresh all bindings
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
-        }
-
-        return changed;
-    }
-
-    private static bool MessageEfficiencyEquals(in MessageEfficiency left, in MessageEfficiency right)
-    {
-        return left.RawMessages == right.RawMessages
-            && left.WeightedMessages == right.WeightedMessages
-            && left.QuantityTraded == right.QuantityTraded
-            && left.InverseQuantityTraded == right.InverseQuantityTraded
-            && left.TradeDate == right.TradeDate
-            && left.TradeTime == right.TradeTime
-            && left.Tier1.DailyRawMessages == right.Tier1.DailyRawMessages && left.Tier1.Benchmark == right.Tier1.Benchmark
-            && left.Tier2.DailyRawMessages == right.Tier2.DailyRawMessages && left.Tier2.Benchmark == right.Tier2.Benchmark
-            && left.Tier3.DailyRawMessages == right.Tier3.DailyRawMessages && left.Tier3.Benchmark == right.Tier3.Benchmark;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));   // null: every property
     }
 }
 
 
-[RegisterJson]
-public class MessageEfficiencyColumnState
-{
-    public string Header { get; set; } = "";
-    public double Width { get; set; }
-    public int DisplayIndex { get; set; }
-    public bool IsVisible { get; set; }
-}
 
-[RegisterJson]
-public class MessageEfficiencyWidgetState
-{
-    public List<MessageEfficiencyColumnState> Columns { get; set; } = new();
-}
-
-
+/// Lists the server's message-efficiency rows, one per product group, refreshed every 100 ms. The right-click menu toggles
+/// columns on a header and offers the server's .messageefficiency file and folder on a row. UI thread and the refresh timer's
+/// thread; cold path.
 public sealed partial class MessageEfficiencyWidget : UserControl, IWidget, IDisposable
 {
     private readonly WorkspaceContext _context;
-    private readonly Timer _refreshTimer;
-    private bool _disposed;
+    private readonly WidgetRefreshTimer _refreshTimer;
 
-    private readonly Dictionary<int, WidgetMessageEfficiency> _rowsByProductGroupId = new();
+    private readonly Dictionary<int, WidgetMessageEfficiency> _rowsByProductGroupId = new();   // refresh timer thread only
     public ObservableCollection<WidgetMessageEfficiency> Rows { get; } = new();
 
-    public string TypeKey => "MessageEfficiencyWidget";
     public string Title { get; private set; } = "Message Efficiency";
     public double DefaultWidth => 820;
     public double DefaultHeight => 320;
 
-    private Avalonia.Point _lastPointerPos;
+    private Avalonia.Point _lastPointerPosition;
 
     public MessageEfficiencyWidget()
     {
@@ -162,223 +113,66 @@ public sealed partial class MessageEfficiencyWidget : UserControl, IWidget, IDis
         DataContext = this;
         MessageEfficiencyGrid.ItemsSource = Rows;
 
-        MessageEfficiencyGrid.PointerMoved += (_, e) => _lastPointerPos = e.GetPosition(MessageEfficiencyGrid);
+        MessageEfficiencyGrid.PointerMoved += (_, pointerEventArgs) => _lastPointerPosition = pointerEventArgs.GetPosition(MessageEfficiencyGrid);
 
-        _refreshTimer = new Timer(100);
-        _refreshTimer.Elapsed += OnRefresh;
-        _refreshTimer.AutoReset = false;
-        _refreshTimer.Start();
+        _refreshTimer = new WidgetRefreshTimer(nameof(MessageEfficiencyWidget), 100, Refresh);
     }
 
-    private void OnRefresh(object? sender, ElapsedEventArgs e)
+    /// Refreshes each product group's row in place and posts the active rows to the grid.
+    private void Refresh()
     {
-        if (_disposed) return;
-
-        try
+        // Step 1: each allocated product group's row, refreshed in place (allocated densely from 0; the enumeration stops at the first empty slot)
+        List<WidgetMessageEfficiency> activeRows = new(_rowsByProductGroupId.Count);
+        foreach (MessageEfficiency messageEfficiency in _context.Primary.EnumerateMessageEfficiency())
         {
-            // ProductGroups are allocated densely from 0; EnumerateMessageEfficiency yields each allocated
-            // slot and stops at the first empty one. Key rows by ProductGroupId and refresh in place.
-            List<WidgetMessageEfficiency> active = new List<WidgetMessageEfficiency>(_rowsByProductGroupId.Count);
-            foreach (MessageEfficiency messageEfficiency in _context.Primary.EnumerateMessageEfficiency())
+            if (!_rowsByProductGroupId.TryGetValue(messageEfficiency.ProductGroupId, out WidgetMessageEfficiency? widgetMessageEfficiency))
             {
-                if (_rowsByProductGroupId.TryGetValue(messageEfficiency.ProductGroupId, out WidgetMessageEfficiency? row))
-                {
-                    row.Refresh(in messageEfficiency);
-                }
-                else
-                {
-                    row = new WidgetMessageEfficiency(messageEfficiency);
-                    _rowsByProductGroupId[messageEfficiency.ProductGroupId] = row;
-                }
-                active.Add(row);
+                widgetMessageEfficiency = new WidgetMessageEfficiency();
+                _rowsByProductGroupId[messageEfficiency.ProductGroupId] = widgetMessageEfficiency;
             }
-
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (_disposed) return;
-
-                // Remove rows for instruments that are no longer subscribed.
-                for (int i = Rows.Count - 1; i >= 0; i--)
-                {
-                    if (!active.Contains(Rows[i]))
-                    {
-                        Rows.RemoveAt(i);
-                    }
-                }
-
-                // Add newly active rows.
-                foreach (var r in active)
-                {
-                    if (!Rows.Contains(r))
-                    {
-                        Rows.Add(r);
-                    }
-                }
-            });
+            widgetMessageEfficiency.Refresh(in messageEfficiency);
+            activeRows.Add(widgetMessageEfficiency);
         }
-        catch (Exception ex)
+
+        // Step 2: the grid shows exactly the active rows
+        Dispatcher.UIThread.Post(() =>
         {
-            Console.WriteLine($"MessageEfficiencyWidget Error: {ex.Message}");
-        }
-        finally
-        {
-            if (!_disposed) _refreshTimer.Start();
-        }
+            if (!_refreshTimer.IsDisposed)
+                Rows.ReconcileRows(activeRows);
+        });
     }
 
+    /// Fills the grid's right-click menu: column toggles on a header; the product group's file path and the folder on a row, the folder elsewhere.
     private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
     {
-        var menu = sender as ContextMenu;
-        if (menu == null || MessageEfficiencyGrid == null) return;
+        if (sender is not ContextMenu contextMenu)
+            return;
+        contextMenu.Items.Clear();
 
-        menu.Items.Clear();
-
-        // Header cell hit-test → show column-toggle list.
-        var visual = MessageEfficiencyGrid.InputHitTest(_lastPointerPos) as Visual;
-        bool isHeader = false;
-        DataGridRow? hitRow = null;
-
-        var v = visual;
-        while (v != null)
+        // Step 1: a header lists the columns to toggle
+        DataGridHit dataGridHit = MessageEfficiencyGrid.GetDataGridHit(_lastPointerPosition);
+        if (dataGridHit.IsColumnHeader)
         {
-            if (v is DataGridColumnHeader)
-            {
-                isHeader = true;
-                break;
-            }
-            if (v is DataGridRow row)
-            {
-                hitRow = row;
-            }
-            v = v.GetVisualParent() as Visual;
+            contextMenu.AddColumnVisibilityMenuItems(MessageEfficiencyGrid);
+            return;
         }
+
+        // Step 2: a row names its product group and copies its file path
         ServerContext serverContext = ContextManager.ServerContext;
-
-        if (isHeader)
+        if (dataGridHit.RowItem is WidgetMessageEfficiency widgetMessageEfficiency)
         {
-            foreach (DataGridColumn col in MessageEfficiencyGrid.Columns)
-            {
-                string header = col.Header?.ToString() ?? "Column";
-                MenuItem item = new MenuItem
-                {
-                    Header = header,
-                    ToggleType = MenuItemToggleType.CheckBox,
-                    IsChecked = col.IsVisible
-                };
-                item.Click += (_, _) => col.IsVisible = !col.IsVisible;
-                menu.Items.Add(item);
-            }
+            contextMenu.Items.Add(WidgetMenus.NewTitleMenuItem(widgetMessageEfficiency.ProductGroupRoot));
+            contextMenu.Items.Add(new Separator());
+            contextMenu.Items.Add(WidgetMenus.NewCopyPathMenuItem(this, "Copy Server .messageefficiency File Path", Context.GetMessageEfficiencyFilePath(serverContext.DirectoryPath, widgetMessageEfficiency.ProductGroupRoot)));
         }
-        else if (hitRow != null && hitRow.DataContext is WidgetMessageEfficiency messageEfficiency)
-        {
-            var headerItem = new MenuItem { Header = messageEfficiency.ProductGroupRoot, FontWeight = Avalonia.Media.FontWeight.Bold, IsEnabled = false };
-            menu.Items.Add(headerItem);
-            menu.Items.Add(new Separator());
 
-            FileSystemPath filePath = Context.GetMessageEfficiencyFilePath(serverContext.DirectoryPath, messageEfficiency.ProductGroupRoot);
-            var copyPathItem = new MenuItem { Header = "Copy Server .messageefficiency File Path", Icon = new TextBlock { Text = "📋" } };
-            copyPathItem.Click += async (_, _) =>
-            {
-                try
-                {
-                    var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-                    if (clipboard != null) await clipboard.SetTextAsync(filePath);
-                }
-                catch { }
-            };
-            menu.Items.Add(copyPathItem);
-
-            var openFolderItem = new MenuItem { Header = "Open Server MessageEfficiency Folder", Icon = new TextBlock { Text = "📁" } };
-            openFolderItem.Click += (_, _) => OpenInExplorer(serverContext.MessageEfficiencyDirectoryPath.ToString());
-            menu.Items.Add(openFolderItem);
-        }
-        else
-        {
-            var openFolderItem = new MenuItem { Header = "Open Server MessageEfficiency Folder", Icon = new TextBlock { Text = "📁" } };
-            openFolderItem.Click += (_, _) => OpenInExplorer(serverContext.MessageEfficiencyDirectoryPath.ToString());
-            menu.Items.Add(openFolderItem);
-        }
+        // Step 3: the folder, from anywhere off the header
+        contextMenu.Items.Add(WidgetMenus.NewOpenFolderMenuItem("Open Server MessageEfficiency Folder", serverContext.MessageEfficiencyDirectoryPath.ToString()));
     }
 
-    private static void OpenInExplorer(string path)
-    {
-        try
-        {
-            if (!Directory.Exists(path)) return;
+    public string? SaveStateJson() => DataGridWidgetState.NewStateJson(MessageEfficiencyGrid);
 
-            if (OperatingSystem.IsWindows())
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = path,
-                    UseShellExecute = true
-                });
-                return;
-            }
+    public void LoadStateJson(string? json) => DataGridWidgetState.LoadStateJson(MessageEfficiencyGrid, json);
 
-            string opener = OperatingSystem.IsMacOS() ? "open" : "xdg-open";
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = opener,
-                ArgumentList = { path },
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            });
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"MessageEfficiencyWidget.OpenInExplorer Error: {ex.Message}");
-        }
-    }
-
-    public string? SaveStateJson()
-    {
-        var state = new MessageEfficiencyWidgetState();
-        foreach (var col in MessageEfficiencyGrid.Columns)
-        {
-            state.Columns.Add(new MessageEfficiencyColumnState
-            {
-                Header = col.Header?.ToString() ?? "",
-                Width = col.Width.Value,
-                DisplayIndex = col.DisplayIndex,
-                IsVisible = col.IsVisible
-            });
-        }
-        return Json.Serialize(state);
-    }
-
-    public void LoadStateJson(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return;
-        try
-        {
-            var state = Json.Deserialize<MessageEfficiencyWidgetState>(json);
-            if (state == null) return;
-
-            foreach (var colState in state.Columns)
-            {
-                var col = MessageEfficiencyGrid.Columns.FirstOrDefault(c => (c.Header?.ToString() ?? "") == colState.Header);
-                if (col != null)
-                {
-                    col.Width = new DataGridLength(colState.Width);
-                    col.DisplayIndex = colState.DisplayIndex;
-                    col.IsVisible = colState.IsVisible;
-                }
-            }
-        }
-        catch { }
-    }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-
-        if (_refreshTimer != null)
-        {
-            _refreshTimer.Stop();
-            _refreshTimer.Dispose();
-        }
-    }
+    public void Dispose() => _refreshTimer?.Dispose();
 }

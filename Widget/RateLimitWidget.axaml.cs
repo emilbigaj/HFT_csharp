@@ -2,14 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Linq;
-using System.Timers;
-using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
-using Avalonia.VisualTree;
 using Data;
 using Execution;
 using Provider;
@@ -18,12 +13,14 @@ using Tools;
 namespace Widget;
 
 
+/// One CoreGroup's rate-limit grid row: its window, its limit and the messages counted in the window. Refreshed on the
+/// widget's refresh timer thread; cold path.
 public sealed class WidgetRateLimit : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private RollingRateLimit _rollingRateLimit;
-    private string _coreGroupName;
+    private string _coreGroupName = "";
     private int _count;
 
     // The row's id is a CoreGroupId; the name comes from the server's CoreGroups array.
@@ -32,67 +29,33 @@ public sealed class WidgetRateLimit : INotifyPropertyChanged
     public string Limit => _rollingRateLimit.RateLimit.Limit.ToString("N0");
     public string Count => _count.ToString("N0");
 
-    public WidgetRateLimit(in RollingRateLimit rollingRateLimit, string coreGroupName, int count)
+    /// Takes the CoreGroup's latest rate limit from shared memory, and the count the caller computed at its own clock (so it decays between sends), and re-evaluates every binding.
+    public void Refresh(in RollingRateLimit rollingRateLimit, string coreGroupName, int count)
     {
         _rollingRateLimit = rollingRateLimit;
         _coreGroupName = coreGroupName;
         _count = count;
-    }
-
-    /// <summary>
-    /// Pull current values from shared memory. The count is computed by the caller at its own clock,
-    /// so it decays between sends. Returns true if anything changed and bindings should be re-evaluated.
-    /// </summary>
-    public bool Refresh(in RollingRateLimit newRollingRateLimit, string newCoreGroupName, int newCount)
-    {
-        bool changed = newCount != _count || newRollingRateLimit.RateLimit != _rollingRateLimit.RateLimit || newCoreGroupName != _coreGroupName;
-
-        _rollingRateLimit = newRollingRateLimit;
-        _coreGroupName = newCoreGroupName;
-        _count = newCount;
-
-        if (changed)
-        {
-            // Refresh all bindings
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
-        }
-
-        return changed;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));   // null: every property
     }
 }
 
 
-[RegisterJson]
-public class RateLimitColumnState
-{
-    public string Header { get; set; } = "";
-    public double Width { get; set; }
-    public int DisplayIndex { get; set; }
-    public bool IsVisible { get; set; }
-}
 
-[RegisterJson]
-public class RateLimitWidgetState
-{
-    public List<RateLimitColumnState> Columns { get; set; } = new();
-}
-
-
+/// Lists the server's rate limits, one per CoreGroup, refreshed every 100 ms. The right-click menu toggles columns on a header.
+/// UI thread and the refresh timer's thread; cold path.
 public sealed partial class RateLimitWidget : UserControl, IWidget, IDisposable
 {
     private readonly WorkspaceContext _context;
-    private readonly Timer _refreshTimer;
-    private bool _disposed;
+    private readonly WidgetRefreshTimer _refreshTimer;
 
-    private readonly Dictionary<int, WidgetRateLimit> _rowsByRateLimitId = new();
+    private readonly Dictionary<int, WidgetRateLimit> _rowsByRateLimitId = new();   // refresh timer thread only
     public ObservableCollection<WidgetRateLimit> Rows { get; } = new();
 
-    public string TypeKey => "RateLimitWidget";
     public string Title { get; private set; } = "Rate Limits";
     public double DefaultWidth => 420;
     public double DefaultHeight => 200;
 
-    private Avalonia.Point _lastPointerPos;
+    private Avalonia.Point _lastPointerPosition;
 
     public RateLimitWidget()
     {
@@ -110,160 +73,52 @@ public sealed partial class RateLimitWidget : UserControl, IWidget, IDisposable
         DataContext = this;
         RateLimitGrid.ItemsSource = Rows;
 
-        RateLimitGrid.PointerMoved += (_, e) => _lastPointerPos = e.GetPosition(RateLimitGrid);
+        RateLimitGrid.PointerMoved += (_, pointerEventArgs) => _lastPointerPosition = pointerEventArgs.GetPosition(RateLimitGrid);
 
-        _refreshTimer = new Timer(100);
-        _refreshTimer.Elapsed += OnRefresh;
-        _refreshTimer.AutoReset = false;
-        _refreshTimer.Start();
+        _refreshTimer = new WidgetRefreshTimer(nameof(RateLimitWidget), 100, Refresh);
     }
 
-    private void OnRefresh(object? sender, ElapsedEventArgs e)
+    /// Refreshes each CoreGroup's row in place and posts the active rows to the grid.
+    private void Refresh()
     {
-        if (_disposed) return;
-
-        try
+        // Step 1: one row per CoreGroup the server has written. Why the count is computed here, at this process's clock, from the ring the server shares: a published number would freeze between sends
+        Timestamp now = Clock.Now;
+        List<WidgetRateLimit> activeRows = new(_rowsByRateLimitId.Count);
+        foreach (RollingRateLimit rollingRateLimit in _context.Primary.EnumerateRateLimits())
         {
-            // One row per CoreGroup the server has written; EnumerateRateLimits walks the set bits. Key rows
-            // by RateLimitId and refresh in place. Count is derived here, at this process's clock, from the
-            // ring the server shares: it is never published as a number, or it would freeze between sends.
-            Timestamp now = Clock.Now;
-            List<WidgetRateLimit> active = new List<WidgetRateLimit>(_rowsByRateLimitId.Count);
-            foreach (RollingRateLimit rollingRateLimit in _context.Primary.EnumerateRateLimits())
+            int rateLimitId = rollingRateLimit.RateLimit.RateLimitId;
+            int count = rollingRateLimit.GetCount(now);
+            string coreGroupName = _context.Primary.GetCoreGroup(rateLimitId).Read().CoreGroupName.ToString();
+            if (!_rowsByRateLimitId.TryGetValue(rateLimitId, out WidgetRateLimit? widgetRateLimit))
             {
-                int count = rollingRateLimit.GetCount(now);
-                string coreGroupName = _context.Primary.GetCoreGroup(rollingRateLimit.RateLimit.RateLimitId).Read().CoreGroupName.ToString();
-                if (_rowsByRateLimitId.TryGetValue(rollingRateLimit.RateLimit.RateLimitId, out WidgetRateLimit? row))
-                {
-                    row.Refresh(in rollingRateLimit, coreGroupName, count);
-                }
-                else
-                {
-                    row = new WidgetRateLimit(in rollingRateLimit, coreGroupName, count);
-                    _rowsByRateLimitId[rollingRateLimit.RateLimit.RateLimitId] = row;
-                }
-                active.Add(row);
+                widgetRateLimit = new WidgetRateLimit();
+                _rowsByRateLimitId[rateLimitId] = widgetRateLimit;
             }
-
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (_disposed) return;
-
-                // Remove rows for CoreGroups that are no longer present.
-                for (int i = Rows.Count - 1; i >= 0; i--)
-                {
-                    if (!active.Contains(Rows[i]))
-                    {
-                        Rows.RemoveAt(i);
-                    }
-                }
-
-                // Add newly active rows.
-                foreach (var r in active)
-                {
-                    if (!Rows.Contains(r))
-                    {
-                        Rows.Add(r);
-                    }
-                }
-            });
+            widgetRateLimit.Refresh(in rollingRateLimit, coreGroupName, count);
+            activeRows.Add(widgetRateLimit);
         }
-        catch (Exception ex)
+
+        // Step 2: the grid shows exactly the active rows
+        Dispatcher.UIThread.Post(() =>
         {
-            Console.WriteLine($"RateLimitWidget Error: {ex.Message}");
-        }
-        finally
-        {
-            if (!_disposed) _refreshTimer.Start();
-        }
+            if (!_refreshTimer.IsDisposed)
+                Rows.ReconcileRows(activeRows);
+        });
     }
 
+    /// Fills the grid's right-click menu: column toggles on a header, nothing elsewhere.
     private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
     {
-        var menu = sender as ContextMenu;
-        if (menu == null || RateLimitGrid == null) return;
-
-        menu.Items.Clear();
-
-        // Header cell hit-test → show column-toggle list.
-        var visual = RateLimitGrid.InputHitTest(_lastPointerPos) as Visual;
-        bool isHeader = false;
-
-        var v = visual;
-        while (v != null)
-        {
-            if (v is DataGridColumnHeader)
-            {
-                isHeader = true;
-                break;
-            }
-            v = v.GetVisualParent() as Visual;
-        }
-
-        if (isHeader)
-        {
-            foreach (DataGridColumn col in RateLimitGrid.Columns)
-            {
-                string header = col.Header?.ToString() ?? "Column";
-                MenuItem item = new MenuItem
-                {
-                    Header = header,
-                    ToggleType = MenuItemToggleType.CheckBox,
-                    IsChecked = col.IsVisible
-                };
-                item.Click += (_, _) => col.IsVisible = !col.IsVisible;
-                menu.Items.Add(item);
-            }
-        }
+        if (sender is not ContextMenu contextMenu)
+            return;
+        contextMenu.Items.Clear();
+        if (RateLimitGrid.GetDataGridHit(_lastPointerPosition).IsColumnHeader)
+            contextMenu.AddColumnVisibilityMenuItems(RateLimitGrid);
     }
 
-    public string? SaveStateJson()
-    {
-        var state = new RateLimitWidgetState();
-        foreach (var col in RateLimitGrid.Columns)
-        {
-            state.Columns.Add(new RateLimitColumnState
-            {
-                Header = col.Header?.ToString() ?? "",
-                Width = col.Width.Value,
-                DisplayIndex = col.DisplayIndex,
-                IsVisible = col.IsVisible
-            });
-        }
-        return Json.Serialize(state);
-    }
+    public string? SaveStateJson() => DataGridWidgetState.NewStateJson(RateLimitGrid);
 
-    public void LoadStateJson(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return;
-        try
-        {
-            var state = Json.Deserialize<RateLimitWidgetState>(json);
-            if (state == null) return;
+    public void LoadStateJson(string? json) => DataGridWidgetState.LoadStateJson(RateLimitGrid, json);
 
-            foreach (var colState in state.Columns)
-            {
-                var col = RateLimitGrid.Columns.FirstOrDefault(c => (c.Header?.ToString() ?? "") == colState.Header);
-                if (col != null)
-                {
-                    col.Width = new DataGridLength(colState.Width);
-                    col.DisplayIndex = colState.DisplayIndex;
-                    col.IsVisible = colState.IsVisible;
-                }
-            }
-        }
-        catch { }
-    }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-
-        if (_refreshTimer != null)
-        {
-            _refreshTimer.Stop();
-            _refreshTimer.Dispose();
-        }
-    }
+    public void Dispose() => _refreshTimer?.Dispose();
 }

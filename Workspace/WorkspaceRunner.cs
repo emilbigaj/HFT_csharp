@@ -151,9 +151,6 @@ public static class WorkspaceRunner
         // Instead, use Avalonia's own software-rendered managed dialogs.
         builder = builder.UseManagedSystemDialogs();
 
-        // Globally intercept the ManagedFileChooserWindow to enforce 60% sizing
-        //BEGIN_FILE HFT/Workspace/WorkspaceRunner.cs
-
         // Globally intercept the ManagedFileChooserWindow to enforce 60% sizing and auto-column width
         builder = builder.AfterSetup(_ =>
         {
@@ -275,7 +272,7 @@ public static class WorkspaceRunner
         {
             try
             {
-                window ??= s_desktopLifetime.MainWindow ?? s_desktopLifetime.Windows.FirstOrDefault(w => w is Workspace);
+                window ??= s_desktopLifetime.MainWindow ?? Workspace.OpenWorkspaces.FirstOrDefault();
                 if (window == null)
                     return;
 
@@ -307,8 +304,8 @@ public static class WorkspaceRunner
 
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
-            foreach (Window window in s_desktopLifetime.Windows.ToList())
-                window.Close();
+            foreach (Workspace workspace in Workspace.OpenWorkspaces.ToList())
+                workspace.Close();
         });
     }
 }

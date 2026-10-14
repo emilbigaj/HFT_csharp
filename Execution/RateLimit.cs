@@ -60,8 +60,6 @@ public struct MessageEfficiency()
         QuantityTraded += Math.Abs(quantity);
         InverseQuantityTraded = 1.0 / QuantityTraded;
     }
-    
-    
 
     // Permissive default (simulation): tiers so high TrySend always falls through to "allowed".
     public static MessageEfficiency GetMaxLimits(String4 productGroupRoot) => new MessageEfficiency()

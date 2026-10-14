@@ -32,20 +32,21 @@
 						<MenuItem Header="E_xit" Click="OnExitClick"/>
 					</MenuItem>
 					<MenuItem Header="_Mode">
-						<MenuItem x:Name="SimulationMenuItem" Header="Simulation" Click="OnSimulationModeClick"/>
-						<MenuItem x:Name="RealtimeMenuItem" Header="Realtime" Click="OnRealtimeModeClick"/>
+						<MenuItem x:Name="SimulationMenuItem" Header="Simulation" IsEnabled="False"/>
+						<MenuItem x:Name="RealtimeMenuItem" Header="Realtime" IsEnabled="False"/>
 					</MenuItem>
+					<!-- Each Tag is the widget's type key (its class name), which OnAddWidgetClick builds -->
 					<MenuItem Header="_Widgets">
-						<MenuItem Header="Instruments" Click="OnAddInstrumentHeadersWidgetClick"/>
-						<MenuItem Header="Chart" Click="OnAddChartWidgetClick"/>
-						<MenuItem Header="Fills" Click="OnAddFillsWidgetClick"/>
-						<MenuItem Header="Positions" Click="OnAddPositionsWidgetClick"/>
-						<MenuItem Header="Orders" Click="OnAddOrdersWidgetClick"/>
-						<MenuItem Header="Send Order" Click="OnAddSendOrderWidgetClick"/>
-						<MenuItem Header="Audit Trail" Click="OnAddAuditTrailWidgetClick"/>
-						<MenuItem Header="Risk Limits" Click="OnAddRiskLimitsWidgetClick"/>
-						<MenuItem Header="Message Efficiency" Click="OnAddMessageEfficiencyWidgetClick"/>
-						<MenuItem Header="Rate Limits" Click="OnAddRateLimitWidgetClick"/>
+						<MenuItem Header="Instruments" Tag="InstrumentHeadersWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Chart" Tag="ChartWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Fills" Tag="FillsWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Positions" Tag="PositionsWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Orders" Tag="OrdersWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Send Order" Tag="SendOrderWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Audit Trail" Tag="AuditTrailWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Risk Limits" Tag="RiskLimitsWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Message Efficiency" Tag="MessageEfficiencyWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Rate Limits" Tag="RateLimitWidget" Click="OnAddWidgetClick"/>
 					</MenuItem>
 				</Menu>
 				<TextBlock x:Name="TimestampText"

@@ -3,7 +3,12 @@
 	<Import Project="..\HFT.targets" />
 
 	<Import Project="..\GUI.targets" />
-	
+
+	<PropertyGroup>
+		<!-- Why: HFT.targets makes every project an exe; Widget has no entry point, the Workspace exe hosts its widgets -->
+		<OutputType>Library</OutputType>
+	</PropertyGroup>
+
     <ItemGroup>
         <ProjectReference Include="..\Data\Data.csproj" />
         <ProjectReference Include="..\Tools\Tools.csproj" />

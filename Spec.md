@@ -1184,12 +1184,19 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
   its own monotonic clock (`Timestamp.StopwatchNow`, the machine's `Stopwatch` as a `Timestamp`); the Local end queues it back as a `Pong`, so it goes out after the publish it triggers on that same pass (rows, then the pong): the round trip then covers the Local loop and a publish too, and a Local end that answers but no longer publishes reads as a stall, not as a healthy number over a frozen screen; the
   Remote times it on that same clock (no clocks need to agree) and writes `Latency[0]` every pass: the worst of the last
   10 round trips, or, when longer, the age of the oldest unanswered ping (the newest answered one's age less one interval),
-  so it climbs through a stall; -1 ns at once when the link drops, and from 10 s without a pong (`RemoteClient.s_silenceTimeout`, also `TcpLink`'s silence
-  limit). A remote Workspace shows it beside its clock, or how long since the row last changed when longer, so a dead or
-  frozen Remote Mirror (which stops rewriting it) climbs the same way; below 0, or unchanged for 10 s, it reads "Connection
-  broken – reconnecting…". The Workspace reads the value plainly, not through the seqlock: one aligned 8-byte `Duration`
-  cannot tear, and a seqlocked read would spin forever on a row a killed Remote Mirror left mid-write (the unchanged-for-10 s
-  rule then shows it broken), and would throw on an unwritten row. The Local end never writes the array (the server's rows are unwritten, so they are never
+  so it climbs through a stall (a new link starts afresh, 2026-10-14: its round trips cleared, its unanswered age counted
+  from when it connects, its first ping sent at once; before, the old link's last pong made a Local Mirror restart read as
+  a latency of the whole outage, climbing until the new link's first pong); -1 ns at
+  once when the link drops, and from 10 s without a pong (`RemoteClient.s_silenceTimeout`, also `TcpLink`'s silence
+  limit). A remote Workspace shows it beside its clock exactly as written, to the microsecond (`232.417 ms`, so a steady
+  link visibly ticks), and below 0 as "Connection broken – reconnecting…": the number only ever comes from the Remote
+  Mirror (2026-10-14; before, the Workspace showed the row's age when longer, so a closed Remote Mirror read as a latency
+  climbing for 10 s). Two states come from the Workspace itself: "Remote Mirror offline" once the Remote Mirror its
+  `RemoteClient` connected to has exited (`RemoteClient.IsRemoteMirrorAlive`, the process id from
+  `<server>/RemoteMirrorProcessId`, checked each 100 ms refresh, so within about 100 ms however it ended), and "Remote Mirror
+  not responding" when it is alive but has not rewritten the row for 10 s (a hung main thread). The Workspace reads the
+  value plainly, not through the seqlock: one aligned 8-byte `Duration` cannot tear, and a seqlocked read would spin
+  forever on a row a killed Remote Mirror left mid-write, and would throw on an unwritten row. The Local end never writes the array (the server's rows are unwritten, so they are never
   published over the copy's). The ping is also the link's keep-alive. A Workspace beside the real server shows no number;
   once the server's process has exited (`ProcessId.IsAlive(ServerHeader.ServerProcessId)`, each refresh) it shows
   "Disconnected – server stopped, close this Workspace" there instead: it cannot reconnect by itself, and while it maps the
@@ -1205,8 +1212,17 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
   GUI's calls are dropped. When the link returns the remote gets a full snapshot (a row skipped mid-write during it is
   sent the next pass) and its GUIs are listed again; a call that reaches the Local end before its GUI's stand-in is started
   again is dropped (a residual: the latency is the link's, not that GUI's, so it does not show this). Nothing is reconciled: the remote holds no order state, and every
-  order's end is in the copied rows. A Remote started anew waits for the last run's Workspaces to close before it starts
-  (the copy's header is left as it was; a simulation Workspace's clock holds there).
+  order's end is in the copied rows.
+- **A Remote Mirror restart (2026-10-14).** Workspaces still open keep the last Remote's copy mapped, header posted. A new
+  Remote no longer waits for them to close: when its header cannot be posted it reuses that copy, wiping it as on a server
+  restart (`newServerHeader`), and posts its own process id in `<server>/RemoteMirrorProcessId` once it listens. Each
+  Workspace's `RemoteClient` noted the Remote's id at connect; `IsSessionEnded` (a new server or a new Remote) makes it
+  rebuild in place, under its own GUI number. The old sessions need no close: the new Remote's `ServerSocket` starts with
+  no clients, and every socket skips to the head of its rings when built, so a call left unread in a ring is not
+  replayed. Not reused, as before (the Remote stops, saying to close the Workspaces): a copy sized for other capacities
+  or another build (its layout hash differs from the box's), and on a simulation desk a copy of another run. Restart
+  harness R8: two GUIs open, the Remote killed and started, both rebuilt under their own names and their calls reached
+  the server.
 - **Restarts (2026-10-13).** The Remote tells them apart by the server's process id in each server header, which opens every
   publish pass, so it is checked before any row from a new link is applied; until a link's first header is checked,
   nothing goes up it (no GUI calls, no GuiList). Every header's `LayoutHash` must also equal this desk's, or the Remote stops
@@ -1242,6 +1258,13 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
     number: a GUI's ring is named after it, and the fresh RemoteMirror holds no record of who had which name; a Workspace
     asking for the lowest free name could take another window's that has not rebuilt yet, so its stale calls would reach the
     wrong stand-in and one window's close would end the other's session (tested with two GUIs rebuilding seconds apart).
+  - *The Workspace keeps its own list of open windows (2026-10-14).* `Workspace.OpenWorkspaces`: a window adds itself
+    when built and removes itself when closed; the rebuild, closing (the last window shuts the app), saving a workspace's
+    other windows, and `WorkspaceRunner` (screenshot, close all) all use it. Why: Avalonia 12's `desktop.Windows` lists only
+    windows opened after the lifetime starts, and the first Workspace opens before it (checked in a scratch Avalonia 12
+    app: `Count` 0 with the first window up, 1 once a second opened). The first box test of a server restart showed it: the
+    rebuild found no window and was retried every 100 ms (a fresh `ServerContext` each time), the latency text stayed
+    blank and the window's calls went to the closed stand-in.
   - *A rebuild never closes the old name (2026-10-14).* A new window can take a name in the fresh copy before the window
     that held it on the old server notices the restart (the copy's header, with the new process id, is posted before the
     Remote listens). `RemoteClient` remembers the server process it connected to and its `Dispose` skips the close message

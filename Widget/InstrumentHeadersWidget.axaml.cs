@@ -1,29 +1,20 @@
-using System.Collections.ObjectModel;
+using System;
+using System.Collections.Generic;
 using System.ComponentModel;
-using System.Text.RegularExpressions;
-using System.Timers;
 using Avalonia.Collections;
-using Avalonia.Layout;
-using Avalonia.Media;
-using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
-using Avalonia.VisualTree;
-using Avalonia.Input;
-using Provider;
 using Data;
+using Provider;
 using Tools;
-using System.Collections.Generic;
-using System;
-using System.Linq;
 
 namespace Widget;
 
-// All values are cached: identity (symbology strings) once via ServerContext.GetSymbolStrings, state per Update().
-// Nothing here constructs a Symbology or formats a string inside a binding getter — that was the
-// multi-second freeze on grids with thousands of spreads. Typed properties (int?, enum?, Timestamp?)
-// sort correctly and feed the column filters; nullable renders as a blank cell.
+/// One instrument header's grid row. All values are cached: identity (symbology strings) once via ServerContext.GetSymbolStrings,
+/// state per Update. Nothing here constructs a Symbology or formats a string inside a binding getter: that was the multi-second
+/// freeze on grids with thousands of spreads. Typed properties (int?) sort correctly and feed the column filters; a null renders
+/// as a blank cell. UI thread, cold path.
 public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -66,16 +57,11 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
         SymbolStrings symbols = ContextManager.ServerContext.GetSymbolStrings(headerId);
         Symbol = symbols.Symbol;
         ShortSymbol = symbols.ShortSymbol;
-        Recompute(in header128);
+        Update(in header128);
     }
 
+    /// Recomputes every cached value from the header and re-evaluates every binding.
     public void Update(in InstrumentHeader128 header128)
-    {
-        Recompute(in header128);
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null)); // Refresh all bindings
-    }
-
-    private void Recompute(in InstrumentHeader128 header128)
     {
         _header128 = header128;
         ref readonly InstrumentHeader header = ref _header128.AsInstrumentHeader();
@@ -120,40 +106,27 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
             BaseCurrency = forex.BaseCurrency.ToString();
             QuoteCurrency = forex.QuoteCurrency.ToString();
         }
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));   // null: every property
     }
 }
 
+/// The Instrument Headers widget's saved state: its columns' layout and its column filters. Cold path: a workspace's save and load.
 [RegisterJson]
-public class InstrumentHeadersColumnState
+public sealed class InstrumentHeadersWidgetState
 {
-    public string Header { get; set; } = "";
-    public double Width { get; set; }
-    public int DisplayIndex { get; set; }
-    public bool IsVisible { get; set; }
+    public List<DataGridColumnState> Columns { get; set; } = new();
+    public List<ColumnRegexFilterState> Filters { get; set; } = new();
 }
 
-[RegisterJson]
-public class InstrumentHeadersFilterState
-{
-    public string Column { get; set; } = "";
-    public string? Pattern { get; set; }
-}
-
-[RegisterJson]
-public class InstrumentHeadersWidgetState
-{
-    public List<InstrumentHeadersColumnState> Columns { get; set; } = new();
-    public List<InstrumentHeadersFilterState> Filters { get; set; } = new();
-}
-
+/// Lists every instrument header in the workspace's principal, regex-filterable per column, and re-reads a header when the server
+/// allocates its instrument. The right-click menu filters and toggles columns on a header, and allocates, opens order entry or
+/// opens a ladder on a row. UI thread and the refresh timer's thread; cold path.
 public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDisposable
 {
     private readonly WorkspaceContext _context;
-    private readonly Timer _refreshTimer;
-    private bool _disposed;
-    private Bitset64 _lastSubs = new Bitset64();
+    private readonly WidgetRefreshTimer _refreshTimer;
+    private Bitset64 _previousInstrumentIds;   // the server's allocated instruments at the last pass; refresh timer thread only
 
-    public string TypeKey => "InstrumentHeadersWidget";
     public string Title { get; private set; } = "Instrument Headers";
     public double DefaultWidth => 900;
     public double DefaultHeight => 400;
@@ -195,7 +168,7 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         ["QuoteCurrency"] = r => r.QuoteCurrency,
     };
 
-    private Avalonia.Point _lastPointerPos;
+    private Avalonia.Point _lastPointerPosition;
 
     public InstrumentHeadersWidget()
     {
@@ -224,223 +197,114 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         };
         HeadersGrid.ItemsSource = _view;
 
-        HeadersGrid.PointerMoved += (s, e) => _lastPointerPos = e.GetPosition(HeadersGrid);
+        HeadersGrid.PointerMoved += (_, pointerEventArgs) => _lastPointerPosition = pointerEventArgs.GetPosition(HeadersGrid);
 
-        _refreshTimer = new Timer(100);
-        _refreshTimer.Elapsed += OnRefresh;
-        _refreshTimer.AutoReset = false;
-        _refreshTimer.Start();
+        _refreshTimer = new WidgetRefreshTimer(nameof(InstrumentHeadersWidget), 100, Refresh);
     }
 
+    /// Builds one row per instrument header in the principal, and records the server's allocated instruments as already read.
     private void LoadAllHeaders()
     {
-        _lastSubs = ContextManager.ServerContext.InstrumentIds;
+        _previousInstrumentIds = ContextManager.ServerContext.InstrumentIds;
         foreach (InstrumentHeader128 header128 in _context.Primary.EnumerateInstrumentHeaders())
         {
-            int instrumentHeaderid = header128.AsInstrumentHeader().InstrumentHeaderId;
-            var widgetHeader = new WidgetInstrumentHeader(instrumentHeaderid, in header128);
-            _allHeaders.Add(widgetHeader);
-            _headersById[instrumentHeaderid] = widgetHeader;
+            int instrumentHeaderId = header128.AsInstrumentHeader().InstrumentHeaderId;
+            WidgetInstrumentHeader widgetInstrumentHeader = new(instrumentHeaderId, in header128);
+            _allHeaders.Add(widgetInstrumentHeader);
+            _headersById[instrumentHeaderId] = widgetInstrumentHeader;
         }
     }
 
-    private void OnRefresh(object? sender, ElapsedEventArgs e)
+    /// Re-reads the header of each instrument the server allocated since the last pass and posts the row updates to the UI thread.
+    private void Refresh()
     {
-        if (_disposed) return;
+        // Step 1: the newly allocated instruments. Why the server's: every instrument it allocated, not just the principal's, so a GUI's own allocation (on a remote desk too) shows here
+        Bitset64 instrumentIds = ContextManager.ServerContext.InstrumentIds;
+        Bitset64 newInstrumentIds = new Bitset64(instrumentIds.Raw & ~_previousInstrumentIds.Raw);
 
-        try
+        // Step 2: read each one's header here, apply it on the UI thread
+        List<Action> rowUpdates = new();
+        foreach (int instrumentId in newInstrumentIds)
         {
-            // Why: every instrument the server allocated, not just the principal's, so a GUI's own allocation (on a remote desk too) shows here
-            Bitset64 currentSubs = ContextManager.ServerContext.InstrumentIds;
-            Bitset64 diff = new Bitset64(currentSubs.Raw ^ _lastSubs.Raw);
-            diff.Raw &= currentSubs.Raw;
-
-            if (!diff.IsEmpty)
+            // Why the catch: an instrument this principal cannot resolve must not stop the others updating
+            try
             {
-                List<Action> uiUpdates = new List<Action>();
-                foreach (int instrumentId in diff)
+                int instrumentHeaderId = _context.Primary.GetInstrumentHeaderIdByInstrumentId(instrumentId).GetReadonlyRef();
+                if (_headersById.TryGetValue(instrumentHeaderId, out WidgetInstrumentHeader? widgetInstrumentHeader))
                 {
-                    try
-                    {
-                        int headerId = _context.Primary.GetInstrumentHeaderIdByInstrumentId(instrumentId).GetReadonlyRef();
-                        if (_headersById.TryGetValue(headerId, out var widgetHeader))
-                        {
-                            var header128 = _context.Primary.GetInstrumentHeader(headerId).Read();
-                            uiUpdates.Add(() => widgetHeader.Update(in header128));
-                        }
-                    }
-                    catch { }
-                }
-
-                if (uiUpdates.Count > 0)
-                {
-                    Dispatcher.UIThread.Post(() =>
-                    {
-                        if (_disposed) return;
-                        foreach (var update in uiUpdates) update();
-                    });
+                    InstrumentHeader128 header128 = _context.Primary.GetInstrumentHeader(instrumentHeaderId).Read();
+                    rowUpdates.Add(() => widgetInstrumentHeader.Update(in header128));
                 }
             }
-
-            _lastSubs = currentSubs;
+            catch { }
         }
-        catch (Exception ex)
+        if (rowUpdates.Count > 0)
         {
-            Console.WriteLine($"InstrumentHeadersWidget Error: {ex.Message}");
-        }
-        finally
-        {
-            if (!_disposed) _refreshTimer.Start();
-        }
-    }
-
-    private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
-    {
-        var menu = sender as ContextMenu;
-        if (menu == null || HeadersGrid == null) return;
-
-        menu.Items.Clear();
-
-        var visual = HeadersGrid.InputHitTest(_lastPointerPos) as Visual;
-        bool isHeader = false;
-        string? clickedColumn = null;
-        WidgetInstrumentHeader? row = null;
-
-        var v = visual;
-        while (v != null)
-        {
-            if (v is DataGridColumnHeader columnHeader)
+            Dispatcher.UIThread.Post(() =>
             {
-                isHeader = true;
-                clickedColumn = columnHeader.Content?.ToString();
-                break;
-            }
-            if (v is DataGridRow dataGridRow)
-            {
-                row = dataGridRow.DataContext as WidgetInstrumentHeader;
-                break;
-            }
-            v = v.GetVisualParent() as Visual;
-        }
-        row ??= HeadersGrid.SelectedItem as WidgetInstrumentHeader;
-
-        if (isHeader)
-        {
-            // Filter section for the column that was right-clicked: a regex over its display text,
-            // enum columns included ("Future|Spread"). All active filters AND together.
-            _columnRegexFilters.AddMenuItems(menu, clickedColumn);
-
-            foreach (DataGridColumn col in HeadersGrid.Columns)
-            {
-                string header = col.Header?.ToString() ?? "Column";
-                MenuItem item = new MenuItem { Header = header, ToggleType = MenuItemToggleType.CheckBox, IsChecked = col.IsVisible };
-                item.Click += (_, _) => col.IsVisible = !col.IsVisible;
-                menu.Items.Add(item);
-            }
-        }
-        else
-        {
-            // Allocating to the GUI client is what makes the server open the instrument's data
-            // feed, so any header in this grid can be lit up and laddered from here — in both a
-            // strategy workspace and a server workspace. Idempotent if already allocated.
-            var allocateItem = new MenuItem
-            {
-                Header = row != null ? $"Allocate {row.Symbol}" : "Allocate Instrument",
-                IsEnabled = row != null
-            };
-            if (row != null)
-            {
-                int instrumentHeaderId = row.InstrumentHeaderId;
-                allocateItem.Click += (_, _) => _context.Manual.OnAllocateInstrument(instrumentHeaderId);
-            }
-            menu.Items.Add(allocateItem);
-
-            // Why only when allocated: order entry and the ladder need the instrument's id in this workspace's principal
-            int instrumentId = -1;
-            bool isAllocated = row != null && _context.Primary.TryGetInstrumentId(row.InstrumentHeaderId, out instrumentId) && _context.Primary.InstrumentIds[instrumentId];
-            menu.Items.Add(new Separator());
-
-            var createItem = new MenuItem { Header = "Create Order", Icon = new TextBlock { Text = "📝" }, IsEnabled = isAllocated };
-            createItem.Click += (_, _) => PerformCreateOrder(instrumentId);
-            menu.Items.Add(createItem);
-
-            var ladderItem = new MenuItem { Header = "Open Ladder", Icon = new TextBlock { Text = "🪜" }, IsEnabled = isAllocated };
-            ladderItem.Click += (_, _) => PerformOpenLadder(instrumentId);
-            menu.Items.Add(ladderItem);
-        }
-    }
-
-    private void PerformCreateOrder(int instrumentId) => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, _context.Primary.GetInstrument(instrumentId)));
-
-    private void PerformOpenLadder(int instrumentId) => this.AddToHost(LadderWidget.NewLadder(_context, instrumentId));
-
-    private bool FilterRow(object item)
-    {
-        return item is WidgetInstrumentHeader row && _columnRegexFilters.Matches(row);
-    }
-
-    public string? SaveStateJson()
-    {
-        var state = new InstrumentHeadersWidgetState();
-        foreach (var col in HeadersGrid.Columns)
-        {
-            state.Columns.Add(new InstrumentHeadersColumnState
-            {
-                // Base name, not the decorated header — a filter active at save time must not
-                // change the column's saved identity.
-                Header = _columnRegexFilters.GetBaseName(col),
-                Width = col.Width.Value,
-                DisplayIndex = col.DisplayIndex,
-                IsVisible = col.IsVisible
+                if (_refreshTimer.IsDisposed)
+                    return;
+                foreach (Action rowUpdate in rowUpdates)
+                    rowUpdate();
             });
         }
-        foreach ((string column, string pattern) in _columnRegexFilters.GetActivePatterns())
-        {
-            state.Filters.Add(new InstrumentHeadersFilterState { Column = column, Pattern = pattern });
-        }
-        return Json.Serialize(state);
+
+        _previousInstrumentIds = instrumentIds;
     }
 
+    /// Fills the grid's right-click menu: filters and column toggles on a header; allocate, order entry and ladder on a row.
+    private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not ContextMenu contextMenu)
+            return;
+        contextMenu.Items.Clear();
+
+        // Step 1: a header filters its column (a regex over its display text, enum columns included: "Future|Spread") and lists the columns to toggle
+        DataGridHit dataGridHit = HeadersGrid.GetDataGridHit(_lastPointerPosition);
+        if (dataGridHit.IsColumnHeader)
+        {
+            _columnRegexFilters.AddMenuItems(contextMenu, dataGridHit.ColumnHeaderText);
+            contextMenu.AddColumnVisibilityMenuItems(HeadersGrid);
+            return;
+        }
+
+        // Step 2: allocate. Why: allocating to the GUI client makes the server open the instrument's data feed, so any header can be lit up and laddered from here; idempotent
+        WidgetInstrumentHeader? widgetInstrumentHeader = dataGridHit.RowItem as WidgetInstrumentHeader ?? HeadersGrid.SelectedItem as WidgetInstrumentHeader;
+        contextMenu.Items.Add(WidgetMenus.NewMenuItem(widgetInstrumentHeader != null ? $"Allocate {widgetInstrumentHeader.Symbol}" : "Allocate Instrument", iconText: "",
+            () => _context.Manual.OnAllocateInstrument(widgetInstrumentHeader!.InstrumentHeaderId), isEnabled: widgetInstrumentHeader != null));
+
+        // Step 3: order entry and the ladder. Why only when allocated: they need the instrument's id in this workspace's principal
+        int instrumentId = -1;
+        bool isAllocated = widgetInstrumentHeader != null && _context.Primary.TryGetInstrumentId(widgetInstrumentHeader.InstrumentHeaderId, out instrumentId) && _context.Primary.InstrumentIds[instrumentId];
+        contextMenu.Items.Add(new Separator());
+        contextMenu.Items.Add(WidgetMenus.NewMenuItem("Create Order", "📝", () => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, _context.Primary.GetInstrument(instrumentId))), isAllocated));
+        contextMenu.Items.Add(WidgetMenus.NewMenuItem("Open Ladder", "🪜", () => this.AddToHost(LadderWidget.NewLadder(_context, instrumentId)), isAllocated));
+    }
+
+    private bool FilterRow(object item) => item is WidgetInstrumentHeader widgetInstrumentHeader && _columnRegexFilters.Matches(widgetInstrumentHeader);
+
+    /// The columns' layout, under their base names (a filter active at save time must not change a column's saved identity), and the filters.
+    public string? SaveStateJson() => Json.Serialize(new InstrumentHeadersWidgetState
+    {
+        Columns = DataGridColumnState.NewDataGridColumnStates(HeadersGrid, _columnRegexFilters.GetBaseName),
+        Filters = _columnRegexFilters.NewColumnRegexFilterStates(),
+    });
+
+    /// Applies a saved state's column layout and filters. Why the catch: a layout file that no longer parses must not stop the widget opening; it keeps its defaults
     public void LoadStateJson(string? json)
     {
-        if (string.IsNullOrWhiteSpace(json)) return;
+        if (string.IsNullOrWhiteSpace(json))
+            return;
         try
         {
-            var state = Tools.Json.Deserialize<InstrumentHeadersWidgetState>(json);
-            if (state == null) return;
-
-            foreach (var colState in state.Columns)
-            {
-                var col = HeadersGrid.Columns.FirstOrDefault(c => _columnRegexFilters.GetBaseName(c) == colState.Header);
-                if (col != null)
-                {
-                    col.Width = new DataGridLength(colState.Width);
-                    col.DisplayIndex = colState.DisplayIndex;
-                    col.IsVisible = colState.IsVisible;
-                }
-            }
-
-            _columnRegexFilters.ClearAllFilters();
-            foreach (InstrumentHeadersFilterState filterState in state.Filters ?? new())
-            {
-                if (string.IsNullOrEmpty(filterState.Pattern) || !_columnRegexFilters.IsFilterable(filterState.Column))
-                    continue;
-                try
-                {
-                    _columnRegexFilters.SetRegexFilter(filterState.Column, filterState.Pattern,
-                        new Regex(filterState.Pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
-                }
-                catch (ArgumentException) { }
-            }
+            InstrumentHeadersWidgetState? instrumentHeadersWidgetState = Json.Deserialize<InstrumentHeadersWidgetState>(json);
+            if (instrumentHeadersWidgetState == null)
+                return;
+            DataGridColumnState.ApplyDataGridColumnStates(HeadersGrid, instrumentHeadersWidgetState.Columns, _columnRegexFilters.GetBaseName);
+            _columnRegexFilters.ApplyColumnRegexFilterStates(instrumentHeadersWidgetState.Filters ?? new());
         }
         catch { }
     }
 
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-        _refreshTimer?.Stop();
-        _refreshTimer?.Dispose();
-    }
+    public void Dispose() => _refreshTimer?.Dispose();
 }

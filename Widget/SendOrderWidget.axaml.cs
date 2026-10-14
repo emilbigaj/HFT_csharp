@@ -17,8 +17,9 @@ using Tools;
 
 namespace Widget;
 
-// Wrapper to keep the selection stable in the ComboBox
-public class AmendOrderWrapper : INotifyPropertyChanged
+/// One active order in the Amend tab's list: the order, its instrument and the line the list shows. Updated in place on each
+/// refresh so the ComboBox keeps its selection. UI thread, cold path.
+public sealed class AmendOrderWrapper : INotifyPropertyChanged
 {
     private OrderState _orderState;
     private string _displayString = null!;
@@ -43,22 +44,18 @@ public class AmendOrderWrapper : INotifyPropertyChanged
     public ulong ClientOrderId => _orderState.OrderHeader.OrderId;
     public bool IsAmendable => !_orderState.OrderHeader.OrderId.IsAlgoOrder();   // the algo owns its orders' targets
 
-    public AmendOrderWrapper(OrderState state, Instrument inst)
+    public AmendOrderWrapper(OrderState orderState, Instrument instrument)
     {
-        Instrument = inst;
-        Update(state, inst);
+        Instrument = instrument;
+        Update(orderState, instrument);
     }
 
-    public void Update(OrderState state, Instrument inst)
+    /// Takes the order's latest state; the list's line, "Symbol | Px: price  Qty: working quantity", notifies only when its text changes.
+    public void Update(OrderState orderState, Instrument instrument)
     {
-        _orderState = state;
-        Instrument = inst;
-
-        // Format: Symbol Side Qty @ Price
-        double price = inst.TicksToPrice(state.OrderProfile.Ticks);
-        string priceStr = price.ToString($"N{inst.TicKDecimals}");
-
-        DisplayString = $"{inst.ShortSymbol} | Px: {priceStr}  Qty: {state.WorkingQuantity}";
+        _orderState = orderState;
+        Instrument = instrument;
+        DisplayString = $"{instrument.ShortSymbol} | Px: {instrument.TicksToPriceString(orderState.OrderProfile.Ticks)}  Qty: {orderState.WorkingQuantity}";
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -66,20 +63,18 @@ public class AmendOrderWrapper : INotifyPropertyChanged
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
 }
 
+/// The order-entry widget's state: the mode (the Create or Amend tab), the instrument or order chosen, the price and quantity
+/// typed (each tab keeps its own), and the send buttons' look. UI thread, cold path.
 public sealed class SendOrderViewModel : INotifyPropertyChanged
 {
-    private readonly WorkspaceContext _context;
+    /// One tab's typed price (in ticks) and quantity, kept while the other tab is shown.
+    private readonly record struct OrderInputs(int? TicksInput, int? QuantityInput);
 
     // --- Backing Fields (Source of Truth is INT) ---
     private int? _ticksInput = null;
     private int? _quantityInput = null;
-
-    // --- State Persistence for Tabs ---
-    private int? _savedCreateTicksInput = null;
-    private int? _savedCreateQuantityInput = null;
-
-    private int? _savedAmendTicksInput = null;
-    private int? _savedAmendQuantityInput = null;
+    private readonly OrderInputs[] _savedOrderInputsByTabIndex = new OrderInputs[2];   // indexed by SelectedTabIndex: Create 0, Amend 1
+    private string? _revertingInputPropertyName;   // the input string being shown again after a refused edit; null when none
 
     // --- Tab / Mode State ---
     private bool _isCreateMode = true;
@@ -103,11 +98,6 @@ public sealed class SendOrderViewModel : INotifyPropertyChanged
     private string _createButtonText = "Create Buy";
     private IBrush _createButtonBrush = Palette.BidActiveBlue;
     private IBrush _amendButtonBrush = Brushes.Gray;
-
-    public SendOrderViewModel(WorkspaceContext context)
-    {
-        _context = context;
-    }
 
     // --- Public Properties ---
 
@@ -144,24 +134,22 @@ public sealed class SendOrderViewModel : INotifyPropertyChanged
         TicksInput = newTicks;
     }
 
+    /// Steps the quantity by delta; no effect when the step would flip an amended order's side.
     public void AdjustQuantity(int delta)
     {
-        int newQty = (QuantityInput ?? 0) + delta;
+        int quantity = (QuantityInput ?? 0) + delta;
+        if (IsQuantityAllowed(quantity))
+            QuantityInput = quantity;
+    }
 
-        // Enforce Amend Side Constraints
-        if (!IsCreateMode && SelectedOrderToAmend != null)
-        {
-            Side side = SelectedOrderToAmend.Side;
-            // If Buy (Positive): New Quantity must be >= 0 (0 implies cancel/reduce to nothing, effectively)
-            if (side == Side.Buy && newQty < 0)
-                return;
-
-            // If Sell (Negative): New Quantity must be <= 0
-            if (side == Side.Sell && newQty > 0)
-                return;
-        }
-
-        QuantityInput = newQty;
+    /// False when an amend would flip the order's side: a buy's quantity stays at or above 0, a sell's at or below 0.
+    private bool IsQuantityAllowed(int quantity)
+    {
+        if (IsCreateMode || SelectedOrderToAmend == null)
+            return true;
+        Side side = SelectedOrderToAmend.Side;
+        bool isSideFlipped = (side == Side.Buy && quantity < 0) || (side == Side.Sell && quantity > 0);
+        return !isSideFlipped;
     }
 
     public bool IsAutoCenter
@@ -170,50 +158,30 @@ public sealed class SendOrderViewModel : INotifyPropertyChanged
         set { _isAutoCenter = value; OnPropertyChanged(); }
     }
 
+    /// Switches between the Create and Amend tabs, keeping the tab being left's inputs and restoring the other's.
     public bool IsCreateMode
     {
         get => _isCreateMode;
         set
         {
-            if (_isCreateMode != value)
-            {
-                // 1. Save current state before switching
-                if (_isCreateMode) // Switch FROM Create TO Amend
-                {
-                    _savedCreateTicksInput = TicksInput;
-                    _savedCreateQuantityInput = QuantityInput;
+            if (_isCreateMode == value)
+                return;
 
-                    // Switch Mode
-                    _isCreateMode = value;
-                    OnPropertyChanged();
-                    OnPropertyChanged(nameof(ActiveLadderInstrument));
+            // Step 1: keep the inputs of the tab being left
+            _savedOrderInputsByTabIndex[SelectedTabIndex] = new OrderInputs(TicksInput, QuantityInput);
 
-                    // Restore Amend State using Properties
-                    TicksInput = _savedAmendTicksInput;
-                    QuantityInput = _savedAmendQuantityInput;
-                }
-                else // Switch FROM Amend TO Create
-                {
-                    _savedAmendTicksInput = TicksInput;
-                    _savedAmendQuantityInput = QuantityInput;
+            // Step 2: switch mode
+            _isCreateMode = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(ActiveLadderInstrument));
 
-                    // Switch Mode
-                    _isCreateMode = value;
-                    OnPropertyChanged();
-                    OnPropertyChanged(nameof(ActiveLadderInstrument));
+            // Step 3: restore the inputs of the tab being shown
+            OrderInputs savedOrderInputs = _savedOrderInputsByTabIndex[SelectedTabIndex];
+            TicksInput = savedOrderInputs.TicksInput;
+            QuantityInput = savedOrderInputs.QuantityInput;
 
-                    // Restore Create State using Properties
-                    TicksInput = _savedCreateTicksInput;
-                    QuantityInput = _savedCreateQuantityInput;
-                }
-
-                // Explicitly notify strings in case the integer values happened to be identical
-                // between modes (e.g. 100 ticks -> 100 ticks) but the context changed.
-                OnPropertyChanged(nameof(TicksInputAsString));
-                OnPropertyChanged(nameof(QuantityInputAsString));
-
-                UpdateButtonStates();
-            }
+            // Step 4: the strings follow the new mode's instrument even when the numbers are unchanged
+            RefreshInputViews();
         }
     }
 
@@ -222,38 +190,28 @@ public sealed class SendOrderViewModel : INotifyPropertyChanged
         get => _selectedCreateOrderInstrument;
         set
         {
-            if (_selectedCreateOrderInstrument != value)
+            if (_selectedCreateOrderInstrument == value)
+                return;
+            _selectedCreateOrderInstrument = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(ActiveLadderInstrument));
+
+            // Step 1: a new instrument starts at quantity 0 and the book's centre (even one-sided); no instrument clears both
+            if (value != null && IsCreateMode)
             {
-                _selectedCreateOrderInstrument = value;
-                OnPropertyChanged();
-                OnPropertyChanged(nameof(ActiveLadderInstrument));
-
-                // Only set defaults if we are actually switching TO an instrument
-                if (value != null && IsCreateMode)
-                {
-                    QuantityInput = 0; // Use Property
-
-                    // Use common static helper to initialize price even if one-sided
-                    int center = GetCentreTIck(ContextManager.ServerContext.GetMarketByPrice64(value.InstrumentId).Read());
-                    if (center != 0)
-                    {
-                        TicksInput = center;
-                    }
-                }
-                else if (value == null)
-                {
-                    // Clear inputs if no instrument is selected
-                    QuantityInput = null; // Use Property
-                    TicksInput = null; // Use Property
-                }
-
-                // Explicitly notify strings because if TicksInput didn't change (e.g. same price),
-                // the string format might still have changed due to the new Instrument.
-                OnPropertyChanged(nameof(TicksInputAsString));
-                OnPropertyChanged(nameof(QuantityInputAsString));
-
-                UpdateButtonStates();
+                QuantityInput = 0;
+                int centreTicks = ContextManager.ServerContext.TryReadMarketByPrice64(value.InstrumentId, out MarketByPrice64 marketByPrice64) ? GetCentreTicks(in marketByPrice64) : 0;
+                if (centreTicks != 0)
+                    TicksInput = centreTicks;
             }
+            else if (value == null)
+            {
+                QuantityInput = null;
+                TicksInput = null;
+            }
+
+            // Step 2: the price string follows the new instrument's format even when the ticks are unchanged
+            RefreshInputViews();
         }
     }
 
@@ -262,138 +220,78 @@ public sealed class SendOrderViewModel : INotifyPropertyChanged
         get => _selectedOrderToAmend;
         set
         {
-            if (value != _selectedOrderToAmend)
-            {
-                _selectedOrderToAmend = value;
-                OnPropertyChanged();
-                OnPropertyChanged(nameof(ActiveLadderInstrument));
+            if (value == _selectedOrderToAmend)
+                return;
+            _selectedOrderToAmend = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(ActiveLadderInstrument));
 
-                if (value != null)
-                {
-                    QuantityInput = value.OrderState.WorkingQuantity; // Use Property
-                    TicksInput = value.OrderState.OrderProfile.Ticks; // Use Property
-                }
-                else
-                {
-                    QuantityInput = null; // Use Property
-                    TicksInput = null; // Use Property
-                }
+            // Step 1: the inputs start at the order's working quantity and price, or clear with no order
+            QuantityInput = value?.OrderState.WorkingQuantity;
+            TicksInput = value?.OrderState.OrderProfile.Ticks;
 
-                // Explicitly notify strings because if TicksInput didn't change,
-                // the string format might still have changed or needs refreshing.
-                OnPropertyChanged(nameof(TicksInputAsString));
-                OnPropertyChanged(nameof(QuantityInputAsString));
-
-                UpdateButtonStates();
-            }
+            // Step 2: the price string follows the order's instrument's format even when the ticks are unchanged
+            RefreshInputViews();
         }
     }
 
     public Instrument? ActiveLadderInstrument => IsCreateMode ? SelectedCreateOrderInstrument : SelectedOrderToAmend?.Instrument;
 
-    private string _quantityInputAsStringOverride = null!;
     public string QuantityInputAsString
     {
-        get
-        {
-            if (string.IsNullOrEmpty(_quantityInputAsStringOverride))
-            {
-                return QuantityInput?.ToString() ?? string.Empty;
-            }
-            else
-            {
-                return _quantityInputAsStringOverride;
-            }
-        }
+        get => ToShownInputString(nameof(QuantityInputAsString), QuantityInput?.ToString() ?? string.Empty);
         set
         {
+            // Step 1: a lone minus starts a sell quantity
             if (value == "-")
             {
-                QuantityInput = -0;
+                QuantityInput = 0;
                 return;
             }
-            else if (string.IsNullOrEmpty(value))
-            {
+            if (string.IsNullOrEmpty(value))
                 QuantityInput = null;
-            }
 
-            if (int.TryParse(value, out int result))
-            {
-                if (!IsCreateMode && SelectedOrderToAmend != null)
-                {
-                    Side side = SelectedOrderToAmend.Side;
-                    if (side == Side.Buy && result < 0)
-                    {
-                        ForceRevertQuantityInputAsString();
-                        return;
-                    }
-                    if (side == Side.Sell && result > 0)
-                    {
-                        ForceRevertQuantityInputAsString();
-                        return;
-                    }
-                }
-                QuantityInput = result;
-            }
+            // Step 2: take a quantity the order's side allows, else show the kept one again
+            if (int.TryParse(value, out int quantity) && IsQuantityAllowed(quantity))
+                QuantityInput = quantity;
             else
-            {
-                // Parse failed
-                ForceRevertQuantityInputAsString();
-            }
+                ForceRevertInputString(nameof(QuantityInputAsString));
         }
     }
 
-    private string _ticksInputAsStringOverride = null!;
     public string TicksInputAsString
     {
-        get
-        {
-            if (string.IsNullOrEmpty(_ticksInputAsStringOverride))
-            {
-                if (ActiveLadderInstrument != null && TicksInput.HasValue)
-                    return ActiveLadderInstrument.TicksToPrice(TicksInput.Value).ToString($"N{ActiveLadderInstrument.TicKDecimals}");
-                return string.Empty;
-            }
-            else
-            {
-                return _ticksInputAsStringOverride;
-            }
-        }
+        get => ToShownInputString(nameof(TicksInputAsString), ActiveLadderInstrument != null && TicksInput.HasValue ? ActiveLadderInstrument.TicksToPriceString(TicksInput.Value) : string.Empty);
         set
         {
-            if (double.TryParse(value, out double price))
-            {
-                if (ActiveLadderInstrument != null)
-                {
-                    int ticks = ActiveLadderInstrument.RoundToTicks(price);
-                    TicksInput = ticks;
-                }
-            }
-            else
-            {
-                ForceRevertTicksInputAsString();
-            }
-
+            if (!double.TryParse(value, out double price))
+                ForceRevertInputString(nameof(TicksInputAsString));
+            else if (ActiveLadderInstrument != null)
+                TicksInput = ActiveLadderInstrument.RoundToTicks(price);
         }
     }
 
-    private void ForceRevertQuantityInputAsString()
+    /// The input string the TextBox gets: with a leading space while ForceRevertInputString re-sends it.
+    private string ToShownInputString(string propertyName, string inputString) =>
+        propertyName == _revertingInputPropertyName ? " " + inputString : inputString;
+
+    /// Puts the kept value back over a refused edit: it is re-sent once with a leading space, so the TextBox replaces its text even when the kept string is the same.
+    private void ForceRevertInputString(string propertyName)
     {
         Dispatcher.UIThread.Post(() =>
         {
-            _quantityInputAsStringOverride = " " + QuantityInputAsString;
-            OnPropertyChanged(nameof(QuantityInputAsString));
-            _quantityInputAsStringOverride = null!;
+            _revertingInputPropertyName = propertyName;
+            OnPropertyChanged(propertyName);
+            _revertingInputPropertyName = null;
         }, DispatcherPriority.Default);
     }
-    private void ForceRevertTicksInputAsString()
+
+    /// Re-reads both input strings and the buttons, for a change of mode or instrument that alters them without changing the numbers.
+    private void RefreshInputViews()
     {
-        Dispatcher.UIThread.Post(() =>
-        {
-            _ticksInputAsStringOverride = " " + TicksInputAsString;
-            OnPropertyChanged(nameof(TicksInputAsString));
-            _ticksInputAsStringOverride = null!;
-        }, DispatcherPriority.Default);
+        OnPropertyChanged(nameof(TicksInputAsString));
+        OnPropertyChanged(nameof(QuantityInputAsString));
+        UpdateButtonStates();
     }
 
     // --- Visual Properties ---
@@ -451,23 +349,15 @@ public sealed class SendOrderViewModel : INotifyPropertyChanged
         }
     }
 
-    /// <summary>
-    /// Shared logic to determine the logical center of a book for UI alignment.
-    /// </summary>
-    public static int GetCentreTIck(in MarketByPrice64 mbp)
+    /// The book's centre in ticks: the mid when both sides show, else the one best price, else 0. Centres the ladder and a new order's price.
+    public static int GetCentreTicks(in MarketByPrice64 marketByPrice64)
     {
-        if (mbp.BidsCount > 0 && mbp.AsksCount > 0)
-        {
-            return (int)((mbp.BestBid.Ticks + mbp.BestAsk.Ticks) * 0.5);
-        }
-        else if (mbp.BidsCount > 0)
-        {
-            return mbp.BestBid.Ticks;
-        }
-        else if (mbp.AsksCount > 0)
-        {
-            return mbp.BestAsk.Ticks;
-        }
+        if (marketByPrice64.BidsCount > 0 && marketByPrice64.AsksCount > 0)
+            return (int)((marketByPrice64.BestBid.Ticks + marketByPrice64.BestAsk.Ticks) * 0.5);
+        if (marketByPrice64.BidsCount > 0)
+            return marketByPrice64.BestBid.Ticks;
+        if (marketByPrice64.AsksCount > 0)
+            return marketByPrice64.BestAsk.Ticks;
         return 0;
     }
 
@@ -477,32 +367,24 @@ public sealed class SendOrderViewModel : INotifyPropertyChanged
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
 }
 
+/// The order-entry widget: creates an order on an instrument, or amends or cancels an active one, beside a compact ladder of
+/// the instrument's book. The ladder rows are built on the refresh timer's thread; everything else runs on the UI thread.
+/// Cold path (GUI).
 public partial class SendOrderWidget : UserControl, IWidget, IDisposable
 {
-    public const string TypeKeyStatic = "SendOrderWidget";
-    public string TypeKey => TypeKeyStatic;
-
-    private string _title = "Send Order";
-    public string Title
-    {
-        get => _title;
-        private set { _title = value; TitleChanged?.Invoke(this, EventArgs.Empty); }
-    }
-    public event EventHandler? TitleChanged;
+    public string Title => "Send Order";
 
     public double DefaultWidth => 600;
     public double DefaultHeight => 277;
 
     private readonly WorkspaceContext _context;
     private readonly SendOrderViewModel _viewModel;
-    private readonly System.Timers.Timer _refreshTimer;
-    private bool _disposed;
+    private readonly WidgetRefreshTimer _refreshTimer;
 
-    private int _ladderScrollOffset = 0;
+    private int _ladderScrollOffset = 0;   // ticks the ladder's centre sits off the book's centre; the wheel writes it, the next refresh pass reads it
 
-    // Buffers for Ladder
-    private readonly List<RenderedLadderRow> _dataBuffer = new();
-    private readonly List<RenderedLadderRow> _rowDataCache = new();
+    private readonly List<RenderedLadderRow> _renderedLadderRows = new();       // this pass's rows, handed to the ladder (timer thread, read by the UI post)
+    private readonly List<RenderedLadderRow> _renderedLadderRowCache = new();   // every row built so far, reused so unchanged text keeps its layout
 
     public SendOrderWidget()
     {
@@ -513,7 +395,7 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
     public SendOrderWidget(WorkspaceContext context)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
-        _viewModel = new SendOrderViewModel(_context);
+        _viewModel = new SendOrderViewModel();
         DataContext = _viewModel;
         InitializeComponent();
 
@@ -524,65 +406,37 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
         LadderControl.PointerWheelChanged += OnLadderPointerWheelChanged;
         LadderControl.PointerPressed += OnLadderPointerPressed;
 
-        // Manual Wiring for TextBox Input Filtering (Tunneling ensures checking before TextBox logic)
-        PriceTextBox.AddHandler(TextInputEvent, OnPriceTextInput, RoutingStrategies.Tunnel);
-        QtyTextBox.AddHandler(TextInputEvent, OnQtyTextInput, RoutingStrategies.Tunnel);
+        // Why tunnelling: the filter sees typed text before the TextBox takes it
+        PriceTextBox.AddHandler(TextInputEvent, (_, textInputEventArgs) => FilterTextInput(textInputEventArgs, isDecimalAllowed: true), RoutingStrategies.Tunnel);
+        QtyTextBox.AddHandler(TextInputEvent, (_, textInputEventArgs) => FilterTextInput(textInputEventArgs, isDecimalAllowed: false), RoutingStrategies.Tunnel);
 
         PopulateInstruments();
 
-        _refreshTimer = new System.Timers.Timer(100);
-        _refreshTimer.Elapsed += OnTimerTick;
-        _refreshTimer.AutoReset = false;
-        _refreshTimer.Start();
+        _refreshTimer = new WidgetRefreshTimer(nameof(SendOrderWidget), intervalMilliseconds: 100, Refresh);
     }
 
-    // --- Input Filtering Handlers (View Level) ---
-    private void OnPriceTextInput(object? sender, TextInputEventArgs e)
+    /// Swallows typed text holding anything but digits and a minus, or a decimal point where allowed.
+    private static void FilterTextInput(TextInputEventArgs textInputEventArgs, bool isDecimalAllowed)
     {
-        if (string.IsNullOrEmpty(e.Text)) return;
-
-        // Allow digits, dot, minus
-        foreach (char c in e.Text)
+        if (string.IsNullOrEmpty(textInputEventArgs.Text))
+            return;
+        foreach (char typedCharacter in textInputEventArgs.Text)
         {
-            if (!char.IsDigit(c) && c != '.' && c != '-')
+            bool isAllowed = char.IsDigit(typedCharacter) || typedCharacter == '-' || (isDecimalAllowed && typedCharacter == '.');
+            if (!isAllowed)
             {
-                e.Handled = true; // Swallow input
+                textInputEventArgs.Handled = true;
                 return;
             }
         }
     }
 
-    private void OnQtyTextInput(object? sender, TextInputEventArgs e)
-    {
-        if (string.IsNullOrEmpty(e.Text)) return;
-
-        // Allow digits, minus
-        foreach (char c in e.Text)
-        {
-            if (!char.IsDigit(c) && c != '-')
-            {
-                e.Handled = true; // Swallow input
-                return;
-            }
-        }
-    }
-
-    private void OnInstrumentComboDropDownOpened(object? sender, EventArgs e)
-    {
-        if (sender is ComboBox cb)
-        {
-            CalculateMaxDropDownHeight(cb);
-        }
-    }
+    private void OnInstrumentComboDropDownOpened(object? sender, EventArgs e) => CalculateMaxDropDownHeight(InstrumentCombo);
 
     private void OnOrderComboDropDownOpened(object? sender, EventArgs e)
     {
         RefreshActiveOrders();
-
-        if (sender is ComboBox cb)
-        {
-            CalculateMaxDropDownHeight(cb);
-        }
+        CalculateMaxDropDownHeight(OrderCombo);
     }
 
     private void CalculateMaxDropDownHeight(ComboBox cb)
@@ -592,7 +446,7 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
         {
             double bottomOfCombo = point.Value.Y + cb.Bounds.Height;
             double availableHeight = this.Bounds.Height - bottomOfCombo;
-            // Subtracting a small margin (e.g. 5px) ensures it doesn't touch the very edge 
+            // Subtracting a small margin (e.g. 5px) ensures it doesn't touch the very edge
             // or get clipped by the widget's own bottom border/padding.
             cb.MaxDropDownHeight = Math.Max(0, availableHeight - 5);
         }
@@ -629,9 +483,9 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
         Dispatcher.UIThread.Post(() =>
         {
             _viewModel.IsCreateMode = true;
-            // Find reference in our subscribed list to match reference equality if possible
-            var match = _viewModel.SubscribedInstruments.FirstOrDefault(i => i.InstrumentId == instrument.InstrumentId);
-            _viewModel.SelectedCreateOrderInstrument = match ?? instrument;
+            // Why the subscribed instance: the ComboBox selects by reference
+            Instrument? subscribedInstrument = _viewModel.SubscribedInstruments.FirstOrDefault(candidateInstrument => candidateInstrument.InstrumentId == instrument.InstrumentId);
+            _viewModel.SelectedCreateOrderInstrument = subscribedInstrument ?? instrument;
 
             if (tick.HasValue)
                 _viewModel.TicksInput = tick.Value;
@@ -664,187 +518,85 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
         _ladderScrollOffset = 0;
     }
 
-    private void OnTimerTick(object? sender, System.Timers.ElapsedEventArgs e)
+    /// One refresh pass, on the timer thread: builds the ladder rows, then posts them and the Amend list's refresh to the UI thread.
+    private void Refresh()
     {
-        if (_disposed) return;
-        try
+        // Step 1: the ladder rows of the instrument being entered, or none; its empty book skips the pass, as in LadderWidget
+        Instrument? activeLadderInstrument = _viewModel.ActiveLadderInstrument;
+        MarketByPrice64 marketByPrice64 = default;
+        if (activeLadderInstrument != null && !ContextManager.ServerContext.TryReadMarketByPrice64(activeLadderInstrument.InstrumentId, out marketByPrice64))
+            return;
+        _renderedLadderRows.Clear();
+        if (activeLadderInstrument != null)
+            AddLadderRows(activeLadderInstrument, in marketByPrice64);
+
+        // Step 2: the Amend list and the ladder, on the UI thread
+        Dispatcher.UIThread.Post(() =>
         {
-            // --- BG Thread Calculation ---
-
-            // 1. Prepare Ladder Data (Heavy lifting)
-            List<RenderedLadderRow> ladderUpdate = new List<RenderedLadderRow>();
-            if (_viewModel.ActiveLadderInstrument != null)
-            {
-                ladderUpdate = CalculateLadderRows(_viewModel.ActiveLadderInstrument);
-            }
-
-            // 2. Schedule UI Updates
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (_disposed) return;
-
-                // Update Active Orders if needed (UI Thread)
-                if (!_viewModel.IsCreateMode && (_viewModel.SelectedOrderToAmend != null || OrderCombo.IsDropDownOpen))
-                {
-                    RefreshActiveOrders(_viewModel.SelectedOrderToAmend?.ClientOrderId ?? 0);
-                }
-
-                // Update Ladder (UI Thread)
-                LadderControl.UpdateRows(ladderUpdate);
-
-                // Restart Timer (UI Thread to avoid race conditions on disposal)
-                if (!_disposed) _refreshTimer.Start();
-            });
-        }
-        catch
-        {
-            // If anything fails, try to restart timer from UI thread to keep alive
-            if (!_disposed)
-                Dispatcher.UIThread.Post(() => { if (!_disposed) _refreshTimer.Start(); });
-        }
+            if (_refreshTimer.IsDisposed)
+                return;
+            if (!_viewModel.IsCreateMode && (_viewModel.SelectedOrderToAmend != null || OrderCombo.IsDropDownOpen))
+                RefreshActiveOrders(_viewModel.SelectedOrderToAmend?.ClientOrderId ?? 0);
+            LadderControl.UpdateRows(_renderedLadderRows);
+        });
     }
 
-    // Refactored from RefreshLadder to return list instead of posting
-    private List<RenderedLadderRow> CalculateLadderRows(Instrument instrument)
+    /// Adds one row per tick the ladder's height shows, around the book's centre moved by the scroll offset. Timer thread.
+    private void AddLadderRows(Instrument instrument, in MarketByPrice64 marketByPrice64)
     {
-
+        // Step 1: the centre, followed when locked, else scrolled
         if (_viewModel.IsAutoCenter)
             _ladderScrollOffset = 0;
+        int centreTicks = SendOrderViewModel.GetCentreTicks(in marketByPrice64) + _ladderScrollOffset;
 
-        MarketByPrice64 mbp = ContextManager.ServerContext.GetMarketByPrice64(instrument.InstrumentId).Read();
-
-        int centerTick = SendOrderViewModel.GetCentreTIck(in mbp);
-        centerTick += _ladderScrollOffset;
-
+        // Step 2: the ticks the ladder's height shows (24 px rows; 400 px until it is laid out)
         double availableHeight = LadderControl.Bounds.Height;
         if (availableHeight < 50) availableHeight = 400;
-        int rowsVisible = (int)(availableHeight / 24.0);
+        int visibleRowCount = (int)(availableHeight / 24.0);
+        int startTicks = centreTicks + visibleRowCount / 2;
+        int endTicks = startTicks - visibleRowCount - 1;
 
-        int halfRows = rowsVisible / 2;
-        int startTick = centerTick + halfRows;
-        int endTick = startTick - rowsVisible - 1;
-
-        _dataBuffer.Clear();
-        int required = (startTick - endTick) + 1;
-
-        // Cache expansion might be unsafe if shared across threads without locks. 
-        // Since OnTimerTick is sequential (AutoReset=false), and we only run one calculation at a time, it's safer.
-        while (_rowDataCache.Count < required) _rowDataCache.Add(new RenderedLadderRow());
-
-        int rIdx = 0;
-        string fmt = $"N{instrument.TicKDecimals}";
-
-        for (int t = startTick; t >= endTick; t--)
+        // Step 3: one cached row per tick; Update rebuilds only the text layouts whose text changed
+        while (_renderedLadderRowCache.Count < startTicks - endTicks + 1) _renderedLadderRowCache.Add(new RenderedLadderRow());
+        int rowIndex = 0;
+        for (int ticks = startTicks; ticks >= endTicks; ticks--)
         {
-            var row = _rowDataCache[rIdx++];
-            row.Ticks = t;
-
-            int bid = mbp.GetBidQuantity(t);
-            int ask = mbp.GetAskQuantity(t);
-
-            row.Price = instrument.TicksToPrice(t).ToString(fmt);
-            row.BidQty = bid > 0 ? bid.ToString() : "";
-            row.AskQty = ask > 0 ? ask.ToString() : "";
-            row.MyBuyQty = "";
-            row.MyBuyAhead = "";
-            row.MySellQty = "";
-            row.MySellAhead = "";
-
-            row.ResetCache();
-            _dataBuffer.Add(row);
+            int bidQuantity = marketByPrice64.GetBidQuantity(ticks);
+            int askQuantity = marketByPrice64.GetAskQuantity(ticks);
+            RenderedLadderRow renderedLadderRow = _renderedLadderRowCache[rowIndex++];
+            renderedLadderRow.Update(ticks, instrument.TicksToPriceString(ticks), bidQuantity > 0 ? bidQuantity.ToString() : "", askQuantity > 0 ? askQuantity.ToString() : "",
+                myBuyQty: "", myBuyAhead: "", mySellQty: "", mySellAhead: "", buyOrderId: 0, sellOrderId: 0);
+            _renderedLadderRows.Add(renderedLadderRow);
         }
-
-        // Return a copy or the buffer itself if consumed immediately on UI thread
-        return new List<RenderedLadderRow>(_dataBuffer);
     }
 
-    // Maintained purely for legacy calls, now redirects to CalculateLadderRows + Update
-    private void RefreshLadder(Instrument instrument)
-    {
-        var rows = CalculateLadderRows(instrument);
-        Dispatcher.UIThread.Post(() => LadderControl.UpdateRows(rows));
-    }
-
+    /// Brings the Amend list in step with the active orders, in the order lists' order, and selects this order (none when 0 or gone). UI thread.
     private void RefreshActiveOrders(ulong selectedClientOrderId = 0)
     {
-        // --- THREAD SAFETY GUARD ---
-        if (!Dispatcher.UIThread.CheckAccess())
+        // Step 1: a row per active order, reusing its existing row so the ComboBox keeps its selection
+        Dictionary<ulong, AmendOrderWrapper> amendOrderWrappersByClientOrderId = _viewModel.ActiveOrders.ToDictionary(amendOrderWrapper => amendOrderWrapper.ClientOrderId);
+        List<AmendOrderWrapper> activeAmendOrderWrappers = new();
+        foreach ((OrderState orderState, OrderTarget _) in _context.EnumerateOrders())
         {
-            Dispatcher.UIThread.Post(() => RefreshActiveOrders(selectedClientOrderId));
-            return;
-        }
-
-        List<(OrderState State, Instrument Inst)> sorted = new();
-        foreach ((OrderState state, OrderTarget target) in _context.EnumerateOrders())
-        {
-            if (state.OrderStateStatus == OrderStateStatus.Active)
-            {
-                Instrument inst = _context.Primary.GetInstrument(state.OrderHeader.OrderId.InstrumentId);
-                sorted.Add((state, inst));
-            }
-        }
-
-        sorted.Sort((a, b) =>
-        {
-            int sym = string.CompareOrdinal(a.Inst.Symbol, b.Inst.Symbol);
-            if (sym != 0) return sym;
-            return b.State.OrderProfile.Ticks.CompareTo(a.State.OrderProfile.Ticks);
-        });
-
-        Dictionary<ulong, AmendOrderWrapper> map = new Dictionary<ulong, AmendOrderWrapper>();
-        ObservableCollection<AmendOrderWrapper> actives = _viewModel.ActiveOrders;
-        foreach (AmendOrderWrapper amend in actives)
-        {
-            map[amend.ClientOrderId] = amend;
-        }
-
-        int newIndex = 0, activeIndex = 0;
-        while (newIndex < sorted.Count && activeIndex < actives.Count)
-        {
-            if (sorted[newIndex].State.OrderHeader.OrderId == actives[activeIndex].ClientOrderId)
-            {
-                // Match: Update in place
-                actives[activeIndex].Update(sorted[newIndex].State, sorted[newIndex].Inst);
-                newIndex++;
-                activeIndex++;
-            }
-            else if (map.TryGetValue(sorted[newIndex].State.OrderHeader.OrderId, out AmendOrderWrapper? amend))
-            {
-                // Mismatch, but item exists elsewhere. Move it here.
-                // We use Move() to preserve the object and selection state.
-                int oldIndex = actives.IndexOf(amend!);
-                if (oldIndex >= 0)
-                {
-                    actives.Move(oldIndex, activeIndex);
-                    actives[activeIndex].Update(sorted[newIndex].State, sorted[newIndex].Inst);
-                }
-                newIndex++;
-                activeIndex++;
-            }
+            if (orderState.OrderStateStatus != OrderStateStatus.Active)
+                continue;
+            Instrument instrument = _context.Primary.GetInstrument(orderState.OrderHeader.OrderId.InstrumentId);
+            ulong clientOrderId = orderState.OrderHeader.OrderId;
+            if (amendOrderWrappersByClientOrderId.TryGetValue(clientOrderId, out AmendOrderWrapper? amendOrderWrapper))
+                amendOrderWrapper.Update(orderState, instrument);
             else
-            {
-                // New item. Insert here.
-                actives.Insert(activeIndex, new AmendOrderWrapper(sorted[newIndex].State, sorted[newIndex].Inst));
-                newIndex++;
-                activeIndex++;
-            }
+                amendOrderWrapper = new AmendOrderWrapper(orderState, instrument);
+            activeAmendOrderWrappers.Add(amendOrderWrapper);
         }
 
-        // Add any remaining items from sorted
-        while (newIndex < sorted.Count)
-        {
-            actives.Add(new AmendOrderWrapper(sorted[newIndex].State, sorted[newIndex].Inst));
-            newIndex++;
-        }
+        // Step 2: sorted as the order lists are, then reconciled into the bound collection
+        activeAmendOrderWrappers.Sort((leftAmendOrderWrapper, rightAmendOrderWrapper) => DataGridRows.CompareOrders(
+            leftAmendOrderWrapper.Instrument.Symbol, leftAmendOrderWrapper.OrderState.OrderProfile.Ticks,
+            rightAmendOrderWrapper.Instrument.Symbol, rightAmendOrderWrapper.OrderState.OrderProfile.Ticks));
+        _viewModel.ActiveOrders.ReconcileRows(activeAmendOrderWrappers);
 
-        // Remove any extra items from actives
-        while (actives.Count > sorted.Count)
-        {
-            actives.RemoveAt(actives.Count - 1);
-        }
-        var wrapper = _viewModel.ActiveOrders.FirstOrDefault(x => x?.ClientOrderId == selectedClientOrderId, null);
-        _viewModel.SelectedOrderToAmend = wrapper;
-
+        // Step 3: the asked selection; the same row again changes nothing
+        _viewModel.SelectedOrderToAmend = _viewModel.ActiveOrders.FirstOrDefault(amendOrderWrapper => amendOrderWrapper.ClientOrderId == selectedClientOrderId);
     }
 
     private void OnLadderTickSelected(int ticks)
@@ -852,28 +604,21 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
         _viewModel.TicksInput = ticks;
     }
 
-    private void OnLadderPointerWheelChanged(object? sender, PointerWheelEventArgs e)
+    /// Scrolls the ladder unless its centre is locked; the next refresh pass (within 100 ms) draws it.
+    private void OnLadderPointerWheelChanged(object? sender, PointerWheelEventArgs pointerWheelEventArgs)
     {
-        if (_viewModel.IsAutoCenter)
-        {
-            e.Handled = true;
-            return;
-        }
-        _ladderScrollOffset += (int)e.Delta.Y;
-        if (_viewModel.ActiveLadderInstrument != null)
-            RefreshLadder(_viewModel.ActiveLadderInstrument);
-        e.Handled = true;
+        if (!_viewModel.IsAutoCenter)
+            _ladderScrollOffset += (int)pointerWheelEventArgs.Delta.Y;
+        pointerWheelEventArgs.Handled = true;
     }
 
-    private void OnLadderPointerPressed(object? sender, PointerPressedEventArgs e)
+    /// A middle click centres the ladder on the book; the next refresh pass (within 100 ms) draws it.
+    private void OnLadderPointerPressed(object? sender, PointerPressedEventArgs pointerPressedEventArgs)
     {
-        if (e.GetCurrentPoint(LadderControl).Properties.IsMiddleButtonPressed)
-        {
-            ScrollToMiddle();
-            if (_viewModel.ActiveLadderInstrument != null)
-                RefreshLadder(_viewModel.ActiveLadderInstrument);
-            e.Handled = true;
-        }
+        if (!pointerPressedEventArgs.GetCurrentPoint(LadderControl).Properties.IsMiddleButtonPressed)
+            return;
+        ScrollToMiddle();
+        pointerPressedEventArgs.Handled = true;
     }
 
     // --- Buttons ---
@@ -929,24 +674,12 @@ public partial class SendOrderWidget : UserControl, IWidget, IDisposable
     private void OnSendCancelClick(object? sender, RoutedEventArgs e)
     {
         if (_viewModel.SelectedOrderToAmend == null) return;
-        var state = _viewModel.SelectedOrderToAmend.OrderState;
-        OrderTarget target = new OrderTarget
-        {
-            OrderHeader = state.OrderHeader,
-            OrderProfile = state.OrderProfile,
-            OrderTargetAction = OrderTargetAction.Cancel
-        };
-        _context.Manual.OnOrderTarget(ref target);
+        OrderTarget cancelOrderTarget = _viewModel.SelectedOrderToAmend.OrderState.NewCancel();
+        _context.Manual.OnOrderTarget(ref cancelOrderTarget);
     }
 
     public string? SaveStateJson() => null;
     public void LoadStateJson(string? json) { }
 
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-        if (_viewModel != null) _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
-        _refreshTimer?.Stop();
-    }
+    public void Dispose() => _refreshTimer?.Dispose();
 }

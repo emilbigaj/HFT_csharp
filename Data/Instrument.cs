@@ -353,7 +353,8 @@ public abstract class Instrument
 
     public double InverseTickSize => Header.InverseTickSize;
     public double TickSize => Header.TickSize;
-    public int TicKDecimals { get; }
+    public int TickDecimals { get; }
+    public string PriceFormat { get; }   // "N<TickDecimals>": a price to the tick's decimals, with thousands separators
     public double Multiplier { get; protected set; } = 1.0;
 
     // Legs view for risk decomposition: an outright is its own single leg (weight +1); a Spread
@@ -368,7 +369,8 @@ public abstract class Instrument
         _mbpEntry = mbpEntry;
         _headerEntry = headerEntry;
         _quote = new Quote() { TickSize = TickSize };
-        TicKDecimals = Tools.Tools.GetNumberOfDecimalPlaces(TickSize);
+        TickDecimals = Tools.Tools.GetNumberOfDecimalPlaces(TickSize);
+        PriceFormat = $"N{TickDecimals}";
         Symbology = headerEntry.GetReadonlyRef().Symbology;
         _legs = [new InstrumentLeg(InstrumentId, 1)];
     }
@@ -383,6 +385,9 @@ public abstract class Instrument
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double TicksToPrice(int ticks) => ticks * TickSize;
+
+    /// The price these ticks show as in a GUI (PriceFormat). Cold path: it allocates the string.
+    public string TicksToPriceString(int ticks) => TicksToPrice(ticks).ToString(PriceFormat);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int RoundToTicks(double price) => (price * InverseTickSize).RoundToInt();

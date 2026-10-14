@@ -80,22 +80,29 @@ static void RunLocal(FileSystemPath serverName, TcpLinkConnector tcpLinkConnecto
 // Where people sit: keeps a copy of the server that local Workspaces attach to.
 static void RunRemote(FileSystemPath serverName, TcpLinkConnector tcpLinkConnector)
 {
-    // Step 1: a copy the last run's Workspaces still map belongs to an older Local end: wait for them to close
-    WaitForPreviousCopyToClose(serverName);
-
-    // Step 2: the first link's first packet is the trading server's header; posted here, it sizes the copy
+    // Step 1: the first link's first packet is the trading server's header; posted here, it sizes the copy
     tcpLinkConnector.Start();
     LetterBox<ServerHeader> serverHeaderBox = new(serverName / "ServerHeader", Access.Write);
-    TcpLink tcpLink = ReadServerHeader(serverName, serverHeaderBox, tcpLinkConnector, out uint localLayoutHash);
+    TcpLink tcpLink = ReadServerHeader(serverName, tcpLinkConnector, out ServerHeader serverHeader, out uint localLayoutHash);
+    // Why reuse: Workspaces still open from the last Remote keep its copy, header posted; it is rebuilt as on a server restart, and they rebuild on this Remote (see Spec.md "Remote workspaces")
+    bool isCopyReused = !serverHeaderBox.TryStore(in serverHeader);
+    // Why: as on a server restart, a simulation desk's clock cannot go back to another run's start
+    if (isCopyReused && Clock.Mode == ClockMode.Simulation && serverHeaderBox.GetReadonlyRef().ServerProcessId != serverHeader.ServerProcessId)
+        throw new InvalidOperationException("Mirror.RunRemote: this desk's open Workspaces show another simulation run, must show this one; close them, then start the Mirror again");
     ServerContext serverContext = new(serverName, Access.Write);
     // Why: until the copy's ServerContext maps the header region, this is the only handle keeping it alive on Windows
     GC.KeepAlive(serverHeaderBox);
-    // Why at startup and loudly: rows are tagged by array number, so a desk built differently would put them in the wrong arrays and show plausible but wrong orders
+
+    // Step 2: the layouts. Why at startup and loudly: rows are tagged by array number, so a desk built differently would put them in the wrong arrays and show plausible but wrong orders
     if (localLayoutHash != serverContext.GetLayoutHash())
-        throw new InvalidDataException($"Mirror.RunRemote: the CME box's array layout is {localLayoutHash:X8}, this desk's is {serverContext.GetLayoutHash():X8}, must match; deploy the same build to both ends");
+        throw new InvalidDataException(isCopyReused
+            ? $"Mirror.RunRemote: the CME box's array layout is {localLayoutHash:X8}, the copy this desk's open Workspaces still map is {serverContext.GetLayoutHash():X8}, must match; the server's sizes or the build changed: close the Workspaces, then start the Mirror again"
+            : $"Mirror.RunRemote: the CME box's array layout is {localLayoutHash:X8}, this desk's is {serverContext.GetLayoutHash():X8}, must match; deploy the same build to both ends");
+    if (isCopyReused)
+        Console.WriteLine("Mirror.RunRemote: Workspaces from the last run are still open; the copy is rebuilt and they rebuild themselves");
 
     // Step 3: keep the copy current; a restarted server gets a fresh RemoteMirror over the same copy and link (see Spec.md "Remote workspaces")
-    RemoteMirror remoteMirror = new(serverContext, tcpLinkConnector, tcpLink, newServerHeader: null);
+    RemoteMirror remoteMirror = new(serverContext, tcpLinkConnector, tcpLink, newServerHeader: isCopyReused ? serverHeader : null);
     while (!Application.IsExiting)
     {
         // Why: one bad packet must not stop the copy for everyone
@@ -117,24 +124,9 @@ static void RunRemote(FileSystemPath serverName, TcpLinkConnector tcpLinkConnect
     }
 }
 
-// Waits while any process still maps the copy's header (the last run's Workspaces), checking once a second.
-static void WaitForPreviousCopyToClose(FileSystemPath serverName)
-{
-    while (true)
-    {
-        using (LetterBox<ServerHeader> serverHeaderBox = new(serverName / "ServerHeader", Access.Read))
-        {
-            if (serverHeaderBox.IsEmpty())
-                return;
-        }
-        Console.WriteLine("Mirror.WaitForPreviousCopyToClose: Workspaces of the last run are still open; close them to start");
-        Thread.Sleep(1000);
-    }
-}
-
-// Waits for a link and its first packet, the server header, checks it is the configured server, and posts it in the copy's
-// LetterBox as a server posts its own, so the copy's arrays are sized by the real server and Workspaces may connect.
-static TcpLink ReadServerHeader(FileSystemPath serverName, LetterBox<ServerHeader> serverHeaderBox, TcpLinkConnector tcpLinkConnector, out uint localLayoutHash)
+// Waits for a link and its first packet, the server header, and checks it is the configured server; returns the link, the
+// header with this desk's names, and the Local end's layout hash.
+static TcpLink ReadServerHeader(FileSystemPath serverName, TcpLinkConnector tcpLinkConnector, out ServerHeader serverHeader, out uint localLayoutHash)
 {
     while (true)
     {
@@ -152,14 +144,12 @@ static TcpLink ReadServerHeader(FileSystemPath serverName, LetterBox<ServerHeade
             }
             if ((MirrorPacketType)packet[0] != MirrorPacketType.ServerHeader)
                 throw new InvalidDataException("Mirror.ReadServerHeader: a mirror link must start with the server header");
-            ServerHeader serverHeader = MemoryMarshal.Read<MirrorServerHeader>(packet).ServerHeader;
+            serverHeader = MemoryMarshal.Read<MirrorServerHeader>(packet).ServerHeader;
             localLayoutHash = MemoryMarshal.Read<MirrorServerHeader>(packet).LayoutHash;
             serverHeader.ServerName = MirrorPacket.RewriteName(serverHeader.ServerName, isTravelling: false);
             FileSystemPath mirroredServerName = serverHeader.ServerName.ToString();
             if (mirroredServerName != serverName)
                 throw new InvalidDataException($"Mirror.ReadServerHeader: the Local end serves {mirroredServerName}; this Remote is configured for {serverName} (ServerName and ClockMode must match)");
-            if (!serverHeaderBox.TryStore(in serverHeader))
-                throw new InvalidOperationException("Mirror.ReadServerHeader: the copy's server header is already posted");
             return tcpLink;
         }
         tcpLink.Dispose();

@@ -980,7 +980,10 @@ listed.
   `<server>/LocalMirror.alert`, since the C++ server holds `<server>.alert` (on the box, the C++ server must keep that
   name); `SharedArray.Clear(index)` (sequence 0, payload zeroed) is used by the Remote to wipe its copy on a server
   restart; a remote Workspace's `RemoteClient` sends no close message once the server it connected to has restarted
-  (2026-10-14).
+  (2026-10-14). Later on 2026-10-14, all C#-only: a Remote Mirror restart rebuilds the open remote Workspaces (the Remote
+  posts its process id in `<server>/RemoteMirrorProcessId`, a desk-only letterbox); the desk's latency text; the GUI
+  refactor. Its shared-type helpers (`OrderState.NewCancel()`, `Instrument.TicksToPriceString`, `Instrument.TickDecimals`,
+  spelled `TicKDecimals` before) are GUI conveniences: port only if a C++ GUI or tool builds the same things.
 
 ---
 

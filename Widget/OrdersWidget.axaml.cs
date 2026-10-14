@@ -1,22 +1,18 @@
 using System;
-using System.Collections.ObjectModel;
 using System.Collections.Generic;
-using System.Linq;
-using System.Timers;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
-using Avalonia.VisualTree;
-using Avalonia.Input;
-using Provider;
-using Execution;
-using Tools;
 using Data;
-using Avalonia;
+using Execution;
+using Provider;
 
 namespace Widget;
 
+/// One order's row in the Orders grid: its state and target, refreshed in place by the widget's timer thread. Cold path.
 public sealed class WidgetOrder : INotifyPropertyChanged
 {
     public ulong ClientOrderId => _orderState.OrderHeader.OrderId;
@@ -25,92 +21,67 @@ public sealed class WidgetOrder : INotifyPropertyChanged
     public OrderStateReason StateReason => _orderState.OrderStateReason;
     public int StateSeq => _orderState.OrderHeader.Seq;
     public int StateTicks => _orderState.OrderProfile.Ticks;
-    public string StatePriceStr => _instrument.TicksToPrice(StateTicks).ToString(_priceFormat);
+    public string StatePriceStr => _instrument.TicksToPriceString(StateTicks);
     public int StateQuantityAhead => _orderState.QuantityAhead;
     public int StateQuantityBehind => _orderState.QuantityBehind;
 
     public int StateQuantity => _orderState.OrderProfile.Quantity;
     public int StateFilled => _orderState.QuantityFilled;
-    public int StateWorking => _orderState.OrderProfile.Quantity - _orderState.QuantityFilled;
+    public int StateWorking => _orderState.WorkingQuantity;
 
     public OrderTargetAction TargetAction => _orderTarget.OrderTargetAction;
     public OrderStateStatus TargetStatus => _orderTarget.OrderTargetStatus;
     public int TargetSeq => _orderTarget.OrderHeader.Seq;
     public int TargetTicks => _orderTarget.OrderProfile.Ticks;
-    public string TargetPriceStr => _instrument.TicksToPrice(TargetTicks).ToString(_priceFormat);
-
-
+    public string TargetPriceStr => _instrument.TicksToPriceString(TargetTicks);
     public int TargetQuantity => _orderTarget.OrderProfile.Quantity;
 
-    public int InstrumentId => _instrument.InstrumentId;
     public string Symbol => _instrument.Symbol;
     public string ShortSymbol => _instrument.ShortSymbol;
-
-    public int Ticks => _orderState.OrderProfile.Ticks;
-    public int Quantity => _orderState.OrderProfile.Quantity;
 
     private OrderTarget _orderTarget;
     private OrderState _orderState;
     private readonly Instrument _instrument;
 
     public ref readonly OrderState OrderState => ref _orderState;
-    public ref readonly OrderTarget OrderTarget => ref _orderTarget;
 
     public event PropertyChangedEventHandler? PropertyChanged;
-    private readonly string _priceFormat;
 
     public WidgetOrder(Instrument instrument, in OrderState orderState, in OrderTarget orderTarget)
     {
         _instrument = instrument;
         _orderState = orderState;
         _orderTarget = orderTarget;
-        _priceFormat = $"N{instrument.TicKDecimals}";
     }
 
-    public void Update(in OrderState state, in OrderTarget target)
+    /// Takes the order's latest state and target and tells the grid every column changed.
+    public void Update(in OrderState orderState, in OrderTarget orderTarget)
     {
-        _orderState = state;
-        _orderTarget = target;
+        _orderState = orderState;
+        _orderTarget = orderTarget;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(""));
     }
 }
 
-[RegisterJson]
-public class OrdersWidgetColumnState
-{
-    public string Header { get; set; } = "";
-    public double Width { get; set; }
-    public int DisplayIndex { get; set; }
-    public bool IsVisible { get; set; }
-}
-
-[RegisterJson]
-public class OrdersWidgetState
-{
-    public List<OrdersWidgetColumnState> Columns { get; set; } = new();
-}
-
+/// Lists the workspace's live orders, sorted by symbol then price, with cancel and amend on right-click and Cancel All
+/// in the title bar. The rows are rebuilt on a timer thread and applied on the UI thread. Cold path (GUI).
 public sealed partial class OrdersWidget : UserControl, IWidget, IDisposable
 {
     private readonly WorkspaceContext _context;
-    private readonly Timer _refreshTimer;
-    private bool _disposed;
+    private readonly WidgetRefreshTimer _refreshTimer;
 
-    private readonly List<WidgetOrder> _active = new(64);
-    private readonly List<ulong> _done = new(16);
-    private readonly Dictionary<ulong, WidgetOrder> _orders = new(64);
+    private readonly List<WidgetOrder> _activeWidgetOrders = new(64);   // timer thread writes; the UI post reads it before the next pass
+    private readonly Dictionary<ulong, WidgetOrder> _widgetOrdersByOrderId = new(64);
 
-    public string TypeKey => "OrdersWidget";
     public string Title { get; private set; } = "Orders";
     public ObservableCollection<WidgetOrder> Rows { get; } = new();
 
     public double DefaultWidth => 900;
     public double DefaultHeight => 300;
 
-    // --- EXPOSE XAML RESOURCE TO WIDGET CONTAINER ---
-    public object? TitleBarContent { get; private set; }
+    public object? TitleBarContent => Resources["TitleBarButtons"];
 
-    private Avalonia.Point _lastPointerPos;
+    private Avalonia.Point _lastPointerPosition;   // the pointer over the grid, where a right-click menu was asked for
 
     public OrdersWidget()
     {
@@ -127,272 +98,77 @@ public sealed partial class OrdersWidget : UserControl, IWidget, IDisposable
         InitializeComponent();
         DataContext = this;
         OrdersGrid.ItemsSource = Rows;
-
-        // Grab the buttons designed in AXAML
-        if (this.Resources.TryGetValue("TitleBarButtons", out var buttons))
-        {
-            TitleBarContent = buttons;
-        }
-
-        OrdersGrid.PointerMoved += OnOrdersGridPointerMoved;
-
-        _refreshTimer = new Timer(100);
-        _refreshTimer.Elapsed += OnRefresh;
-        _refreshTimer.AutoReset = false;
-        _refreshTimer.Start();
+        OrdersGrid.PointerMoved += (_, pointerEventArgs) => _lastPointerPosition = pointerEventArgs.GetPosition(OrdersGrid);
+        _refreshTimer = new WidgetRefreshTimer(nameof(OrdersWidget), 100, Refresh);
     }
 
-    private void OnOrdersGridPointerMoved(object? sender, PointerEventArgs e)
+    /// Updates or adds each live order's row, forgets the orders that are gone, and posts the sorted rows to the grid. Timer thread.
+    private void Refresh()
     {
-        _lastPointerPos = e.GetPosition(OrdersGrid);
+        // Step 1: update or add each live order's row
+        _activeWidgetOrders.Clear();
+        foreach ((OrderState orderState, OrderTarget orderTarget) in _context.EnumerateOrders())
+        {
+            ulong orderId = orderState.OrderHeader.OrderId;
+            if (_widgetOrdersByOrderId.TryGetValue(orderId, out WidgetOrder? widgetOrder))
+                widgetOrder.Update(in orderState, in orderTarget);
+            else
+            {
+                widgetOrder = new WidgetOrder(_context.Primary.GetInstrument(orderState.OrderHeader.OrderId.InstrumentId), in orderState, in orderTarget);
+                _widgetOrdersByOrderId[orderId] = widgetOrder;
+            }
+            _activeWidgetOrders.Add(widgetOrder);
+        }
+
+        // Step 2: forget the orders that are gone (Why no copy: Dictionary.Remove does not invalidate its enumerator since .NET Core 3.0)
+        foreach (KeyValuePair<ulong, WidgetOrder> widgetOrderByOrderId in _widgetOrdersByOrderId)
+        {
+            if (!_activeWidgetOrders.Contains(widgetOrderByOrderId.Value))
+                _widgetOrdersByOrderId.Remove(widgetOrderByOrderId.Key);
+        }
+
+        // Step 3: sort and post to the grid
+        _activeWidgetOrders.Sort((leftWidgetOrder, rightWidgetOrder) => DataGridRows.CompareOrders(leftWidgetOrder.Symbol, leftWidgetOrder.StateTicks, rightWidgetOrder.Symbol, rightWidgetOrder.StateTicks));
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_refreshTimer.IsDisposed)
+                Rows.ReconcileRows(_activeWidgetOrders);
+        });
     }
 
-    private void OnRefresh(object? sender, ElapsedEventArgs e)
-    {
-        if (_disposed) return;
-
-        try
-        {
-            _active.Clear();
-            _done.Clear();
-
-            foreach (var (state, target) in _context.EnumerateOrders())
-            {
-                ulong id = state.OrderHeader.OrderId;
-
-                if (_orders.TryGetValue(id, out var existingRow))
-                {
-                    existingRow.Update(in state, in target);
-                    _active.Add(existingRow);
-                }
-                else
-                {
-                    Instrument instrument = _context.Primary.GetInstrument(state.OrderHeader.OrderId.InstrumentId);
-                    var newRow = new WidgetOrder(instrument, in state, in target);
-                    _orders[id] = newRow;
-                    _active.Add(newRow);
-                }
-            }
-
-            foreach (var kvp in _orders)
-            {
-                ulong cachedId = kvp.Key;
-                bool isAlive = false;
-                for (int i = 0; i < _active.Count; i++)
-                {
-                    if (_active[i].ClientOrderId == cachedId)
-                    {
-                        isAlive = true;
-                        break;
-                    }
-                }
-                if (!isAlive) _done.Add(cachedId);
-            }
-
-            for (int i = 0; i < _done.Count; i++) _orders.Remove(_done[i]);
-
-            _active.Sort((a, b) =>
-            {
-                int sym = string.CompareOrdinal(a.Symbol, b.Symbol);
-                if (sym != 0) return sym;
-                return b.Ticks.CompareTo(a.Ticks);
-            });
-
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (_disposed) return;
-
-                for (int i = Rows.Count - 1; i >= 0; i--)
-                {
-                    if (!_orders.ContainsKey(Rows[i].ClientOrderId) || !_active.Contains(Rows[i]))
-                    {
-                        Rows.RemoveAt(i);
-                    }
-                }
-
-                for (int i = 0; i < _active.Count; i++)
-                {
-                    var order = _active[i];
-                    if (i < Rows.Count)
-                    {
-                        if (Rows[i] != order)
-                        {
-                            int oldIndex = Rows.IndexOf(order);
-                            if (oldIndex >= 0)
-                            {
-                                Rows.Move(oldIndex, i);
-                            }
-                            else
-                            {
-                                Rows.Insert(i, order);
-                            }
-                        }
-                    }
-                    else
-                    {
-                        Rows.Add(order);
-                    }
-                }
-
-                _refreshTimer.Start();
-            });
-        }
-        catch (Exception)
-        {
-            if (!_disposed) _refreshTimer.Start();
-        }
-    }
-
+    /// Fills the grid's right-click menu: column toggles on a header, the order's cancel and amend on a row.
     private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
     {
-        var menu = sender as ContextMenu;
-        if (menu == null || OrdersGrid == null) return;
+        if (sender is not ContextMenu contextMenu)
+            return;
+        contextMenu.Items.Clear();
 
-        menu.Items.Clear();
-
-        var visual = OrdersGrid.InputHitTest(_lastPointerPos) as Visual;
-
-        bool isHeader = false;
-        DataGridRow? hitRow = null;
-
-        var v = visual;
-        while (v != null)
+        DataGridHit dataGridHit = OrdersGrid.GetDataGridHit(_lastPointerPosition);
+        if (dataGridHit.IsColumnHeader)
+            contextMenu.AddColumnVisibilityMenuItems(OrdersGrid);
+        else if (dataGridHit.RowItem is WidgetOrder widgetOrder)
         {
-            if (v is DataGridColumnHeader)
-            {
-                isHeader = true;
-                break;
-            }
-            if (v is DataGridRow row)
-            {
-                hitRow = row;
-            }
-            v = v.GetVisualParent() as Visual;
-        }
-
-        if (isHeader)
-        {
-            foreach (var col in OrdersGrid.Columns)
-            {
-                var header = col.Header?.ToString() ?? "Column";
-                var item = new MenuItem
-                {
-                    Header = header,
-                    ToggleType = MenuItemToggleType.CheckBox,
-                    IsChecked = col.IsVisible
-                };
-                item.Click += (_, _) => col.IsVisible = !col.IsVisible;
-                menu.Items.Add(item);
-            }
-        }
-        else if (hitRow != null && hitRow.DataContext is WidgetOrder order)
-        {
-
-            var headerItem = new MenuItem { Header = $"{order.ShortSymbol} | Px: {order.StatePriceStr} Qty: {order.StateQuantity}" };
-            menu.Items.Add(headerItem);
-            menu.Items.Add(new Separator());
-
-            var cancelItem = new MenuItem { Header = "Cancel Order", Icon = new TextBlock { Text = "❌" } };
-            cancelItem.Click += (_, _) => PerformCancel(order);
-            menu.Items.Add(cancelItem);
-
-            // The algo owns its orders' targets; the GUI may only cancel them.
-            if (!order.OrderState.OrderHeader.OrderId.IsAlgoOrder())
-            {
-                var amendItem = new MenuItem { Header = "Amend Order", Icon = new TextBlock { Text = "📝" } };
-                amendItem.Click += (_, _) => PerformAmend(order);
-                menu.Items.Add(amendItem);
-            }
+            contextMenu.Items.Add(WidgetMenus.NewTitleMenuItem($"{widgetOrder.ShortSymbol} | Px: {widgetOrder.StatePriceStr} Qty: {widgetOrder.StateQuantity}"));
+            contextMenu.Items.Add(new Separator());
+            contextMenu.AddOrderMenuItems(this, _context, in widgetOrder.OrderState);
         }
         else
-        {
-            menu.Items.Add(new MenuItem { Header = "No Selection", IsEnabled = false });
-        }
+            contextMenu.Items.Add(new MenuItem { Header = "No Selection", IsEnabled = false });
     }
 
+    /// Cancels every order the grid shows. Why Rows: only the UI thread writes it, so a click mid-refresh sees a whole list
     public void OnCancelAllClick(object? sender, RoutedEventArgs e)
     {
-        PerformCancelAll();
-    }
-
-    private void PerformCancelAll()
-    {
-        foreach (var order in _active.ToArray())
+        foreach (WidgetOrder widgetOrder in Rows)
         {
-            PerformCancel(order);
+            OrderTarget cancelOrderTarget = widgetOrder.OrderState.NewCancel();
+            _context.Manual.OnOrderTarget(ref cancelOrderTarget);
         }
     }
 
-    private void PerformCancel(WidgetOrder order)
-    {
-        ref readonly OrderState orderState = ref order.OrderState;
-        OrderTarget target = new OrderTarget()
-        {
-            OrderHeader = order.OrderState.OrderHeader,
-            OrderProfile = orderState.OrderProfile,
-            OrderTargetAction = OrderTargetAction.Cancel,
-        };
-        _context.Manual.OnOrderTarget(ref target);
-    }
+    public string? SaveStateJson() => DataGridWidgetState.NewStateJson(OrdersGrid);
 
-    private void PerformAmend(WidgetOrder order) => this.AddToHost(SendOrderWidget.NewAmendOrder(_context, order.ClientOrderId));
+    public void LoadStateJson(string? json) => DataGridWidgetState.LoadStateJson(OrdersGrid, json);
 
-    public string? SaveStateJson()
-    {
-        var state = new OrdersWidgetState();
-        foreach (var col in OrdersGrid.Columns)
-        {
-            state.Columns.Add(new OrdersWidgetColumnState
-            {
-                Header = col.Header?.ToString() ?? "",
-                Width = col.Width.Value,
-                DisplayIndex = col.DisplayIndex,
-                IsVisible = col.IsVisible
-            });
-        }
-        return Json.Serialize(state);
-    }
-
-    public void LoadStateJson(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return;
-        try
-        {
-            var state = Tools.Json.Deserialize<OrdersWidgetState>(json);
-            if (state == null || state.Columns == null) return;
-
-            foreach (var colState in state.Columns)
-            {
-                var col = OrdersGrid.Columns.FirstOrDefault(c => (c.Header?.ToString() ?? "") == colState.Header);
-                if (col != null)
-                {
-                    col.Width = new DataGridLength(colState.Width);
-                    col.DisplayIndex = colState.DisplayIndex;
-                    col.IsVisible = colState.IsVisible;
-                }
-            }
-        }
-        catch { }
-    }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-
-        if (_refreshTimer != null)
-        {
-            _refreshTimer.Stop();
-            _refreshTimer.Dispose();
-        }
-
-        if (OrdersGrid != null)
-            OrdersGrid.PointerMoved -= OnOrdersGridPointerMoved;
-
-        _orders.Clear();
-        _active.Clear();
-        _done.Clear();
-
-        Dispatcher.UIThread.Post(() => Rows.Clear());
-    }
+    public void Dispose() => _refreshTimer?.Dispose();
 }

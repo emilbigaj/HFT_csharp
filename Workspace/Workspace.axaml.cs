@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -24,12 +25,16 @@ using Widget;
 namespace Workspace;
 
 
-/// <summary>
-/// Top-level workspace window. Hosts floating widget panels.
-/// Implements IWidgetHost to allow widgets to request actions.
-/// </summary>
+/// A top-level workspace window: its context's client (and that client's thread), and the widgets floating on its canvas.
+/// Widgets open others through IWidgetHost. UI thread, except the client thread. Cold path.
 public partial class Workspace : Window, IWidgetHost
 {
+    private static readonly FilePickerFileType[] s_workspaceFileTypes =
+    {
+        new FilePickerFileType("Workspace files") { Patterns = new[] { "*.workspace" } },
+        new FilePickerFileType("All files") { Patterns = new[] { "*.*" } },
+    };
+
     public Context Context { get; private set; } = null!;
     public IManualClient ManualClient { get; private set; } = null!;
     public AlertManager? AlertManager { get; private set; }   // null on a remote desk: no Logging there; its stand-in alerts beside the server
@@ -40,9 +45,13 @@ public partial class Workspace : Window, IWidgetHost
     private volatile bool _isClientStopping;                                  // tells the client thread to end (Disconnect)
     private bool _isConnected;                                                // a client is open and its thread runs (UI thread); Disconnect does nothing otherwise
     private ulong _latencySeq;                                                // the Latency[0] row's seq when last seen to change (UI thread)
-    private Timestamp _latencyTimestamp = Timestamp.StopwatchNow;             // when it last changed
-    private int _serverProcessId;                                             // the server process this window last connected to; a remote desk rebuilds on a new one
+    private Timestamp _latencyTimestamp = Timestamp.StopwatchNow;             // when it last changed; unchanged for the silence timeout is a hung Remote Mirror
     private int _guiNumber;                                                   // this window's GUI number on a remote desk; a rebuild asks for the same one first
+    private static readonly List<Workspace> s_openWorkspaces = new();         // this process's open Workspace windows (UI thread). Why our own: Avalonia 12's desktop.Windows misses one opened before the lifetime starts
+
+    /// This process's open Workspace windows, in the order they opened.
+    public static IReadOnlyList<Workspace> OpenWorkspaces => s_openWorkspaces;
+
     public Workspace()
     {
         InitializeComponent();
@@ -69,14 +78,14 @@ public partial class Workspace : Window, IWidgetHost
         _refreshTimer.Elapsed += OnRefresh;
         _refreshTimer.AutoReset = true;
         _refreshTimer.Start();
+        s_openWorkspaces.Add(this);
     }
 
     // Opens this window's client under its principal and starts its thread: at construction, and again when a remote desk rebuilds
-    // on a restarted server. Throws when the client cannot connect (ManualClient.Open's refusals).
+    // on a restarted server or Remote Mirror. Throws when the client cannot connect (ManualClient.Open's refusals).
     private void Connect()
     {
-        // Step 1: the server process this connection belongs to, and its symbol strings warmed off-thread
-        _serverProcessId = Context.ServerHeader.GetReadonlyRef().ServerProcessId;
+        // Step 1: the server's symbol strings, warmed off-thread
         ContextManager.ServerContext.WarmSymbolStrings();
 
         // Step 2: the client.
@@ -141,23 +150,9 @@ public partial class Workspace : Window, IWidgetHost
         _refreshTimer.Dispose();
         Disconnect();
 
-        if (Avalonia.Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
-        {
-            bool hasOtherWorkspaces = false;
-            foreach (var window in desktop.Windows)
-            {
-                if (window is Workspace && window != this)
-                {
-                    hasOtherWorkspaces = true;
-                    break;
-                }
-            }
-
-            if (!hasOtherWorkspaces)
-            {
-                desktop.Shutdown();
-            }
-        }
+        s_openWorkspaces.Remove(this);
+        if (s_openWorkspaces.Count == 0 && Avalonia.Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            desktop.Shutdown();
     }
 
     private void OnRefresh(object? sender, System.Timers.ElapsedEventArgs? e)
@@ -165,16 +160,17 @@ public partial class Workspace : Window, IWidgetHost
         Dispatcher.UIThread.Post(() =>
         {
             TimestampText.Text = Context.ServerHeader.GetReadonlyRef().Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff");
-            // Why: a restarted server is a new run (client ids, instrument ids), so a remote desk rebuilds every Workspace on it (see Spec.md "Remote workspaces")
-            bool isServerRestarted = _isConnected && ManualClient is RemoteClient && Context.ServerHeader.GetReadonlyRef().ServerProcessId != _serverProcessId;
-            if (isServerRestarted && Avalonia.Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            RemoteClient? remoteClient = ManualClient as RemoteClient;
+            // Why: a restarted server is a new run (client ids, instrument ids) and a restarted Remote Mirror serves no old session, so a remote desk rebuilds every Workspace on either (see Spec.md "Remote workspaces")
+            bool isSessionEnded = _isConnected && remoteClient != null && remoteClient.IsSessionEnded;
+            if (isSessionEnded)
             {
-                RestartWorkspaces(desktop);
+                RestartWorkspaces();
                 return;
             }
             // A remote desk shows its Mirror link's latency beside the clock, a Workspace beside the server whether the server's process has exited (see Spec.md "Remote workspaces")
-            if (ManualClient is RemoteClient)
-                TimestampText.Text = GetLatencyText() + "    " + TimestampText.Text;
+            if (remoteClient != null)
+                TimestampText.Text = GetLatencyText(remoteClient) + "    " + TimestampText.Text;
             else if (!ProcessId.IsAlive(Context.ServerHeader.GetReadonlyRef().ServerProcessId))
                 TimestampText.Text = "Disconnected – server stopped, close this Workspace    " + TimestampText.Text;
             if (SimulationSpeedButton.IsVisible)
@@ -187,18 +183,22 @@ public partial class Workspace : Window, IWidgetHost
         });
     }
 
-    // Latency[0], or how long since the Remote Mirror last rewrote it when longer (it rewrites it every pass, so a frozen or
-    // dead Remote Mirror climbs like a stalled link); broken when below 0 or not rewritten for the silence timeout.
-    private string GetLatencyText()
+    // Latency[0] exactly as the Remote Mirror writes it (below 0 while its link is down); offline once its process has exited, not
+    // responding once it has stopped rewriting the row for the silence timeout (a hung Remote Mirror).
+    private string GetLatencyText(RemoteClient remoteClient)
     {
+        // Step 1: the Remote Mirror itself: alive, and still rewriting the row every pass
+        if (!remoteClient.IsRemoteMirrorAlive)
+            return "Remote Mirror offline";
         ref SharedArrayEntry<Duration> latencyEntry = ref Context.GetLatency(0);
         if (latencyEntry.GetSeq() != _latencySeq)
             (_latencySeq, _latencyTimestamp) = (latencyEntry.GetSeq(), Timestamp.StopwatchNow);
-        Duration latencyAge = Timestamp.StopwatchNow - _latencyTimestamp;
-        // Why a plain read: one aligned 8-byte Duration cannot tear, and Read would spin forever on a row a killed Remote Mirror left mid-write
+        if (Timestamp.StopwatchNow - _latencyTimestamp >= RemoteClient.s_silenceTimeout)
+            return "Remote Mirror not responding";
+
+        // Step 2: its number, to the microsecond so a steady link visibly ticks. Why a plain read: one aligned 8-byte Duration cannot tear, and Read would spin forever on a row a killed Remote Mirror left mid-write
         Duration latency = latencyEntry.GetReadonlyRef();
-        bool isBroken = latency < Duration.Zero || latencyAge >= RemoteClient.s_silenceTimeout;
-        return isBroken ? "Connection broken – reconnecting…" : $"{(latency > latencyAge ? latency : latencyAge).TotalMilliseconds:0} ms";
+        return latency < Duration.Zero ? "Connection broken – reconnecting…" : $"{latency.TotalMilliseconds:0.000} ms";
     }
 
     private static string FormatSimulationSpeed(double simulationSpeed)
@@ -244,6 +244,7 @@ public partial class Workspace : Window, IWidgetHost
         OpenDirectoryMenuItem.Header = Context is ClientContext ? "Open Strategy Directory" : "Open Server Directory";
     }
 
+    /// Ticks the clock's mode in the Mode menu (whose items only show it) and colours the top bar by it: green realtime, yellow simulation.
     private void UpdateModeMenuHeaders()
     {
         bool isSimulation = Clock.Mode == ClockMode.Simulation;
@@ -251,43 +252,12 @@ public partial class Workspace : Window, IWidgetHost
 
         SimulationMenuItem.Header = isSimulation ? "✔ Simulation" : "Simulation";
         RealtimeMenuItem.Header = isRealtime ? "✔ Realtime" : "Realtime";
-
-        SimulationMenuItem.IsEnabled = false;
-        RealtimeMenuItem.IsEnabled = false;
-
-        if (TopBar != null)
-        {
-            if (isRealtime)
-            {
-                TopBar.Background = new SolidColorBrush(Color.FromRgb(0x6A, 0xC3, 0x5B));
-            }
-            else
-            {
-                TopBar.Background = new SolidColorBrush(Color.FromRgb(0xFF, 0xEB, 0x99));
-            }
-        }
+        TopBar.Background = isRealtime ? Palette.WorkspaceRealtimeGreen : Palette.WorkspaceSimulationYellow;
     }
 
-    private void OnSimulationModeClick(object? sender, RoutedEventArgs e) { }
-    private void OnRealtimeModeClick(object? sender, RoutedEventArgs e) { }
+    private void OnExtendWorkspaceClick(object? sender, RoutedEventArgs e) => new Workspace(Context).Show();
 
-    private void OnExtendWorkspaceClick(object? sender, RoutedEventArgs e)
-    {
-        ExtendWorkspace();
-    }
-
-    public void ExtendWorkspace()
-    {
-        var extended = new Workspace(Context);
-        extended.Show();
-    }
-
-    private void OnNewGlobalWorkspaceClick(object? sender, RoutedEventArgs e)
-    {
-        var ctx = ContextManager.ServerContext;
-        var ws = new Workspace(ctx);
-        ws.Show();
-    }
+    private void OnNewGlobalWorkspaceClick(object? sender, RoutedEventArgs e) => new Workspace(ContextManager.ServerContext).Show();
 
     private async void OnNewStrategyWorkspaceClick(object? sender, RoutedEventArgs e)
     {
@@ -351,9 +321,7 @@ public partial class Workspace : Window, IWidgetHost
             if (string.IsNullOrWhiteSpace(result))
                 return;
             string clientName = clientNameToDirectoryPath[result];
-            var ctx = ContextManager.GetClientContext(clientName);
-            var ws = new Workspace(ctx);
-            ws.Show();
+            new Workspace(ContextManager.GetClientContext(clientName)).Show();
         }
         catch (Exception ex)
         {
@@ -361,120 +329,80 @@ public partial class Workspace : Window, IWidgetHost
         }
     }
 
+    /// The context's workspace folder (created when missing), where the file dialogs open.
+    private Task<IStorageFolder?> GetWorkspaceStorageFolderAsync()
+    {
+        string workspaceDirectoryPath = Context.WorkspaceDirectoryPath;
+        Directory.CreateDirectory(workspaceDirectoryPath);
+        return StorageProvider.TryGetFolderFromPathAsync(workspaceDirectoryPath);
+    }
+
+    /// Asks for a workspace file and loads it into this window; logs a failure.
     private async void OnOpenWorkspaceClick(object? sender, RoutedEventArgs e)
     {
         try
         {
-            var topLevel = TopLevel.GetTopLevel(this);
-            if (topLevel == null) return;
-
-            string folder = Context.WorkspaceDirectoryPath;
-            Directory.CreateDirectory(folder);
-
-            var startLocation = await topLevel.StorageProvider.TryGetFolderFromPathAsync(folder);
-
-            var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            IReadOnlyList<IStorageFile> storageFiles = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
             {
                 Title = "Open Workspace",
                 AllowMultiple = false,
-                SuggestedStartLocation = startLocation,
-                FileTypeFilter = new[]
-                {
-                    new FilePickerFileType("Workspace files") { Patterns = new[] { "*.workspace" } },
-                    new FilePickerFileType("All files") { Patterns = new[] { "*.*" } }
-                }
+                SuggestedStartLocation = await GetWorkspaceStorageFolderAsync(),
+                FileTypeFilter = s_workspaceFileTypes,
             });
+            if (storageFiles.Count == 0) return;
 
-            if (files == null || files.Count == 0) return;
-
-            await LoadWorkspaceAsync(files[0].Path.LocalPath);
+            await LoadWorkspaceAsync(storageFiles[0].Path.LocalPath);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            Console.WriteLine($"OnOpenWorkspaceClick Error: {ex}");
+            Console.WriteLine($"Workspace.OnOpenWorkspaceClick: {exception}");
         }
     }
 
     private async void OnSaveWorkspaceClick(object? sender, RoutedEventArgs e)
     {
-        try
-        {
-            if (string.IsNullOrEmpty(_currentWorkspacePath))
-                await SaveWorkspaceAsAsync();
-            else
-                await SaveWorkspaceAsync(_currentWorkspacePath);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error saving workspace: {ex.Message}");
-        }
-    }
-
-    private async void OnSaveWorkspaceAsClick(object? sender, RoutedEventArgs e)
-    {
-        try
-        {
+        if (string.IsNullOrEmpty(_currentWorkspacePath))
             await SaveWorkspaceAsAsync();
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error saving workspace as: {ex.Message}");
-        }
+        else
+            await SaveWorkspaceAsync(_currentWorkspacePath);
     }
 
-    private async System.Threading.Tasks.Task SaveWorkspaceAsAsync()
+    private async void OnSaveWorkspaceAsClick(object? sender, RoutedEventArgs e) => await SaveWorkspaceAsAsync();
+
+    /// Asks where to save the workspace and saves it there; logs a failure.
+    private async Task SaveWorkspaceAsAsync()
     {
         try
         {
-            var topLevel = TopLevel.GetTopLevel(this);
-            if (topLevel == null) return;
-
-            string folder = Context.WorkspaceDirectoryPath;
-            Directory.CreateDirectory(folder);
-
-            var startLocation = await topLevel.StorageProvider.TryGetFolderFromPathAsync(folder);
-
-            var file = await topLevel.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            IStorageFile? storageFile = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
             {
                 Title = "Save Workspace As",
                 SuggestedFileName = "default.workspace",
-                SuggestedStartLocation = startLocation,
+                SuggestedStartLocation = await GetWorkspaceStorageFolderAsync(),
                 DefaultExtension = "workspace",
-                FileTypeChoices = new[]
-                {
-                    new FilePickerFileType("Workspace files") { Patterns = new[] { "*.workspace" } },
-                    new FilePickerFileType("All files") { Patterns = new[] { "*.*" } }
-                }
+                FileTypeChoices = s_workspaceFileTypes,
             });
+            if (storageFile == null) return;
 
-            if (file == null) return;
-
-            await SaveWorkspaceAsync(file.Path.LocalPath);
+            await SaveWorkspaceAsync(storageFile.Path.LocalPath);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            Console.WriteLine($"OnSaveWorkspaceAsClick Error: {ex}");
+            Console.WriteLine($"Workspace.SaveWorkspaceAsAsync: {exception}");
         }
     }
 
+    /// Asks where to save a PNG of this window and saves it there; logs a failure.
     private async void OnSaveScreenshotClick(object? sender, RoutedEventArgs e)
     {
         try
         {
-            var topLevel = TopLevel.GetTopLevel(this);
-            if (topLevel == null) return;
-
-            string folder = Context.WorkspaceDirectoryPath;
-            Directory.CreateDirectory(folder);
-
-            var startLocation = await topLevel.StorageProvider.TryGetFolderFromPathAsync(folder);
-
             string workspaceName = string.IsNullOrEmpty(_currentWorkspacePath) ? "workspace" : Path.GetFileNameWithoutExtension(_currentWorkspacePath);
-            var file = await topLevel.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            IStorageFile? storageFile = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
             {
                 Title = "Save Screenshot",
                 SuggestedFileName = $"{workspaceName}_{DateTime.Now:yyyyMMdd_HHmmss}.png",
-                SuggestedStartLocation = startLocation,
+                SuggestedStartLocation = await GetWorkspaceStorageFolderAsync(),
                 DefaultExtension = "png",
                 FileTypeChoices = new[]
                 {
@@ -482,33 +410,18 @@ public partial class Workspace : Window, IWidgetHost
                     new FilePickerFileType("All files") { Patterns = new[] { "*.*" } }
                 }
             });
-
-            if (file == null) return;
+            if (storageFile == null) return;
 
             // This window, not the main one: several workspaces can be open at once.
-            await WorkspaceRunner.CaptureScreenshotAsync(file.Path.LocalPath, this);
+            await WorkspaceRunner.CaptureScreenshotAsync(storageFile.Path.LocalPath, this);
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            Console.WriteLine($"OnSaveScreenshotClick Error: {ex}");
+            Console.WriteLine($"Workspace.OnSaveScreenshotClick: {exception}");
         }
     }
 
-    private void OnOpenContextDirectoryClick(object? sender, RoutedEventArgs e)
-    {
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = WorkspaceContext.Primary.DirectoryPath,
-                UseShellExecute = true,
-            });
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"OnOpenContextDirectoryClick Error: {ex}");
-        }
-    }
+    private void OnOpenContextDirectoryClick(object? sender, RoutedEventArgs e) => WidgetMenus.OpenInExplorer(WorkspaceContext.Primary.DirectoryPath);
 
     private void OnExitClick(object? sender, RoutedEventArgs e)
     {
@@ -518,23 +431,17 @@ public partial class Workspace : Window, IWidgetHost
             Close();
     }
 
-    public void AddWidget(IWidget widget)
+    /// Adds the widget at its default size, centred in the window (its top-left kept on the canvas).
+    public void AddWidget(IWidget widget) =>
+        AddWidgetContainer(widget, Math.Max(0, (Bounds.Width - widget.DefaultWidth) / 2.0), Math.Max(0, (Bounds.Height - widget.DefaultHeight) / 2.0), widget.DefaultWidth, widget.DefaultHeight);
+
+    /// Puts the widget on the canvas in a container at this position and size.
+    private void AddWidgetContainer(IWidget widget, double left, double top, double width, double height)
     {
-        var container = new WidgetContainer(widget);
-
-        container.Width = widget.DefaultWidth;
-        container.Height = widget.DefaultHeight;
-
-        DockHost.Children.Add(container);
-
-        double x = (Bounds.Width - container.Width) / 2.0;
-        double y = (Bounds.Height - container.Height) / 2.0;
-
-        if (x < 0) x = 0;
-        if (y < 0) y = 0;
-
-        Canvas.SetLeft(container, x);
-        Canvas.SetTop(container, y);
+        WidgetContainer widgetContainer = new WidgetContainer(widget) { Width = width, Height = height };
+        DockHost.Children.Add(widgetContainer);
+        Canvas.SetLeft(widgetContainer, left);
+        Canvas.SetTop(widgetContainer, top);
     }
 
     private IEnumerable<(WidgetContainer Container, IWidget Widget)> EnumerateWidgets()
@@ -557,27 +464,19 @@ public partial class Workspace : Window, IWidgetHost
             WindowMaximized = WindowState == WindowState.Maximized,
         };
 
-        foreach (var (container, widget) in EnumerateWidgets())
+        foreach ((WidgetContainer widgetContainer, IWidget widget) in EnumerateWidgets())
         {
-            double x = Canvas.GetLeft(container);
-            double y = Canvas.GetTop(container);
-            if (double.IsNaN(x)) x = 0;
-            if (double.IsNaN(y)) y = 0;
-
-            double width = container.Bounds.Width > 0 ? container.Bounds.Width : container.Width;
-            double height = container.Bounds.Height > 0 ? container.Bounds.Height : container.Height;
-
-            var wl = new WidgetLayout
+            Rect layoutRect = widgetContainer.GetLayoutRect();
+            layout.Widgets.Add(new WidgetLayout
             {
                 TypeKey = widget.TypeKey,
                 Title = widget.Title,
-                X = x,
-                Y = y,
-                Width = width,
-                Height = height,
+                X = layoutRect.X,
+                Y = layoutRect.Y,
+                Width = layoutRect.Width,
+                Height = layoutRect.Height,
                 StateJson = widget.SaveStateJson()
-            };
-            layout.Widgets.Add(wl);
+            });
         }
 
         return layout;
@@ -586,19 +485,11 @@ public partial class Workspace : Window, IWidgetHost
     private WorkspaceLayout CaptureAllLayouts()
     {
         WorkspaceLayout rootLayout = CaptureLayout();
-
-        var allWindows = Avalonia.Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop
-            ? desktop.Windows
-            : Enumerable.Empty<Window>();
-
-        foreach (var w in allWindows)
+        foreach (Workspace workspace in s_openWorkspaces)
         {
-            if (w is Workspace ws && ws != this && ws.Context == this.Context)
-            {
-                rootLayout.ChildWindows.Add(ws.CaptureLayout());
-            }
+            if (workspace != this && workspace.Context == Context)
+                rootLayout.ChildWindows.Add(workspace.CaptureLayout());
         }
-
         return rootLayout;
     }
 
@@ -613,9 +504,9 @@ public partial class Workspace : Window, IWidgetHost
 
         foreach (var childLayout in layout.ChildWindows)
         {
-            var ws = new Workspace(Context);
-            ws.RestoreLayout(childLayout);
-            ws.Show();
+            Workspace childWorkspace = new Workspace(Context);
+            childWorkspace.RestoreLayout(childLayout);
+            childWorkspace.Show();
         }
     }
 
@@ -624,35 +515,27 @@ public partial class Workspace : Window, IWidgetHost
     {
         DockHost.Children.Clear();
 
-        foreach (var wl in layout.Widgets)
+        foreach (WidgetLayout widgetLayout in layout.Widgets)
         {
-            var widget = CreateWidgetFromLayout(wl);
+            IWidget? widget = NewWidget(widgetLayout.TypeKey);
             if (widget == null)
                 continue;
-
-            var container = new Widget.WidgetContainer(widget)
-            {
-                Width = wl.Width > 0 ? wl.Width : widget.DefaultWidth,
-                Height = wl.Height > 0 ? wl.Height : widget.DefaultHeight
-            };
-
-            DockHost.Children.Add(container);
-            Canvas.SetLeft(container, wl.X);
-            Canvas.SetTop(container, wl.Y);
+            widget.LoadStateJson(widgetLayout.StateJson);
+            AddWidgetContainer(widget, widgetLayout.X, widgetLayout.Y, widgetLayout.Width > 0 ? widgetLayout.Width : widget.DefaultWidth, widgetLayout.Height > 0 ? widgetLayout.Height : widget.DefaultHeight);
         }
 
         UpdateHeader();
     }
 
-    // Rebuilds every Workspace of this process in place for a restarted server: each window keeps itself, its menus, size and
+    // Rebuilds every Workspace of this process in place for a restarted server or Remote Mirror: each window keeps itself, its menus, size and
     // position, and swaps its context, client, connection and widgets (see Spec.md "Remote workspaces"). UI thread.
-    private static void RestartWorkspaces(IClassicDesktopStyleApplicationLifetime desktop)
+    private static void RestartWorkspaces()
     {
         // Step 1: fresh contexts over the same copy; the old stay mapped, so nothing still reading them touches freed memory
         ContextManager.Renew();
 
         // Step 2: every window's layout, then every window disconnected. Why all first: no window can then reconnect under a name another still holds
-        List<(Workspace Workspace, WorkspaceLayout WorkspaceLayout)> workspaceLayouts = desktop.Windows.OfType<Workspace>().Select(workspace => (workspace, workspace.CaptureLayout())).ToList();
+        List<(Workspace Workspace, WorkspaceLayout WorkspaceLayout)> workspaceLayouts = s_openWorkspaces.Select(workspace => (workspace, workspace.CaptureLayout())).ToList();
         foreach ((Workspace workspace, _) in workspaceLayouts)
             workspace.Disconnect();
 
@@ -673,29 +556,32 @@ public partial class Workspace : Window, IWidgetHost
         }
     }
 
-    private IWidget? CreateWidgetFromLayout(WidgetLayout wl)
+    /// A new widget of this type key (its class name, as a saved layout and the Widgets menu name it), on this window's context;
+    /// null for a key no widget has.
+    private IWidget? NewWidget(string typeKey) => typeKey switch
     {
-        IWidget? widget = wl.TypeKey switch
-        {
-            "ChartWidget" => new ChartWidget(Context),
-            "FillsWidget" => new FillsWidget(Context),
-            "PositionsWidget" => new PositionsWidget(WorkspaceContext),
-            "OrdersWidget" => new OrdersWidget(WorkspaceContext),
-            "LadderWidget" => new LadderWidget(WorkspaceContext),
-            "AuditTrailWidget" => new AuditTrailWidget(WorkspaceContext),
-            "SendOrderWidget" => new SendOrderWidget(WorkspaceContext),
-            "InstrumentHeadersWidget" => new InstrumentHeadersWidget(WorkspaceContext),
-            "RiskLimitsWidget" => new RiskLimitsWidget(WorkspaceContext),
-            "MessageEfficiencyWidget" => new MessageEfficiencyWidget(WorkspaceContext),
-            "RateLimitWidget" => new RateLimitWidget(WorkspaceContext),
-            _ => null
-        };
+        nameof(ChartWidget) => new ChartWidget(Context),
+        nameof(FillsWidget) => new FillsWidget(Context),
+        nameof(PositionsWidget) => new PositionsWidget(WorkspaceContext),
+        nameof(OrdersWidget) => new OrdersWidget(WorkspaceContext),
+        nameof(LadderWidget) => new LadderWidget(WorkspaceContext),
+        nameof(AuditTrailWidget) => new AuditTrailWidget(WorkspaceContext),
+        nameof(SendOrderWidget) => new SendOrderWidget(WorkspaceContext),
+        nameof(InstrumentHeadersWidget) => new InstrumentHeadersWidget(WorkspaceContext),
+        nameof(RiskLimitsWidget) => new RiskLimitsWidget(WorkspaceContext),
+        nameof(MessageEfficiencyWidget) => new MessageEfficiencyWidget(WorkspaceContext),
+        nameof(RateLimitWidget) => new RateLimitWidget(WorkspaceContext),
+        _ => null
+    };
 
-        widget?.LoadStateJson(wl.StateJson);
-        return widget;
+    /// Adds the widget the clicked Widgets menu item's Tag names.
+    private void OnAddWidgetClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem { Tag: string typeKey } && NewWidget(typeKey) is IWidget widget)
+            AddWidget(widget);
     }
 
-    private async System.Threading.Tasks.Task SaveWorkspaceAsync(string path)
+    private async Task SaveWorkspaceAsync(string path)
     {
         try
         {
@@ -715,7 +601,7 @@ public partial class Workspace : Window, IWidgetHost
         }
     }
 
-    internal async System.Threading.Tasks.Task LoadWorkspaceAsync(string path)
+    internal async Task LoadWorkspaceAsync(string path)
     {
         try
         {
@@ -735,16 +621,4 @@ public partial class Workspace : Window, IWidgetHost
             Console.WriteLine($"Error loading workspace '{path}': {ex.Message}");
         }
     }
-
-    private void OnAddChartWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new ChartWidget(Context));
-    private void OnAddFillsWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new FillsWidget(Context));
-    private void OnAddPositionsWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new PositionsWidget(WorkspaceContext));
-    private void OnAddOrdersWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new OrdersWidget(WorkspaceContext));
-    private void OnAddSendOrderWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new SendOrderWidget(WorkspaceContext));
-    private void OnAddAuditTrailWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new AuditTrailWidget(WorkspaceContext));
-    private void OnAddInstrumentHeadersWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new InstrumentHeadersWidget(WorkspaceContext));
-    private void OnAddMessageEfficiencyWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new MessageEfficiencyWidget(WorkspaceContext));
-    private void OnAddRateLimitWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new RateLimitWidget(WorkspaceContext));
-    private void OnAddRiskLimitsWidgetClick(object? sender, RoutedEventArgs e) => AddWidget(new RiskLimitsWidget(WorkspaceContext));   // ← add this
-
 }

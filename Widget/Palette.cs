@@ -8,25 +8,14 @@ using System.Globalization;
 
 namespace Widget;
 
+/// The GUI's colours and brushes, shared by the widgets and the Workspace window. UI thread, cold path.
 public static class Palette
 {
     // --- RAW SOLARIZED DEFINITIONS ---
     public static readonly Color SolBase03 = Color.Parse("#002b36");
-    public static readonly Color SolBase02 = Color.Parse("#073642");
-    public static readonly Color SolBase01 = Color.Parse("#586e75");
-    public static readonly Color SolBase00 = Color.Parse("#657b83");
-    public static readonly Color SolBase0 = Color.Parse("#839496");
-    public static readonly Color SolBase1 = Color.Parse("#93a1a1");
-    public static readonly Color SolBase2 = Color.Parse("#eee8d5");
     public static readonly Color SolBase3 = Color.Parse("#fdf6e3");
-    public static readonly Color SolYellow = Color.Parse("#b58900");
-    public static readonly Color SolOrange = Color.Parse("#cb4b16");
     public static readonly Color SolRed = Color.Parse("#dc322f");
-    public static readonly Color SolMagenta = Color.Parse("#d33682");
-    public static readonly Color SolViolet = Color.Parse("#6c71c4");
     public static readonly Color SolBlue = Color.Parse("#268bd2");
-    public static readonly Color SolCyan = Color.Parse("#2aa198");
-    public static readonly Color SolGreen = Color.Parse("#859900");
 
     // --- CUSTOM COLORS ---
 
@@ -54,8 +43,6 @@ public static class Palette
     public static readonly ISolidColorBrush SellOrder = GetRowBackground(AskActivePurple, 0.2);
     public static readonly IBrush Flat = new ImmutableSolidColorBrush(Colors.White);
 
-
-
     public static readonly IBrush WorkEmptyLightGray = new ImmutableSolidColorBrush(Color.FromRgb(211, 211, 211));
     public static readonly IBrush WorkActiveWhite = new ImmutableSolidColorBrush(Colors.White);
     public static readonly IBrush WorkTextBlack = new ImmutableSolidColorBrush(Colors.Black);
@@ -64,8 +51,6 @@ public static class Palette
     public static readonly IBrush PriceTextBlack = new ImmutableSolidColorBrush(Colors.Black);
 
     public static readonly IPen GridLineGrayPen = new ImmutablePen(0xFFBEBEBE, 1.0);
-    public static readonly IBrush HeaderBackgroundLightGray = new ImmutableSolidColorBrush(Color.FromRgb(220, 220, 220));
-    public static readonly IBrush HeaderTextBlack = new ImmutableSolidColorBrush(Colors.Black);
 
     public static readonly IBrush ProfitGreen = new ImmutableSolidColorBrush(CustomBrightGreen);
     public static readonly IBrush LossRed = new ImmutableSolidColorBrush(SolRed);
@@ -81,6 +66,9 @@ public static class Palette
         Brushes.Blue, Brushes.Red, Brushes.Green, Brushes.Orange,
         Brushes.Purple, Brushes.Cyan, Brushes.Magenta, Brushes.Black
     };
+
+    /// The brush for a signed value: positiveBrush above 0, negativeBrush below, black at 0 (a quantity's side, a PnL's sign).
+    public static IBrush GetSignBrush(double value, IBrush positiveBrush, IBrush negativeBrush) => value > 0 ? positiveBrush : value < 0 ? negativeBrush : Brushes.Black;
 
     public static ISolidColorBrush GetRowBackground(IBrush solidBrush, double opacity = 0.2)
     {
@@ -136,26 +124,5 @@ public class PnLToBrushConverter : IValueConverter
         return Palette.Flat;
     }
     public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotImplementedException();
-}
-
-public class PnLToTextBrushConverter : IValueConverter
-{
-    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
-    {
-        double number = 0;
-        if (value is double d) number = d;
-        else if (value is int i) number = i;
-        else return Brushes.Black;
-
-        if (number > 0) return Palette.ProfitGreen;
-        if (number < 0) return Palette.LossRed;
-
-        return Brushes.Gray;
-    }
-
-    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
-    {
-        throw new NotImplementedException();
-    }
 }
 //END_FILE Widget/Palette.cs

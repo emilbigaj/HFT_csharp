@@ -484,6 +484,14 @@ public struct OrderState()
         rejectedState.OrderStateReason = OrderStateReason.Rejected;
     }
 
+    /// The target that cancels this order: its header and profile, action Cancel. Cold path (a GUI's cancel).
+    public readonly OrderTarget NewCancel() => new()
+    {
+        OrderHeader = OrderHeader,
+        OrderProfile = OrderProfile,
+        OrderTargetAction = OrderTargetAction.Cancel,
+    };
+
     public override string ToString() => Json.Serialize(this);
 }
 

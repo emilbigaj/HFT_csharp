@@ -104,6 +104,9 @@ public abstract class Context
     public FileSystemPath ServerStrategyName { get; }
     public FileSystemPath DirectoryPath { get; }
 
+    /// The last part of DirectoryPath (the server's or client's leaf name), or the whole path when it has none.
+    public string DirectoryName => Path.GetFileName(DirectoryPath.Path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) is { Length: > 0 } directoryName ? directoryName : DirectoryPath.Path;
+
     public Access ServerAccess { get; }
     public Access ClientAccess { get; }
 
@@ -463,6 +466,16 @@ public abstract class Context
     {
         ThrowIfInstrumentIdOutOfRange(instrumentId);
         return ref _marketsByPrice.GetEntry(instrumentId);
+    }
+
+    // The instrument's book, or false while its row is empty: a remote desk's copy is wiped while a restarted Remote Mirror or
+    // server refills it, and a GUI then has nothing to draw yet. Cold path: copies the whole book.
+    public bool TryReadMarketByPrice64(int instrumentId, out MarketByPrice64 marketByPrice64)
+    {
+        ref SharedArrayEntry<MarketByPrice64> marketByPriceEntry = ref GetMarketByPrice64(instrumentId);
+        bool isWritten = !marketByPriceEntry.IsEmpty();
+        marketByPrice64 = isWritten ? marketByPriceEntry.Read() : default;
+        return isWritten;
     }
 
     // Common shared memory accessors
@@ -1710,5 +1723,14 @@ public class WorkspaceContext
     // client sent it: the algo, this GUI, a sibling GUI or a remote desk's (see Spec.md "Workspaces (GUIs)").
     public OrderEnumerable EnumerateOrders(int instrumentId = -1)
         => Primary.EnumerateOrders(instrumentId, (Primary as ClientContext)?.ClientId ?? -1, Manual.Context.ClientId);
+
+    // Allocates the instrument to this workspace's manual client unless it already holds it. Why: a control travels on the
+    // instrument's execution channel, which the server polls only for clients allocated in that CoreGroup (queued ahead of the
+    // control on the manual client's owner thread).
+    public void AllocateToManualClient(int instrumentId)
+    {
+        if (!Manual.Context.InstrumentIds[instrumentId])
+            Manual.OnAllocateInstrument(Primary.GetInstrument(instrumentId).Header.InstrumentHeaderId);
+    }
 }
 //END_FILE HFT/Provider/Context.cs
