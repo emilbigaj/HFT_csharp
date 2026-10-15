@@ -76,6 +76,9 @@ public sealed class Position
 {
     public AlgoStatus AlgoStatus => _headerEntry.GetReadonlyRef().AlgoStatus;
 
+    // True while this strategy's algo may trade the instrument: its own switch and the server's master both Live. Hot path: two byte reads.
+    public bool IsAlgoLive => _context.IsAlgoLive(_clientId, Instrument.InstrumentId);
+
     // Context reference removed.
     public Instrument Instrument { get; }
 

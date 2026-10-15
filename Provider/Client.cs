@@ -511,6 +511,9 @@ public abstract class Client
             {
                 ref readonly TradingStatusUpdate tradingStatusUpdate = ref MemoryMarshal.AsRef<TradingStatusUpdate>(bytes);
                 Context.GetInstrument(instrumentId).OnTradingStatusUpdate(in tradingStatusUpdate);
+                // As on the server: the instrument's close starts its fills count again in this client's copy
+                if (tradingStatusUpdate.TradingStatus == TradingStatus.Closed)
+                    RiskLayer.OnSessionClosed(instrumentId);
                 break;
             }
             default:
@@ -615,6 +618,8 @@ public abstract class Client
                 OnPositionHeader(rsrcObj);
                 break;
             case (byte)OrderType.OrderTarget:   // a cancel the server sent for this client's previous process: recorded by the audit, nothing to apply
+                break;
+            case (byte)OrderType.RiskLimit:     // an edit of this strategy's limit, sent so the audit keeps its file: the row itself is in shared memory
                 break;
             default:
                 throw new NotImplementedException($"Unknown message type: {type}");
@@ -802,24 +807,18 @@ public abstract class Client
 
         // Non-discarded rejections raise the event regardless of source, so exchange/server
         // rejections severe enough to pause the algo reach the AlertManager too.
-        if (IsDiscarded(in orderRejected))
+        if (orderRejected.IsDiscarded)
             return;
 
         OrderRejected?.Invoke(in orderRejected);
     }
-
-    // Benign rejections are absorbed silently — no alert, no pause, no escalation. The sim-only
-    // session-limit carve-out layers on top of the struct's own reason check.
-    public static bool IsDiscarded(in OrderRejected orderRejected) =>
-        orderRejected.IsDiscarded
-        || (Clock.Mode == ClockMode.Simulation && orderRejected.OrderRejectedReasons.Raw == 1UL << (int)OrderRejectedReason.TooManyOrdersPerSession);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     protected void Reject(in OrderTarget orderTarget, Bitset64 orderRejectedReasons, OrderRejectedSource orderRejectedSource)
     {
         orderTarget.NewOrderRejected(orderRejectedReasons, orderRejectedSource, out OrderRejected orderRejected);
 
-        if (IsDiscarded(in orderRejected))
+        if (orderRejected.IsDiscarded)
             return;
 
         _socket.Write(Context.GetInstrument(orderRejected.OrderHeader.OrderId.InstrumentId).Header.CoreGroupId, in orderRejected);

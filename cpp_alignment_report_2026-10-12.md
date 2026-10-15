@@ -54,6 +54,9 @@ Words used throughout:
 | P22 | `ServerHeader` | PORT | **yes** | New field `int32 ServerProcessId` at offset 173 (size 173 → 177), stamped when the header is posted; a refused post names "already running" or "previous server exited"; never overwrite |
 | P23 | `SideByPrice64` | PORT | no | `TrySetQuantity`: a delete of a price better than the best is a no-op; it used to wipe the worse level sharing its ring slot, unbroadcast |
 | P24 | Message efficiency | PORT (all of it, not C#-only; needs a CME change) | **yes** (L10) | `InstrumentHeader` gains `ProductGroupId` (int8, offset 7) and `ProductGroupRoot` (tag 1151, offset 60); the `MessageEfficiency` row gains a type header (84 bytes); the server assigns rows, ends the day on `Closed` and alone appends `<group>.messageefficiency` (type 18 via Logging at a close, directly at shutdown) |
+| P25 | Algo pause | PORT | no | A second switch: an algo order also needs the server row's `AlgoStatus` `Live` (the master per instrument); strategy 0's control (a server workspace's) turns the master only; the master starts `Live` at every start |
+| P26 | Max fills per session | PORT | **yes** (L11) | `RiskLimit` gains `MaxFillsPerSession` (28 bytes), `WorkingRisk` gains `FillsThisSession` (20 bytes) and renames its worst fields, `ControlRiskLimit` gains the field; reason 57 renamed `TooManyFillsPerSession`; counted per fill, zeroed at `Closed`, checked after the position room |
+| P27 | Strategy risk limits | PORT | **yes** (L11) | New region `LocalRiskLimits` [strategy, instrument]; `RiskLimits` renamed `ServerRiskLimits`; `ControlRiskLimit` gains `StrategyId` (0 = the firm's row); the server loads strategy rows from `<strategy>/RiskLimits` and records their edits on the strategy's execution channel; the server still checks the firm's limit only |
 | C1-C17 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
@@ -889,6 +892,104 @@ Client: GetInstrument no longer allocates a product group; Instrument::ProductGr
 exists. In Realtime, close the NQ session: one line in `NQ.messageefficiency` with the closing day's counts, and the row
 starts the next day; stop the server: one more line per group.
 
+### P25. A second algo switch: the server's master per instrument (C# `Provider/Context.cs`, `Provider/RiskLayer.cs`, `Provider/Server.cs`, `Provider/Position.cs`, `Strategy/Algo.cs`; 2026-10-15)
+
+An algo order passes only while two switches are both `Live`: the strategy's own (`AlgoStatus` on its row in
+`LocalPositionHeaders`) and the server's master for the instrument (`AlgoStatus` on the instrument's row in
+`ServerPositionHeaders`). A server workspace's Pause/Resume turns the master.
+
+```
+IsAlgoLive(strategyId, instrumentId) = LocalPositionHeaders[strategyId, instrumentId].AlgoStatus == Live
+                                       and ServerPositionHeaders[instrumentId].AlgoStatus == Live
+
+RiskLayer::ValidateOrder (server and client):
+  if not cancel and IsAlgoOrder and not IsAlgoLive(strategyId, instrumentId): reject AlgoIsPaused   // was: own row only
+
+Server::OnControlAlgoStatus(strategyId, instrumentId, status):
+  if strategyId == ServerStrategyId (0):        // a server workspace: the master switch
+    ServerPositionHeaders[instrumentId].AlgoStatus = status (timestamps now); WriteToAudit(coreGroup, that row)
+  else:                                          // as before
+    LocalPositionHeaders[strategyId, instrumentId].AlgoStatus = status; WriteToExecution(strategyId, coreGroup, that row)
+
+ServerContext::AllocateInstrument: ServerPositionHeaders[instrumentId].AlgoStatus = Live   // every start, whatever the file says
+```
+
+- The master never writes a strategy's row. A refusal for `AlgoIsPaused` alone is already discarded (never sent, never
+  auto-pauses), so turning the master off and on leaves every strategy's own switch as it was.
+- C# algos read both rows (they map `ServerPositionHeaders` read-only now). A C++ algo, if there is one, does the same.
+- No layout change: `ServerPositionHeaders` is the same array; C# creates it last among the shared arrays, so the C#
+  array ids (C# Mirror only) are unchanged.
+- **Hot-path cost:** one byte more per algo order check; reading the server row from a client costs the server's next fill
+  write on that row a cache-line transfer.
+
+**Verify:** two strategies trading one instrument; pause it from a server workspace: both algos stop sending, their own
+`AlgoStatus` stays `Live`, the server row shows `Paused`; resume: both trade again. Restart the server: the master is `Live`.
+
+### P26. Max fills per session (C# `Execution/Order.cs`, `Provider/Allocate.cs`, `Provider/RiskLayer.cs`, `Provider/Server.cs`, `Provider/Client.cs`; 2026-10-15)
+
+A new limit caps the lots filled on an instrument in one session, buys and sells both counted.
+
+```
+OrderRejectedReason 57: TooManyOrdersPerSession -> TooManyFillsPerSession      // same value; audit JSON writes it by name
+
+RiskLimit (Pack 1, 28 bytes): Header@0 InstrumentId@4 Timestamp@8 MaxOrderQuantity@16 MaxPositionQuantity@20
+                              MaxFillsPerSession@24 (new; GetMaxLimits int.MaxValue, GetMinLimits 0)
+WorkingRisk (Pack 1, 20 bytes): Header@0 Position@4 WorstLongQuantity@8 WorstShortQuantity@12   // renamed from Worst*WorkingQuantity
+                                FillsThisSession@16 (new, >= 0)
+ControlRiskLimit: ... MaxPositionQuantity, MaxFillsPerSession (new, last)
+
+RiskLayer::OnFill:        under the row lock, Position += q; FillsThisSession += |q|
+RiskLayer::OnSessionClosed(instrumentId): under the row lock, FillsThisSession = 0
+Server::OnTradingStatusUpdate: on Closed, after EndMessageEfficiencyDay, riskLayer.OnSessionClosed(instrumentId)
+Server::OnControlRiskLimit: also copies MaxFillsPerSession
+
+GetAbsAllowedOrderQuantity(target, isFillsRoom, isWithinLimit), per leg:
+  room = isFillsRoom ? MaxFillsPerSession - FillsThisSession - WorstLongQuantity + WorstShortQuantity
+       : (as before, the position room)
+ValidateOrder: after the position room check (PositionExceedsRiskLimit), the fills room check -> TooManyFillsPerSession
+TryClipToRiskLimit: the smaller of the two rooms
+```
+
+- Strict: every working lot on both sides is assumed to fill; an order may carry its current worst plus the room, so an
+  amend is measured by its delta.
+- Never persisted: a server restart starts the count at 0 (accepted).
+- A `.risklimit` line without `MaxFillsPerSession` loads 0, refusing every order until the limit is set.
+- C# deleted its simulation-only discard of a refusal for 57 alone; if C++ has the same carve-out, delete it.
+- **Hot-path cost:** one more add per fill, one more leg loop per order check and per clip.
+
+**Verify:** limit 10, a working buy of 4 and sell of 4: a new buy of 3 is refused `TooManyFillsPerSession` (4 + 4 + 3 > 10),
+of 2 accepted; fill 6 of them, then a `Closed`: `FillsThisSession` is 0.
+
+### P27. Strategy risk limits: the firm's limit is the master (C# `Provider/Context.cs`, `Provider/Server.cs`, `Provider/Allocate.cs`, `Execution/Order.cs`, `Provider/Client.cs`; 2026-10-15)
+
+Each strategy gets its own limits per instrument. The strategy's own `RiskLayer` checks them against its own exposure; the
+server keeps checking the firm's limit against the firm's exposure, and never reads a strategy's limit.
+
+```
+Regions: <server>/RiskLimits -> <server>/ServerRiskLimits                 // renamed, per instrument, the firm's
+         <server>/LocalRiskLimits, RiskLimit x (ClientIds x InstrumentIds), index clientId * InstrumentIds + instrumentId  // new
+ControlRiskLimit: Header, ClientId, StrategyId (new, after ClientId), InstrumentId, MaxOrderQuantity, MaxPositionQuantity, MaxFillsPerSession
+
+Server::OnControlRiskLimit(c):
+  row = c.StrategyId == ServerStrategyId (0) ? ServerRiskLimits[c.InstrumentId] : LocalRiskLimits[c.StrategyId, c.InstrumentId]
+  copy the config fields under the row lock; Timestamp = now
+  StrategyId 0: WriteToAudit(coreGroup, row)          // Logging appends <server>/RiskLimits/<symbol>.risklimit, as before
+  otherwise:    WriteToExecution(StrategyId, coreGroup, row)   // Logging's tap appends <strategy>/RiskLimits/<symbol>.risklimit
+
+ServerContext::AllocateInstrument(clientId, instrumentId): LocalRiskLimits[clientId, instrumentId] = the file's last line
+  (<client directory>/RiskLimits/<symbol>.risklimit), or with none GetMaxLimits in a simulation, GetMinLimits in realtime
+```
+
+- The server's own `RiskLayer` is unchanged: it reads `ServerRiskLimits`. A C# strategy reads its `LocalRiskLimits` row. A
+  C++ strategy, if there is one, does the same.
+- A client receives a `RiskLimit` (16) on its execution channel and ignores it (it is there for the audit tap). A C#
+  client that predates this throws `NotImplementedException("Unknown message type")`: see L11.
+- Manual orders and strategy 0 (the house book) get the firm's limit only.
+- **Hot-path cost:** none on the server.
+
+**Verify:** firm limit 10, strategy X's 4: X's algo targeting 5 sends 4; from X's workspace raise X's limit to 6: the row
+changes, `<X>/RiskLimits/<symbol>.risklimit` gets the line, the server's file does not.
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -1059,6 +1160,12 @@ listed.
   counts 4 bytes off. An old C# Logging writes
   a type-18 record as an empty line and never appends the row. The new C# processes on the box (Mirror, Workspace) no
   longer append at all.
+- **L11. Risk limits (P26, P27): the C++ server and every C# process on the box together.** `RiskLimit` grew to 28 bytes and
+  `WorkingRisk` to 20, both shared rows; `ControlRiskLimit` grew 8 bytes (`StrategyId`, `MaxFillsPerSession`); the region
+  `RiskLimits` is now `ServerRiskLimits`, and `LocalRiskLimits` is new. Old C# strategies throw on the `RiskLimit` the
+  server now sends on their execution channel. Before trading, set `MaxFillsPerSession` on every instrument (old lines
+  load 0) and each strategy's limits (no file means Min in realtime). Both Mirror ends deploy with it (the layout hash
+  changes).
 
 ---
 

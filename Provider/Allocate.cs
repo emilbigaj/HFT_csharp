@@ -67,16 +67,18 @@ public struct ControlAlgoStatus()
     }
 }
 
-// Client -> server request: config fields only. Risk limits are server-wide (one row per instrument); the server owns the row and a client never sends one (see Spec.md).
+// Client -> server request: config fields only. The server owns every limit row, the firm's (strategy 0) and each strategy's, and a client never sends one (see Spec.md).
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 [RegisterJson]
 public struct ControlRiskLimit()
 {
     public readonly Header<ControlType> Header = new(ControlType.RiskLimit);
     public int ClientId = -1;
+    public int StrategyId = -1;   // the row edited: 0 the firm's, otherwise that strategy's
     public int InstrumentId = -1;
     public int MaxOrderQuantity = 0;
     public int MaxPositionQuantity = 0;
+    public int MaxFillsPerSession = 0;
     public override string ToString()
     {
         return Json.Serialize(this);

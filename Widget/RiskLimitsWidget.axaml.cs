@@ -13,7 +13,7 @@ using Tools;
 namespace Widget;
 
 
-/// One instrument's risk-limit grid row: the server's limits, working risk and position for it. Refreshed on the widget's
+/// One instrument's risk-limit grid row: the principal's limits, working risk and position for it. Refreshed on the widget's
 /// refresh timer thread; cold path.
 public sealed class WidgetRiskLimit : INotifyPropertyChanged
 {
@@ -32,12 +32,14 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
     public int PositionQuantity => _positionQuantity;
     public int MaxOrderQuantity => _riskLimit.MaxOrderQuantity;
     public int MaxPositionQuantity => _riskLimit.MaxPositionQuantity;
+    public int MaxFillsPerSession => _riskLimit.MaxFillsPerSession;
 
     public int LongQuantityAllowance => _riskLimit.GetLongQuantityAllowance(in _workingRisk);
     public int ShortQuantityAllowance => _riskLimit.GetShortQuantityAllowance(in _workingRisk);
 
-    public int WorstLongWorkingQuantity => _workingRisk.WorstLongWorkingQuantity;
-    public int WorstShortWorkingQuantity => _workingRisk.WorstShortWorkingQuantity;
+    public int WorstLongQuantity => _workingRisk.WorstLongQuantity;
+    public int WorstShortQuantity => _workingRisk.WorstShortQuantity;
+    public int FillsThisSession => _workingRisk.FillsThisSession;
 
     public string Timestamp => _riskLimit.Timestamp == Tools.Timestamp.MinValue ? "—" : _riskLimit.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
 
@@ -55,9 +57,9 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
 
 
 
-/// Lists the server's risk limits for each instrument allocated in the workspace's principal, refreshed every 250 ms. The
-/// right-click menu toggles columns on a header, and edits the limits and offers the server's .risklimit file and folder on a
-/// row. UI thread and the refresh timer's thread; cold path.
+/// Lists the principal's risk limits for each instrument allocated in the workspace's principal, refreshed every 250 ms: a server
+/// workspace's are the firm's, a strategy workspace's the strategy's own. The right-click menu toggles columns on a header, and
+/// edits the limits and offers the principal's .risklimit file and folder on a row. UI thread and the refresh timer's thread; cold path.
 public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
 {
     private readonly WorkspaceContext _context;
@@ -93,12 +95,12 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
         _refreshTimer = new WidgetRefreshTimer(nameof(RiskLimitsWidget), 250, Refresh);
     }
 
-    // Both read the server row, never Primary: limits are server-wide and RiskLayer gates them on the server position.
-    private static RiskLimit GetRiskLimit(int instrumentId) => ContextManager.ServerContext.GetRiskLimit(instrumentId).Read();
+    // The principal's own rows, as its RiskLayer checks them: the firm's limit against the firm's exposure, or a strategy's against its own.
+    private RiskLimit GetRiskLimit(int instrumentId) => _context.Primary.GetRiskLimit(instrumentId).Read();
 
-    private static WorkingRisk GetWorkingRisk(int instrumentId) => ContextManager.ServerContext.GetWorkingRisk(instrumentId).Read();
+    private WorkingRisk GetWorkingRisk(int instrumentId) => _context.Primary.GetWorkingRisk(instrumentId).Read();
 
-    private static int GetPositionQuantity(int instrumentId) => ContextManager.ServerContext.GetPosition(instrumentId).Profit.Quantity;
+    private int GetPositionQuantity(int instrumentId) => _context.Primary.GetPosition(instrumentId).Profit.Quantity;
 
     /// Refreshes each allocated instrument's row in place, creating it on first sight, and posts the active rows to the grid.
     private void Refresh()
@@ -150,18 +152,18 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
         }
 
         // Step 2: a row names its instrument, edits its limits and copies its file path
-        ServerContext serverContext = ContextManager.ServerContext;
+        Context primary = _context.Primary;
         if (dataGridHit.RowItem is WidgetRiskLimit widgetRiskLimit)
         {
             contextMenu.Items.Add(WidgetMenus.NewTitleMenuItem(widgetRiskLimit.ShortSymbol));
             contextMenu.Items.Add(new Separator());
             contextMenu.Items.Add(WidgetMenus.NewMenuItem("Edit RiskLimit", "✏", async () => await EditRiskLimit(widgetRiskLimit)));
             contextMenu.Items.Add(new Separator());
-            contextMenu.Items.Add(WidgetMenus.NewCopyPathMenuItem(this, "Copy Server .risklimit File Path", Context.GetRiskLimitsFilePath(serverContext.DirectoryPath, widgetRiskLimit.Symbol)));
+            contextMenu.Items.Add(WidgetMenus.NewCopyPathMenuItem(this, "Copy .risklimit File Path", Context.GetRiskLimitsFilePath(primary.DirectoryPath, widgetRiskLimit.Symbol)));
         }
 
         // Step 3: the folder, from anywhere off the header
-        contextMenu.Items.Add(WidgetMenus.NewOpenFolderMenuItem("Open Server RiskLimits Folder", serverContext.RiskLimitsDirectoryPath.ToString()));
+        contextMenu.Items.Add(WidgetMenus.NewOpenFolderMenuItem("Open RiskLimits Folder", primary.RiskLimitsDirectoryPath.ToString()));
     }
 
     /// Opens the edit dialog on the instrument's current limits and sends the edit to the server as a ControlRiskLimit; logs a failure.
@@ -183,6 +185,7 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
             _context.AllocateToManualClient(widgetRiskLimit.InstrumentId);
             ControlRiskLimit controlRiskLimit = editedControlRiskLimit.Value;
             controlRiskLimit.ClientId = _context.Manual.Context.ClientId;
+            controlRiskLimit.StrategyId = _context.Primary.StrategyId;
             _context.Manual.OnControlRiskLimit(in controlRiskLimit);
         }
         catch (Exception exception)

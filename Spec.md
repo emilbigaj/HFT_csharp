@@ -353,13 +353,14 @@ id up in the same array.
 
 ### Risk-limit edits are requests; the CoreGroup thread owns the row
 
-Risk limits are server-wide: one `RiskLimit` row per instrument, applied to every strategy that
-trades it. `StrategyId` was removed from the row and the request on 2026-09-10 — it was never
-enforced or restored per strategy and only chose where an echo went; a per-strategy limit is a
-future feature, not a routing choice.
+There are two levels of limit, both `RiskLimit` rows the server owns: the firm's, one per instrument
+in `ServerRiskLimits`, and each strategy's, one per strategy and instrument in `LocalRiskLimits`
+(see "Two levels of risk limit"). `StrategyId` was removed from the row and the request on
+2026-09-10, when it only chose where an echo went; it came back on the request on 2026-10-15 to
+choose the row edited.
 
-A `RiskLimit` row (24 bytes) is operator config only: `MaxOrderQuantity`, `MaxPositionQuantity`
-and the edit `Timestamp`. The risk layer's live numbers are on a separate `WorkingRisk` row (see
+A `RiskLimit` row (28 bytes) is operator config only: `MaxOrderQuantity`, `MaxPositionQuantity`,
+`MaxFillsPerSession` and the edit `Timestamp`. The risk layer's live numbers are on a separate `WorkingRisk` row (see
 "RiskLimit is config, WorkingRisk is the live numbers"). Until 2026-09-10 the GUI edited by sending
 the whole row back on the admin channel, and the admin thread wrote it whole while the CoreGroup
 thread was reserving and releasing in the same row (the aggregates sat on `RiskLimit` then);
@@ -380,8 +381,8 @@ after every batch it drains, so the window is one poll pass (100 ms live). A `.r
 Lowering a limit takes effect on the next check, on both sides. Past the limit `ValidateOrder`
 still lets an order keep its worst (a cut always passes), so working orders are never forced off by
 an edit; `TryTarget` cuts an order back within the new limit the next time it reduces or reprices
-it (an order the zipper keeps as is is never clipped). Both copies read the one server-wide
-`RiskLimit` row, so the client sees an edit as soon as the server does. A limit lowered between
+it (an order the zipper keeps as is is never clipped). Both rows live in shared memory, so a
+strategy sees an edit of its own limit as soon as the server writes it. A limit lowered between
 a client's check and the server's read of the order can refuse that order at the server and pause
 the algo (accepted; see Accepted residuals).
 
@@ -391,6 +392,87 @@ fills. The admin thread's only remaining row writes are allocation. One conseque
 server polls a client's execution channel only for CoreGroups that client has allocated in, so a
 workspace allocates the instrument to its manual client before sending a control for it.
 
+### Algo pause: two switches, the strategy's and the server's master (2026-10-15)
+
+An algo may trade an instrument only while two switches are both Live: its strategy's own (`AlgoStatus` on the strategy's
+row in `LocalPositionHeaders`) and the server's master for that instrument (`AlgoStatus` on the server row in
+`ServerPositionHeaders`). `Context.IsAlgoLive(strategyId, instrumentId)` is the one check; the algo (`Position.IsAlgoLive`
+in `Algo.Target`), the client's risk copy and the server's risk copy all use it, so a paused algo sends nothing, and an
+order that races a pause is refused `AlgoIsPaused` at the server.
+- A strategy workspace's Pause/Resume turns its strategy's switch, as before. A server workspace's turns the master: its
+  control carries strategy 0, and `Server.OnControlAlgoStatus` writes the server row only, never a strategy's (the house
+  book has no algo, so strategy 0's own status means nothing). Pause All in a server workspace stops every algo.
+- The master is a kill switch: Live at every start, whatever its file says (`ServerContext.AllocateInstrument`). Its
+  changes go on record as a fill's server row does, on the audit channel to `<server>/Positions`.
+- A refusal for `AlgoIsPaused` alone is discarded (`OrderRejected.IsDiscarded`), so it never auto-pauses the strategy:
+  turning the master off and on leaves every strategy's own switch as it was.
+- Every context maps `ServerPositionHeaders` (read-only in a client), created last among the shared arrays so a
+  ServerContext keeps its array ids (the Mirror's layout is unchanged).
+- Cost: one more byte read per algo decision and per algo order check. The server rewrites the row on every fill of the
+  instrument, so a client reading it each tick costs that fill's write a cache-line transfer (measured on the CME box at
+  about +330 ns on the first write after a read); a Local Mirror already reads every row each pass. If it shows in fill
+  latency, the master moves to a row the server rarely writes.
+
+### Two levels of risk limit: the firm's and each strategy's (2026-10-15)
+
+Each `RiskLayer` checks one limit, its context's own, through the same `Context.GetRiskLimit(instrumentId)`:
+
+| Where | Exposure (`WorkingRisk`) | Limit (`RiskLimit`) |
+|---|---|---|
+| Server | every order on the instrument, firm-wide | the firm's, `ServerRiskLimits[instrumentId]` |
+| Strategy process | its own algo orders | its own, `LocalRiskLimits[strategyId, instrumentId]` |
+
+So the firm's limit is the master: a strategy works within its own limit, and the server refuses whatever would take the
+firm past the firm's. Example: firm limit 10, strategy X's 4, strategy Y's 8. X asks for 5 and its clip sends 4; Y then
+asks for 8, which passes its own check (8 <= 8), and the server refuses it (4 + 8 > 10), which pauses Y.
+- **Manual orders get only the firm's limit.** A client checks only its own algo orders (see "Why the client keeps its
+  own copy"), and the server checks only the firm's. Strategy 0 (the house book) has no strategy limit: its orders are
+  manual, and its edits address the firm's row.
+- **No cross reads.** A strategy never reads the firm's exposure (the server writes it on every order, so reading it would
+  cost the server a cache-line transfer per write), and the server never reads a strategy's. Declined 2026-10-15: clipping
+  a strategy to the firm's room as well, and the server checking strategy limits (which would cover manual orders booked
+  to a strategy, at an estimated +5–10 ns per order).
+- **The server owns every row.** `ServerContext.AllocateInstrument` loads the firm's row from `<server>/RiskLimits`;
+  `AllocateInstrument(clientId, instrumentId)` loads the strategy's from `<strategy>/RiskLimits` (`RiskLimit.FromFile`:
+  with no file, Max limits in a simulation and Min in realtime, as the firm's). A GUI client gets a row too; it is never
+  read.
+- **Edits** carry `ControlRiskLimit.StrategyId`, the workspace's principal (`Context.StrategyId`): 0 edits the firm's row,
+  any other id that strategy's. `Server.OnControlRiskLimit` writes it on the CoreGroup thread and puts it on record with
+  `WriteToRecord`, as the master switch is: the firm's on the audit channel (Logging keeps `<server>/RiskLimits`), a
+  strategy's on its execution channel (Logging's tap keeps `<strategy>/RiskLimits`; the strategy ignores the message). An
+  edit of a strategy that is not connected writes the row, but its record can be lost (out of contract: a strategy workspace
+  edits its own running strategy).
+- **The Risk Limits widget** shows the principal's own rows: a server workspace the firm's limits and exposure, a strategy
+  workspace the strategy's. On a remote desk a strategy's `WorkingRisks` are not mirrored (they are under the strategy's
+  directory), so its exposure columns read 0 there; its limits are (accepted).
+- Two arrays, named like the position rows, because the server writes both. `LocalRiskLimits` is created last, so every
+  other array keeps its id; `RiskLimits` was renamed `ServerRiskLimits`.
+- Cost: the client's check reads a different row through a virtual `GetRiskLimit` (as `GetPositionHeader`); about 1–2 ns
+  per leg, no allocation.
+
+### Max fills per session (2026-10-15)
+
+`RiskLimit.MaxFillsPerSession` caps the lots filled on an instrument in one session, buys and sells both counted:
+`WorkingRisk.FillsThisSession` adds `|fill quantity|` in `RiskLayer.OnFill`, and `RiskLayer.OnSessionClosed` zeroes it
+at the instrument's `Closed` status, on the server beside the message-efficiency day's end and in each client for its
+own copy. The check is strict, assuming every working lot on both sides fills: the fills room is
+`MaxFillsPerSession - FillsThisSession - WorstLongQuantity + WorstShortQuantity` per leg, and an order may carry its
+current worst plus that room, so an amend is measured by its delta (amending a working buy of 10 to 20 needs room 10).
+`ValidateOrder` checks the position room first (`PositionExceedsRiskLimit`) and then the fills room
+(`TooManyFillsPerSession`, value 57, renamed from the never-raised `TooManyOrdersPerSession`); `TryClipToRiskLimit`
+clips to the smaller of the two. `GetAbsAllowedOrderQuantity(target, isFillsRoom, isWithinLimit)` holds both rooms.
+- The count is never persisted (accepted 2026-10-15): a server restart in a session starts it at 0, so the cap is
+  granted again; a strategy restart resets only its own copy. The design parked for it: the count on the server's
+  position row (posted on every fill), zeroed at `Closed`, and dropped at load when the row was last written before
+  `Session.CME.GetLastClose`.
+- A `.risklimit` line saved before 2026-10-15 has no `MaxFillsPerSession`, so it loads 0 and refuses every order until
+  the limit is set: set it on every instrument before deploying.
+- Renamed at the same time: `WorstLongWorkingQuantity`/`WorstShortWorkingQuantity` to `WorstLongQuantity`/
+  `WorstShortQuantity`, and `ApplyWorstWorkingQuantityDelta` to `ApplyWorstQuantityDelta`.
+- `Client.IsDiscarded`, whose simulation-only carve-out discarded a refusal for `TooManyOrdersPerSession` alone, was
+  deleted: with 57 renamed it would discard `TooManyFillsPerSession` in a simulation. Both callers use
+  `OrderRejected.IsDiscarded`, so the refusal pauses the algo in a simulation as in realtime.
+
 ## Risk layer: one code, a server copy and a client copy
 
 ### Why the client keeps its own copy
@@ -398,8 +480,9 @@ workspace allocates the instrument to its manual client before sending a control
 `RiskLayer` is built on the base `Context` and runs the same code in two places: on the server over
 the `ServerContext` (source `Server`, every order on the instrument) and in every client over that
 client's own `ClientContext` (source `Client`, only its own orders). Each side keeps its own
-`OrderRisks` and `WorkingRisks` rows under its own directory; `RiskLimits`, `OrderStates`,
-`OrderTargets` and the position rows stay the one server-wide set.
+`OrderRisks` and `WorkingRisks` rows under its own directory; the limit rows (each side reads its
+own, see "Two levels of risk limit"), `OrderStates`, `OrderTargets` and the position rows stay the
+one server-wide set.
 
 The client needs the numbers so the algo can clip a target to what the server will accept (see
 `TryTarget`), and it needs its own copy rather than the server's rows for two reasons: reading the
@@ -414,12 +497,12 @@ which the manual client does not track. The rate limit is server-only on both co
 
 ### RiskLimit is config, WorkingRisk is the live numbers
 
-`RiskLimit` (24 bytes: `Header`, `InstrumentId`, `Timestamp`, `MaxOrderQuantity`,
-`MaxPositionQuantity`) is configuration, written only by operator edits. The live numbers are a
-separate row, `WorkingRisk` (16 bytes: `Header` with `OrderType.WorkingRisk = 17` @0, `Position` @4,
-`WorstLongWorkingQuantity` @8, >= 0, `WorstShortWorkingQuantity` @12, <= 0), one per instrument per
+`RiskLimit` (28 bytes: `Header`, `InstrumentId`, `Timestamp`, `MaxOrderQuantity`,
+`MaxPositionQuantity`, `MaxFillsPerSession`) is configuration, written only by operator edits. The live numbers are a
+separate row, `WorkingRisk` (20 bytes: `Header` with `OrderType.WorkingRisk = 17` @0, `Position` @4,
+`WorstLongQuantity` @8, >= 0, `WorstShortQuantity` @12, <= 0, `FillsThisSession` @16, >= 0), one per instrument per
 context, never persisted. The split is what lets the same `RiskLayer` run on both sides (each side
-has its own `WorkingRisk`, while both read the same `RiskLimit`), and it means an edit cannot rewind
+has its own `WorkingRisk` and reads its own `RiskLimit`), and it means an edit cannot rewind
 a reservation.
 
 `WorkingRisk` carries its own `Position` rather than reading the position row, because position and
@@ -446,7 +529,7 @@ before it keep their mirror order; the one cost is that the server-only `ServerP
 moved from id 15 to 16.
 
 Reservations are per leg (an outright is its own single leg, weight +1).
-`ApplyWorstWorkingQuantityDelta` applies an order-unit delta to each leg as `legSide = orderSide ×
+`ApplyWorstQuantityDelta` applies an order-unit delta to each leg as `legSide = orderSide ×
 sign(weight)` and `legDelta = delta × |weight|`. The sign is applied exactly once, there: a buy
 calendar reserves its back leg short. Signing anywhere else as well squares it away and drives the
 short aggregate positive.
@@ -492,8 +575,9 @@ wrongly).
 ### The position check, and the within-limit clip
 
 One function holds the room arithmetic for both the check and the clip:
-`GetAbsAllowedOrderQuantity(target, isWithinLimit)` is the largest `|order quantity|` (filled
-included) the order may carry. For each leg, with `room = MaxPositionQuantity - Position -
+`GetAbsAllowedOrderQuantity(target, isFillsRoom, isWithinLimit)` is the largest `|order quantity|` (filled
+included) the order may carry; with `isFillsRoom` it measures the fills room instead (see "Max fills per
+session"). For each leg, with `room = MaxPositionQuantity - Position -
 WorstLong` on the long side and `MaxPositionQuantity + Position + WorstShort` on the short side
 (64-bit), it allows `worst + room / |weight|`, and the minimum over legs wins. `worst` is the
 order's current `GetAbsWorstOrderQuantity()`, or 0 for a Create (the row still holds the slot's
@@ -1115,14 +1199,17 @@ writer's hot thread; worth it only if a measurement shows those remaining penalt
 ## Remote workspaces (the Mirror)
 
 People outside the colo (arb's risk desk, the home office) run the normal Workspace against a copy of the CME server, with
-full order entry. The CME box accepts no inbound connections, so its end dials out.
+full order entry. Either end may open the link, set in the JSON alone; which one does is the networks' choice (the CME box
+dialling out needs no inbound rule at TNS; a desk dialling the box needs none at the office).
 
 - **Two ends, one program.** `Mirror.exe <absolute config path>` reads that file; with no argument it reads
   `MirrorConfig.json` in the working directory. A missing file is written with defaults and the program stops, naming its
   full path. One build can so serve both roles from two files (a relative path would resolve from the working directory;
   it is not checked). `MirrorRole Local` runs beside the real server, `Remote` where people sit. Either end may
-  listen (`ListenPort`), dial (`ConnectAddresses`, redialled every second), or both; a Local end refuses to listen while
-  links are unauthenticated: whoever reached it would get full order entry.
+  listen (`ListenPort`), dial (`ConnectAddresses`, redialled every second), or both. A listening end accepts only its
+  `IPWhitelist` (the box: each risk desk's address; a desk: the box's), and refuses to start with it empty: links are
+  unauthenticated, so whoever reached a listening Local end would get full order entry. Until 2026-10-14 a Local end
+  refused to listen at all; it may now, behind the whitelist and a firewall rule to the same addresses, inside a VPN.
 - **Rows down.** The Local end attaches read-only and publishes on the pass a remote connects (its snapshot: a new Remote pings only once it has the server header, so waiting for its ping would deadlock), on the pass a remote's ping arrives (every 100 ms, so at least that often while a remote is connected; with none connected nothing is published, and there is no timer), or when a stand-in ManualClient reads an order state from the server (a fill's too: `Server.OnFill` writes the state and position rows before it sends the stand-in the state, and the fills themselves go to the strategy's channel) or a GUI waits on its `AllocatedClientId` (`LocalMirror.IsPublishDue`; still one publish per pass, so the server pays one extra row scan per pass with news, not one per message), sends each remote
   every row whose bytes changed since the last pass; a remote that just connected gets every row. Bytes, not seqs: the
   server writes TradingStatus, Timestamp, QuantityAhead and the rate limits in place without moving the seq. A pass sends
@@ -1358,6 +1445,9 @@ full order entry. The CME box accepts no inbound connections, so its end dials o
 - The CME box's config: `MirrorRole Local`, the same server name and mode, and each remote's address in
   `ConnectAddresses`. Whatever starts the Local Mirror (the C++ server's main) passes the file's absolute path, since its
   working directory may be anywhere. The CME deploy never ships a `MirrorConfig.json`; it would replace the box's.
+- Reversed, when the networks make a desk dialling the box easier: the box's config has `"ListenPort": 7400,
+  "IPWhitelist": ["<each risk desk's IP>"]` and no `ConnectAddresses`; each desk's has `"ConnectAddresses": ["<CME box
+  IP>:7400"]` and no `ListenPort` or `IPWhitelist`. One box listener serves every desk (each link is its own session).
 - A listening end accepts only `IPWhitelist` (`TcpLinkConnector.AcceptTcpLinks` closes any other connection at once; `MirrorConfig.ThrowIfInvalid` refuses to start a listener with the list empty). Why: on a Remote any new link replaces the live one, and the Local end then closes that desk's stand-ins, so the server cancels every remote order; an internet scanner touching the port would do that several times a day. Firewall the port to the same address too: links are still plain TCP, unauthenticated and
   unencrypted for now.
 

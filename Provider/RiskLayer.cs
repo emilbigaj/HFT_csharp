@@ -11,7 +11,7 @@ namespace Provider;
 // This class is not thread safe. Only one thread should ever use it.
 public class RiskLayer
 {
-    // The server's context on the server, the client's own on a client: OrderRisks and WorkingRisks are per context.
+    // The server's context on the server, the client's own on a client: OrderRisks, WorkingRisks and the RiskLimit checked are per context.
     private readonly Context _context;
     // CLIENT-side only: the high-water mark of this client's own allocations. Valid there because
     // validation runs at send time on one thread, so validation order IS allocation order. The
@@ -144,7 +144,7 @@ public class RiskLayer
     // sign(weight) — the sign is applied exactly ONCE, here; signing anywhere else squares it away
     // and drives the short aggregate positive (see Spec.md).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void ApplyWorstWorkingQuantityDelta(OrderId orderId, int orderSideSign, int magnitudeDelta)
+    private void ApplyWorstQuantityDelta(OrderId orderId, int orderSideSign, int magnitudeDelta)
     {
         if (magnitudeDelta == 0)
             return;
@@ -157,8 +157,8 @@ public class RiskLayer
             ref SharedArrayEntry<WorkingRisk> workingRiskEntry = ref _context.GetWorkingRisk(leg.InstrumentId);
             ref WorkingRisk workingRisk = ref workingRiskEntry.GetRef();
             workingRiskEntry.AcquireLock();
-            workingRisk.WorstLongWorkingQuantity += legSide > 0 ? legMagnitudeDelta : 0;
-            workingRisk.WorstShortWorkingQuantity -= legSide < 0 ? legMagnitudeDelta : 0;
+            workingRisk.WorstLongQuantity += legSide > 0 ? legMagnitudeDelta : 0;
+            workingRisk.WorstShortQuantity -= legSide < 0 ? legMagnitudeDelta : 0;
             workingRiskEntry.ReleaseLock();
         }
     }
@@ -181,7 +181,7 @@ public class RiskLayer
             int worstOrderQuantityAfter = orderRisk.GetAbsWorstOrderQuantity();
             int worstOrderQuantityDelta = (worstOrderQuantityAfter - worstOrderQuantityBefore);
 
-            ApplyWorstWorkingQuantityDelta(orderState.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, worstOrderQuantityDelta);
+            ApplyWorstQuantityDelta(orderState.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, worstOrderQuantityDelta);
         }
         else if (orderState.OrderStateStatus == OrderStateStatus.Done)
         {
@@ -193,7 +193,7 @@ public class RiskLayer
 
             orderRisk = default;
 
-            ApplyWorstWorkingQuantityDelta(orderState.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, -released);
+            ApplyWorstQuantityDelta(orderState.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, -released);
         }
     }
 
@@ -204,8 +204,10 @@ public class RiskLayer
     {
         int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
         ref SharedArrayEntry<WorkingRisk> workingRiskEntry = ref _context.GetWorkingRisk(instrumentId);
+        ref WorkingRisk workingRisk = ref workingRiskEntry.GetRef();
         workingRiskEntry.AcquireLock();
-        workingRiskEntry.GetRef().Position += fill.Quantity;
+        workingRisk.Position += fill.Quantity;
+        workingRisk.FillsThisSession += Math.Abs(fill.Quantity);
         workingRiskEntry.ReleaseLock();
 
         // A legged instrument's own fill is accounting only (volume/position view on the spread row); risk lives on the
@@ -213,7 +215,7 @@ public class RiskLayer
         if (!isReserved || _context.GetInstrument(instrumentId).IsLegged)
             return;
 
-        ApplyWorstWorkingQuantityDelta(fill.OrderHeader.OrderId, fill.Sign, -Math.Abs(fill.Quantity));
+        ApplyWorstQuantityDelta(fill.OrderHeader.OrderId, fill.Sign, -Math.Abs(fill.Quantity));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -231,15 +233,16 @@ public class RiskLayer
         int worstOrderQuantityAfter = orderRisk.GetAbsWorstOrderQuantity();
         int worstOrderQuantityDelta = worstOrderQuantityAfter - worstOrderQuantityBefore;
 
-        ApplyWorstWorkingQuantityDelta(orderRejected.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, worstOrderQuantityDelta);
+        ApplyWorstQuantityDelta(orderRejected.OrderHeader.OrderId, side == Side.Buy ? 1 : -1, worstOrderQuantityDelta);
     }
 
 
-    // The largest |order quantity| (filled included) this order may carry and still pass the position check: its current
-    // worst plus the room left on every leg. Past the limit ValidateOrder lets it keep its worst (a cut always passes);
-    // isWithinLimit cuts it back to what fits the limit instead, which the server always accepts (see Spec.md).
+    // The largest |order quantity| (filled included) this order may carry and still pass one limit: its current worst plus the
+    // room left on every leg, the position's or (isFillsRoom) the session's fills', where every working lot on both sides may
+    // fill. Past the limit ValidateOrder lets it keep its worst (a cut always passes); isWithinLimit cuts it back to what fits
+    // the limit instead, which the server always accepts (see Spec.md).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int GetAbsAllowedOrderQuantity(in OrderTarget orderTarget, bool isWithinLimit = false)
+    public int GetAbsAllowedOrderQuantity(in OrderTarget orderTarget, bool isFillsRoom, bool isWithinLimit = false)
     {
         // A Create's row still holds the previous order's values until ValidateOrder resets it.
         int worstOrderQuantity = orderTarget.OrderTargetAction == OrderTargetAction.Create ? 0 : _context.GetOrderRisk(orderTarget.OrderHeader.OrderId).GetReadonlyRef().GetAbsWorstOrderQuantity();
@@ -248,13 +251,13 @@ public class RiskLayer
 
         foreach (InstrumentLeg leg in _context.GetInstrument(orderTarget.OrderHeader.OrderId.InstrumentId).Legs)
         {
-            // legSide = orderSide × sign(weight), as in ApplyWorstWorkingQuantityDelta: a buy calendar reserves the back leg SHORT.
+            // legSide = orderSide × sign(weight), as in ApplyWorstQuantityDelta: a buy calendar reserves the back leg SHORT.
             int legSide = sign * Math.Sign(leg.Weight);
             ref readonly RiskLimit riskLimit = ref _context.GetRiskLimit(leg.InstrumentId).GetReadonlyRef();
             ref readonly WorkingRisk workingRisk = ref _context.GetWorkingRisk(leg.InstrumentId).GetReadonlyRef();
-            long room = legSide > 0
-                ? (long)riskLimit.MaxPositionQuantity - workingRisk.Position - workingRisk.WorstLongWorkingQuantity
-                : (long)riskLimit.MaxPositionQuantity + workingRisk.Position + workingRisk.WorstShortWorkingQuantity;
+            long room = isFillsRoom ? (long)riskLimit.MaxFillsPerSession - workingRisk.FillsThisSession - workingRisk.WorstLongQuantity + workingRisk.WorstShortQuantity
+                : legSide > 0 ? (long)riskLimit.MaxPositionQuantity - workingRisk.Position - workingRisk.WorstLongQuantity
+                : (long)riskLimit.MaxPositionQuantity + workingRisk.Position + workingRisk.WorstShortQuantity;
             // Past the limit nothing may grow: keep the worst, or within the limit cut by the overshoot rounded up to whole orders.
             int absWeight = Math.Abs(leg.Weight);
             long roomOrderQuantity = room >= 0 ? room / absWeight : isWithinLimit ? -((absWeight - 1 - room) / absWeight) : 0;
@@ -263,11 +266,20 @@ public class RiskLayer
         return (int)absAllowedOrderQuantity;
     }
 
-    // ValidateOrder's position check: what TryAdd would add must fit the room on every leg.
+    // ValidateOrder's position and fills checks: what TryAdd would add must fit that room on every leg.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool IsWithinRiskLimit(in OrderTarget orderTarget)
+    public bool IsWithinRiskLimit(in OrderTarget orderTarget, bool isFillsRoom)
     {
-        return Math.Abs(orderTarget.OrderProfile.Quantity) <= GetAbsAllowedOrderQuantity(in orderTarget);
+        return Math.Abs(orderTarget.OrderProfile.Quantity) <= GetAbsAllowedOrderQuantity(in orderTarget, isFillsRoom);
+    }
+
+    // The instrument's session closed: its fills count starts again, as message efficiency's day does. The WorkingRisk row's writer only.
+    public void OnSessionClosed(int instrumentId)
+    {
+        ref SharedArrayEntry<WorkingRisk> workingRiskEntry = ref _context.GetWorkingRisk(instrumentId);
+        workingRiskEntry.AcquireLock();
+        workingRiskEntry.GetRef().FillsThisSession = 0;
+        workingRiskEntry.ReleaseLock();
     }
 
     // Lowers a create or amend to the largest quantity within the limits, which ValidateOrder accepts here and on the server
@@ -282,7 +294,7 @@ public class RiskLayer
         int absQuantityFilled = orderTarget.OrderTargetAction != OrderTargetAction.Create && orderState.OrderHeader.OrderId == orderId ? Math.Abs(orderState.QuantityFilled) : 0;
 
         // Position room, TryAdd's cap, and the per-order limit ValidateOrder applies to the working quantity on each leg.
-        long absAllowedOrderQuantity = Math.Min(GetAbsAllowedOrderQuantity(in orderTarget, isWithinLimit: true), OrderRisk.MaxOrderQuantity);
+        long absAllowedOrderQuantity = Math.Min(Math.Min(GetAbsAllowedOrderQuantity(in orderTarget, isFillsRoom: false, isWithinLimit: true), GetAbsAllowedOrderQuantity(in orderTarget, isFillsRoom: true, isWithinLimit: true)), OrderRisk.MaxOrderQuantity);
         foreach (InstrumentLeg leg in _context.GetInstrument(orderId.InstrumentId).Legs)
             absAllowedOrderQuantity = Math.Min(absAllowedOrderQuantity, absQuantityFilled + (long)_context.GetRiskLimit(leg.InstrumentId).GetReadonlyRef().MaxOrderQuantity / Math.Abs(leg.Weight));
 
@@ -388,12 +400,9 @@ public class RiskLayer
                 }   
             }
 
-            ref readonly PositionHeader localPosition = ref _context.GetPositionHeader(orderTarget.OrderHeader.OrderId.StrategyId, orderTarget.OrderHeader.OrderId.InstrumentId).GetReadonlyRef();
-
-
-
+            // Why both switches: the strategy's own, and the server's master for the instrument (see Spec.md "Algo pause")
             bool isCancel = orderTarget.OrderTargetAction == OrderTargetAction.Cancel;
-            if (!isCancel && orderTarget.OrderHeader.OrderId.IsAlgoOrder() && localPosition.AlgoStatus == AlgoStatus.Paused)
+            if (!isCancel && orderTarget.OrderHeader.OrderId.IsAlgoOrder() && !_context.IsAlgoLive(orderTarget.OrderHeader.OrderId.StrategyId, orderTarget.OrderHeader.OrderId.InstrumentId))
             {
                 orderRejectedReasons.Set((int)OrderRejectedReason.AlgoIsPaused);
                 return false;
@@ -442,9 +451,14 @@ public class RiskLayer
                 }
 
                 // Phase 1 — pure: check every leg, write nothing.
-                if (!IsWithinRiskLimit(in orderTarget))
+                if (!IsWithinRiskLimit(in orderTarget, isFillsRoom: false))
                 {
                     orderRejectedReasons.Set((int)OrderRejectedReason.PositionExceedsRiskLimit);
+                    return false;
+                }
+                if (!IsWithinRiskLimit(in orderTarget, isFillsRoom: true))
+                {
+                    orderRejectedReasons.Set((int)OrderRejectedReason.TooManyFillsPerSession);
                     return false;
                 }
 
@@ -463,7 +477,7 @@ public class RiskLayer
                     return false;
                 }
                 int worstMagnitudeDelta = orderRisk.GetAbsWorstOrderQuantity() - worstOrderQuantityBefore;
-                ApplyWorstWorkingQuantityDelta(orderTarget.OrderHeader.OrderId, orderTarget.OrderProfile.Sign, worstMagnitudeDelta);
+                ApplyWorstQuantityDelta(orderTarget.OrderHeader.OrderId, orderTarget.OrderProfile.Sign, worstMagnitudeDelta);
             }
         }
         catch(Exception ex)

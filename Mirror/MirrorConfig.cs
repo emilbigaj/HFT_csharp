@@ -24,7 +24,7 @@ public sealed class MirrorConfig
     public string ServerName = "";                      // the trading server's leaf name; the remote copies it under the same name
     public ClockMode ClockMode = ClockMode.Realtime;
     public int ListenPort;                              // > 0: accept a peer that dials in
-    public string[] IPWhitelist = [];                   // the only IP addresses a listening end accepts (a Remote: the CME box's egress address)
+    public string[] IPWhitelist = [];                   // the only IP addresses a listening end accepts: the peer's (a Remote: the CME box's; a Local: each risk desk's)
     public string[] ConnectAddresses = [];              // "host:port", each dialled every second until connected
     public string DirectoriesRoot = "";                 // "" keeps S:\ (/mnt/S/); a relative folder is beside the executable ("Data" on a risk desk)
 
@@ -46,11 +46,9 @@ public sealed class MirrorConfig
             throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: ServerName is empty; fill in {mirrorConfigFullPath}");
         if (ListenPort <= 0 && ConnectAddresses.Length == 0)
             throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: set ListenPort, ConnectAddresses or both in {mirrorConfigFullPath}");
-        // Why: links are not authenticated yet, and whoever reached a listening Local end would get full order entry
-        if (MirrorRole == MirrorRole.Local && ListenPort > 0)
-            throw new InvalidDataException("MirrorConfig.ThrowIfInvalid: a Local mirror only dials out until links are authenticated");
-        // Why: an unknown peer must never get a link: on a Remote a new link replaces the live one, which cancels every remote order
+        // Why: links are not authenticated, so an unknown peer must never get one: a listening Local end would give it order entry,
+        // and on a Remote a new link replaces the live one, which cancels every remote order
         if (ListenPort > 0 && (IPWhitelist.Length == 0 || !Array.TrueForAll(IPWhitelist, address => IPAddress.TryParse(address, out _))))
-            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: IPWhitelist is [{string.Join(", ", IPWhitelist)}], must list the IP addresses allowed to connect (the CME box's egress address); fill it in {mirrorConfigFullPath}");
+            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: IPWhitelist is [{string.Join(", ", IPWhitelist)}], must list the IP addresses allowed to connect (on a Remote the CME box's address, on a Local each risk desk's); fill it in {mirrorConfigFullPath}");
     }
 }

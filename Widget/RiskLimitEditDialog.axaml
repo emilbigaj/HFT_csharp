@@ -7,7 +7,7 @@
         WindowStartupLocation="CenterOwner"
         CanResize="False">
 
-	<Grid Margin="12" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+	<Grid Margin="12" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
 
 		<TextBlock x:Name="SymbolText"
 				   Grid.Row="0"
@@ -24,14 +24,19 @@
 			<TextBox Grid.Column="1" x:Name="MaxPositionQuantityInput"/>
 		</Grid>
 
+		<Grid Grid.Row="3" ColumnDefinitions="130,*" Margin="0,0,0,6">
+			<TextBlock Grid.Column="0" Text="Max Fills / Session" VerticalAlignment="Center"/>
+			<TextBox Grid.Column="1" x:Name="MaxFillsPerSessionInput"/>
+		</Grid>
+
 		<TextBlock x:Name="ErrorText"
-				   Grid.Row="3"
+				   Grid.Row="4"
 				   Foreground="Firebrick"
 				   IsVisible="False"
 				   TextWrapping="Wrap"
 				   Margin="0,0,0,8"/>
 
-		<StackPanel Grid.Row="4"
+		<StackPanel Grid.Row="5"
 					Orientation="Horizontal"
 					HorizontalAlignment="Right"
 					Spacing="10">

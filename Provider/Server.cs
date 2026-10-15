@@ -295,35 +295,56 @@ public class Server : IDisposable
         }
     }
 
-    // CoreGroup thread only — the row's sole writer. Config fields in place under the seq bump; the
-    // working quantities live on WorkingRisk, so an edit cannot rewind a reservation (see Spec.md).
+    // CoreGroup thread only — the row's sole writer. Config fields in place under the seq bump; the working quantities live on
+    // WorkingRisk, so an edit cannot rewind a reservation (see Spec.md). Strategy 0's (a server workspace's) is the firm's limit.
     public void OnControlRiskLimit(in ControlRiskLimit controlRiskLimit)
     {
-        ref SharedArrayEntry<RiskLimit> riskLimitEntry = ref _serverContext.GetRiskLimit(controlRiskLimit.InstrumentId);
+        // Step 1: the row: the firm's for strategy 0, never a strategy's (the house book's orders are manual, checked by the firm's alone)
+        int strategyId = controlRiskLimit.StrategyId;
+        bool isServerRiskLimit = strategyId == OrderIdAllocator.ServerStrategyId;
+        ref SharedArrayEntry<RiskLimit> riskLimitEntry = ref isServerRiskLimit ? ref _serverContext.GetServerRiskLimit(controlRiskLimit.InstrumentId) : ref _serverContext.GetRiskLimit(strategyId, controlRiskLimit.InstrumentId);
+
+        // Step 2: its config fields
         ref RiskLimit riskLimit = ref riskLimitEntry.GetRef();
         riskLimitEntry.AcquireLock();
         riskLimit.MaxOrderQuantity = controlRiskLimit.MaxOrderQuantity;
         riskLimit.MaxPositionQuantity = controlRiskLimit.MaxPositionQuantity;
+        riskLimit.MaxFillsPerSession = controlRiskLimit.MaxFillsPerSession;
         riskLimit.Timestamp = Clock.Now;
         riskLimitEntry.ReleaseLock();
 
-        // Server-wide limit: the posted row is what the logging server appends to the server's .risklimit file.
-        int coreGroupId = _serverContext.GetInstrument(controlRiskLimit.InstrumentId).Header.CoreGroupId;
-        WriteToAudit(coreGroupId, in riskLimit);
+        // Step 3: on record, where its file is read back at allocation
+        WriteToRecord(strategyId, _serverContext.GetInstrument(controlRiskLimit.InstrumentId).Header.CoreGroupId, in riskLimit);
     }
 
-    // CoreGroup thread only (ReadExecution, Reject): the local position row's sole writer alongside OnFill.
+    // Puts a server-owned row on record: strategy 0's (the server's) on the audit channel, Logging keeping it under <server>; any
+    // other strategy's on its execution channel, Logging's tap keeping it under <strategy>. CoreGroup thread only.
+    private void WriteToRecord<T>(int strategyId, int coreGroupId, in T row) where T : unmanaged
+    {
+        if (strategyId == OrderIdAllocator.ServerStrategyId)
+            WriteToAudit(coreGroupId, in row);
+        else
+            WriteToExecution(strategyId, coreGroupId, in row);
+    }
+
+    // CoreGroup thread only (ReadExecution, Reject): the position row's sole writer alongside OnFill. A strategy's switch is its own
+    // row; strategy 0's (a server workspace's) is the server row, the master switch every algo on the instrument also needs Live.
     public void OnControlAlgoStatus(int strategyId, int instrumentId, AlgoStatus algoStatus)
     {
+        // Step 1: the switch: the master is the server row, never a strategy's (the house book has no algo of its own)
+        bool isMasterSwitch = strategyId == OrderIdAllocator.ServerStrategyId;
+        ref SharedArrayEntry<PositionHeader> positionEntry = ref isMasterSwitch ? ref _serverContext.GetServerPositionHeader(instrumentId) : ref _serverContext.GetPositionHeader(strategyId, instrumentId);
+
+        // Step 2: the row with its new status
         Timestamp now = Clock.Now;
-        ref SharedArrayEntry<PositionHeader> localPositionEntry = ref _serverContext.GetPositionHeader(strategyId, instrumentId);
-        PositionHeader localPosition = localPositionEntry.GetReadonlyRef();
-        localPosition.OrderHeader.ExchangeTimestamp = now;
-        localPosition.OrderHeader.NicTimestamp = now;
-        localPosition.AlgoStatus = algoStatus;
-        localPositionEntry.Write(in localPosition);
-        int coreGroupId = _serverContext.GetInstrument(instrumentId).Header.CoreGroupId;
-        WriteToExecution(strategyId, coreGroupId, in localPosition);
+        PositionHeader positionHeader = positionEntry.GetReadonlyRef();
+        positionHeader.OrderHeader.ExchangeTimestamp = now;
+        positionHeader.OrderHeader.NicTimestamp = now;
+        positionHeader.AlgoStatus = algoStatus;
+        positionEntry.Write(in positionHeader);
+
+        // Step 3: on record as a fill's rows are
+        WriteToRecord(strategyId, _serverContext.GetInstrument(instrumentId).Header.CoreGroupId, in positionHeader);
     }
 
     // Closes out a gone client's 64 order slots: cancels what is working, marks a Create the server never read Done, repairs a
@@ -464,7 +485,7 @@ public class Server : IDisposable
     public void Reject(in OrderRejected orderRejected, string message)
     {
         WriteToExecution(in orderRejected.OrderHeader, in orderRejected);
-        if (Client.IsDiscarded(in orderRejected))
+        if (orderRejected.IsDiscarded)
             return;
         // A manual order is not the algo's: its refusal is reported but never pauses the strategy it books to (see Spec.md).
         if (orderRejected.OrderHeader.OrderId.IsAlgoOrder())
@@ -686,9 +707,12 @@ public class Server : IDisposable
         instrumentHeader.AsInstrumentHeader().TradingStatus = tradingStatusUpdate.TradingStatus;
         WriteToInstrumentData(in tradingStatusUpdate);
 
-        // The exchange closing the instrument ends its product group's message-efficiency day (see Spec.md)
+        // The exchange closing the instrument ends its session: its product group's message-efficiency day and its fills count (see Spec.md)
         if (tradingStatusUpdate.TradingStatus == TradingStatus.Closed)
+        {
             EndMessageEfficiencyDay(in instrumentHeader.AsInstrumentHeader(), in tradingStatusUpdate);
+            _riskLayer.OnSessionClosed(tradingStatusUpdate.TickHeader.InstrumentId);
+        }
     }
 
     // Starts the next message-efficiency day of this instrument's product group; in Realtime the day that ended is posted on the

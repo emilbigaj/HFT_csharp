@@ -4,6 +4,76 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-15 — strategy risk limits; the firm's limit is the master
+
+- `Provider/Context.cs` — two limit arrays named like the position rows: `ServerRiskLimits` (was `RiskLimits`, the firm's,
+  per instrument) and the new `LocalRiskLimits` (per strategy and instrument, created last so every other array keeps its
+  id). `GetRiskLimit(instrumentId)` is now per context, as `GetPositionHeader` is: the firm's on the server, the strategy's
+  own in a client, so the `RiskLayer` is unchanged. `GetRiskLimit(clientId, instrumentId)`, `GetServerRiskLimit`,
+  `Context.StrategyId` (the idiom `CreatePosition` used). The server loads each strategy's row at its allocation from
+  `<strategy>/RiskLimits`. `PrintLocalSharedArray` dumps both [clientId, instrumentId] arrays.
+- `Execution/Order.cs` — `RiskLimit.FromFile`: the last saved line, or Max in a simulation and Min in realtime; the firm's
+  and the strategy's loads share it.
+- `Provider/Server.cs` — `OnControlRiskLimit` edits the firm's row for strategy 0 and the strategy's otherwise;
+  `WriteToRecord` (shared with `OnControlAlgoStatus`) puts a server row on the audit channel and a strategy's on its
+  execution channel, where Logging's tap already saves `RiskLimit` rows to that client's `RiskLimits` folder.
+- `Provider/Allocate.cs` — `ControlRiskLimit.StrategyId`. `Provider/Client.cs` — a client ignores a `RiskLimit` on its
+  execution channel.
+- `Widget/RiskLimitsWidget` — shows and edits the principal's rows: the firm's in a server workspace, the strategy's in a
+  strategy workspace (on a remote desk a strategy's exposure columns read 0: its `WorkingRisks` are not mirrored).
+- Why: the risk desk wants each strategy capped below the firm. Manual orders keep the firm's limit only. Declined: a
+  strategy clipping to the firm's room too, and the server checking strategy limits (see Spec.md "Two levels of risk
+  limit"). Hot path: the client's check reads its row through a virtual call, about 1–2 ns per leg; none on the server.
+- Breaks: a strategy with no file is Min (blocked) in realtime until its limits are set. C++: P27, L11. Builds; not yet run.
+
+---
+
+## 2026-10-15 — max fills per session
+
+- `Execution/Order.cs` — `RiskLimit.MaxFillsPerSession` (28 bytes), `WorkingRisk.FillsThisSession` (20 bytes),
+  `OrderRejectedReason` 57 renamed `TooManyFillsPerSession` (was `TooManyOrdersPerSession`, never raised); the worst fields
+  renamed `WorstLongQuantity`/`WorstShortQuantity`. `Provider/Allocate.cs` — `ControlRiskLimit.MaxFillsPerSession`.
+- `Provider/RiskLayer.cs` — `OnFill` counts `|q|`; `GetAbsAllowedOrderQuantity(target, isFillsRoom, isWithinLimit)` holds
+  the fills room (every working lot on both sides may fill, so an amend counts its delta); `ValidateOrder` checks it after
+  the position room; `TryClipToRiskLimit` clips to the smaller room; `OnSessionClosed` zeroes the count;
+  `ApplyWorstWorkingQuantityDelta` renamed `ApplyWorstQuantityDelta`.
+- `Provider/Server.cs`, `Provider/Client.cs` — the instrument's `Closed` zeroes the count, beside the message-efficiency
+  day's end. `Client.IsDiscarded` deleted: its simulation-only discard of 57 would now swallow `TooManyFillsPerSession`.
+- `Widget/RiskLimitsWidget`, `Widget/RiskLimitEditDialog` — `MaxFillsPerSession` and `FillsThisSession` columns, a "Max
+  Fills / Session" input.
+- Why: the risk desk's new limit. Not persisted (accepted): a server restart in a session starts the count at 0.
+- Breaks: a `.risklimit` line saved before today loads `MaxFillsPerSession` 0 and refuses every order until it is set.
+  Hot path: one add per fill, one more leg loop per check and per clip. C++: P26, L11. Builds; not yet run.
+
+---
+
+## 2026-10-15 — a second algo switch: the server's master per instrument
+
+- `Provider/Context.cs` — `IsAlgoLive(strategyId, instrumentId)`: the strategy's row and the server row both Live.
+  `ServerPositionHeaders` is now mapped by every context (read-only in a client), created last among the shared arrays
+  so a ServerContext's array ids are unchanged; `GetServerPositionHeader`. The server row starts Live at every
+  allocation, whatever its file says (a kill switch).
+- `Provider/RiskLayer.cs`, `Provider/Position.cs` (`IsAlgoLive`), `Strategy/Algo.cs` — the algo, the client's risk copy and
+  the server's risk copy all check both switches.
+- `Provider/Server.cs` — `OnControlAlgoStatus` for strategy 0 (a server workspace's Pause/Resume) writes the server row
+  only and audits it; a strategy's control writes its own row, as before. Why: the house book has no algo, so a server
+  workspace's pause used to set a status nothing read.
+- A refusal for `AlgoIsPaused` alone was already discarded, so the master never auto-pauses a strategy's own switch.
+- Hot path: one more byte read per algo decision and order check; the server's fill write may pay a cache-line
+  transfer when a client has just read the row (see Spec.md "Algo pause"). Builds; not yet run.
+
+---
+
+## 2026-10-14 — either Mirror end may dial, set in the JSON alone
+
+- `Mirror/MirrorConfig.cs` — the Local end may now listen: the guard that refused a Local `ListenPort` is gone. Every
+  listening end still needs its `IPWhitelist` (a listening box: each risk desk's address) and refuses to start without
+  one; the link stays unauthenticated, so the whitelist, a firewall rule to the same addresses and the VPN are its only
+  protection. Why: the network path to the ARB office may make a desk dialling the box easier than the box dialling the
+  desk. The connector and the Local end already handled links in either direction; nothing else changed.
+
+---
+
 ## 2026-10-14 — the GUI shares its plumbing: one refresh timer, row reconciliation, hit-test and menus; three thread races fixed
 
 - Three races between a widget's refresh (timer thread) and a click (UI thread), each touching one collection: Orders'

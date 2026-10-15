@@ -207,7 +207,8 @@ public abstract class Context
 
 
     // execution
-    protected readonly SharedArray<RiskLimit> _riskLimits;
+    protected readonly SharedArray<RiskLimit> _serverRiskLimits;   // per instrument: the firm's limit, every order the server reads
+    protected readonly SharedArray<RiskLimit> _localRiskLimits;    // per strategy and instrument: the strategy's limit, its own algo orders
     protected readonly SharedArray<WorkingRisk> _workingRisks;
     protected readonly SharedArray<MessageEfficiency> _messageEfficiency;
     protected readonly SharedArray<RollingRateLimit> _rateLimits;
@@ -220,6 +221,7 @@ public abstract class Context
 
     // positions
     protected readonly SharedArray<PositionHeader> _localPositionHeaders;
+    protected readonly SharedArray<PositionHeader> _serverPositionHeaders;   // per instrument: every strategy's fills summed; its AlgoStatus is the master switch
 
     protected readonly Instrument[] _instruments;
     protected readonly Position[] _positions;
@@ -282,7 +284,7 @@ public abstract class Context
         // directoryPath == serverName for a ServerContext and == clientName for a ClientContext, so this
         // single line keeps the array-id ordering (mirror-safe) while giving each context its own book.
         _marketsByPrice = NewSharedArray<MarketByPrice64>(directoryPath / "MarketsByPrice", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
-        _riskLimits = NewSharedArray<RiskLimit>(serverName / "RiskLimits", serverHeader.InstrumentIds.Length, ServerAccess);
+        _serverRiskLimits = NewSharedArray<RiskLimit>(serverName / "ServerRiskLimits", serverHeader.InstrumentIds.Length, ServerAccess);
         // Why writable on both sides: the server claims, loads and ends each group's day; strategies count into it
         _messageEfficiency = NewSharedArray<MessageEfficiency>(serverName / "MessageEfficiency", serverHeader.InstrumentIds.Length, ServerAccess == Access.Write ? Access.Write : ClientAccess);
         _rateLimits = NewSharedArray<RollingRateLimit>(serverName / "RateLimits", serverHeader.CoreGroupIds.Length, ServerAccess);
@@ -299,6 +301,10 @@ public abstract class Context
         _workingRisks = NewSharedArray<WorkingRisk>(directoryPath / "WorkingRisks", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
         // Appended after it for the same reason
         _latencies = NewSharedArray<Duration>(serverName / "Latency", serverHeader.CoreGroupIds.Length, ServerAccess);
+        // Last, so a ServerContext keeps its array ids (it created this one itself before 2026-10-15). Why every context: its AlgoStatus is the master switch each algo checks
+        _serverPositionHeaders = NewSharedArray<PositionHeader>(serverName / "ServerPositionHeaders", serverHeader.InstrumentIds.Length, ServerAccess);
+        // Appended after it for the same reason; the server loads and edits every row, a strategy's RiskLayer reads its own
+        _localRiskLimits = NewSharedArray<RiskLimit>(serverName / "LocalRiskLimits", serverHeader.LocalPositionsCapacity, ServerAccess, false);
 
         _instruments = new Instrument[serverHeader.InstrumentIds.Length];
         _positions = new Position[serverHeader.InstrumentIds.Length];
@@ -373,6 +379,9 @@ public abstract class Context
         _instrumentHeaderIdByInstrumentId.Dispose();
         _instrumentIdsByClientId.Dispose();
         _orderRisks.Dispose();
+        _serverPositionHeaders.Dispose();
+        _serverRiskLimits.Dispose();
+        _localRiskLimits.Dispose();
         _clientSocketHeaders.Dispose();
     }
 
@@ -403,17 +412,37 @@ public abstract class Context
         return ref _localPositionHeaders.GetEntry(localPositionIndex);
     }
 
+    // The server's row on the instrument (every strategy's fills summed); read-only on a client.
+    public ref SharedArrayEntry<PositionHeader> GetServerPositionHeader(int instrumentId) => ref _serverPositionHeaders.GetEntry(instrumentId);
+
+    // An algo may trade the instrument only while both switches are Live: its strategy's row and the server's, the master switch
+    // a server workspace turns (see Spec.md "Algo pause"). Hot path: two plain byte reads, no allocation.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool IsAlgoLive(int strategyId, int instrumentId) =>
+        GetPositionHeader(strategyId, instrumentId).GetReadonlyRef().AlgoStatus == AlgoStatus.Live
+        && _serverPositionHeaders.GetEntry(instrumentId).GetReadonlyRef().AlgoStatus == AlgoStatus.Live;
+
     public abstract bool TryGetInstrumentId(int instrumentHeaderId, out int instrumentId);
     public abstract Bitset64 InstrumentIds { get; }
 
 
 
-    // server level - shared over all clients
+    // The strategy whose rows are this context's own: a client's id, or strategy 0 (the house book) on the server.
+    public int StrategyId => (this as ClientContext)?.ClientId ?? OrderIdAllocator.ServerStrategyId;
+
+    // This context's own limit, the one its RiskLayer checks: the firm's on the server, the strategy's on a client (see Spec.md "Strategy risk limits").
+    public abstract ref SharedArrayEntry<RiskLimit> GetRiskLimit(int instrumentId);
+
+    // Any strategy's limit on the instrument; read-only on a client.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref SharedArrayEntry<RiskLimit> GetRiskLimit(int instrumentId)
+    public ref SharedArrayEntry<RiskLimit> GetRiskLimit(int clientId, int instrumentId) => ref _localRiskLimits.GetEntry(GetLocalPositionIndex(clientId, instrumentId));
+
+    // The firm's limit on the instrument; read-only on a client.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref SharedArrayEntry<RiskLimit> GetServerRiskLimit(int instrumentId)
     {
         ThrowIfInstrumentIdOutOfRange(instrumentId);
-        return ref _riskLimits.GetEntry(instrumentId);
+        return ref _serverRiskLimits.GetEntry(instrumentId);
     }
 
     // This context's own: the server's or this client's (see _workingRisks).
@@ -652,7 +681,7 @@ public abstract class Context
         }
         // A ServerContext's positions are the server-wide rows; no client owns their order slots
         // (only Client.Create ever sets one), so the house id is the correct inert owner.
-        Position position = new Position(instrument, this, (this as ClientContext)?.ClientId ?? OrderIdAllocator.ServerStrategyId);
+        Position position = new Position(instrument, this, StrategyId);
         _positions[instrument.InstrumentId] = position;
     }
 
@@ -759,6 +788,9 @@ public sealed class ClientContext : Context
         return ref _localPositionHeaders.GetEntry(localPositionIndex);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public override ref SharedArrayEntry<RiskLimit> GetRiskLimit(int instrumentId) => ref GetRiskLimit(_clientId, instrumentId);
+
     public override Bitset64 InstrumentIds
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -811,7 +843,6 @@ public sealed record SymbolStrings(string Symbol, string ShortSymbol);
 public sealed class ServerContext : Context
 {
     private static readonly SymbolStrings s_unknownSymbolStrings = new("?", "?");
-    private readonly SharedArray<PositionHeader> _serverPositionHeaders;
     private SymbolStrings?[]? _symbolStrings;   // per instrument header id, built on first use (a GUI's; the trading server never asks)
 
     // Server-only: the durable record of which clients and instruments were allocated, replayed at
@@ -841,8 +872,6 @@ public sealed class ServerContext : Context
         Directory.CreateDirectory(ClientsDirectoryPath);
         InstrumentsDirectoryPath = ServerName / "Instruments";
         Directory.CreateDirectory(InstrumentsDirectoryPath);
-
-        _serverPositionHeaders = NewSharedArray<PositionHeader>(serverName / "ServerPositionHeaders", ServerHeader.GetReadonlyRef().InstrumentIds.Length, ServerAccess);
 
         // Write mode: the server names its CoreGroups in files, one static JSON CoreGroup each, and each group's rate
         // limit follows by name from its .ratelimit file, static JSON too; Max in simulation and Min in realtime without one, like .risklimit.
@@ -917,6 +946,8 @@ public sealed class ServerContext : Context
     {
         return ref _serverPositionHeaders.GetEntry(instrumentId);
     }
+
+    public override ref SharedArrayEntry<RiskLimit> GetRiskLimit(int instrumentId) => ref GetServerRiskLimit(instrumentId);
 
     public override Bitset64 InstrumentIds
     {
@@ -1045,11 +1076,7 @@ public sealed class ServerContext : Context
 
         Symbology symbology = header128.Symbology;
 
-        string riskLimitPath = GetRiskLimitsFilePath(DirectoryPath, symbology.Symbol).ToString();
-        string? riskLimitLine = Tools.Tools.ReadLastLine(riskLimitPath);
-        RiskLimit riskLimit = riskLimitLine != null ? Json.Deserialize<RiskLimit>(riskLimitLine) : Clock.Mode == ClockMode.Simulation ? RiskLimit.GetMaxLimits(instrumentId) : RiskLimit.GetMinLimits(instrumentId);
-        riskLimit.InstrumentId = instrumentId;
-        _riskLimits.GetEntry(instrumentId).Write(riskLimit);
+        _serverRiskLimits.GetEntry(instrumentId).Write(RiskLimit.FromFile(GetRiskLimitsFilePath(DirectoryPath, symbology.Symbol).ToString(), instrumentId));
 
 
         string positionPath = GetPositionFilePath(DirectoryPath, symbology.Symbol).ToString();
@@ -1057,6 +1084,8 @@ public sealed class ServerContext : Context
         PositionHeader positionHeader = positionLine != null ? Json.Deserialize<PositionHeader>(positionLine) : new PositionHeader();
         // Server-wide row: no owning order; template id carries the ids (clientId 0 stands in for the old -1 sentinel)
         positionHeader.OrderHeader.OrderId = new OrderId { InstrumentId = instrumentId };
+        // Why whatever the file says: the master switch is a kill switch, Live at every start until a server workspace pauses it
+        positionHeader.AlgoStatus = AlgoStatus.Live;
         _serverPositionHeaders.GetEntry(instrumentId).Write(positionHeader);
         _workingRisks.GetEntry(instrumentId).Write(new WorkingRisk { Position = positionHeader.Quantity });
 
@@ -1131,6 +1160,7 @@ public sealed class ServerContext : Context
         positionHeader.AlgoStatus = Clock.Mode == ClockMode.Simulation ? AlgoStatus.Live : AlgoStatus.Paused;
 
         GetPositionHeader(clientId, instrumentId).Write(positionHeader);
+        GetRiskLimit(clientId, instrumentId).Write(RiskLimit.FromFile(GetRiskLimitsFilePath(clientName, symbology.Symbol).ToString(), instrumentId));
 
         ref SharedArrayEntry<Bitset64> instrumentIdsEntry = ref GetInstrumentIdsByClientId(clientId);
         ref SharedArrayEntry<Bitset64> clientIdsEntry = ref GetClientIdsByInstrumentId(instrumentId);
@@ -1181,17 +1211,12 @@ public sealed class ServerContext : Context
             Console.WriteLine($"[{i}] seq={entry.GetSeq()} type={header.InstrumentType} symbol={symbol} instrumentId={header.InstrumentId} exchangeInstrumentId={header.ExchangeInstrumentId} coreGroupId={header.CoreGroupId} tradingStatus={header.TradingStatus} tickSize={header.TickSize}");
         }
 
-        PrintSharedArray(_riskLimits, "RiskLimits [instrumentId]");
+        PrintSharedArray(_serverRiskLimits, "ServerRiskLimits [instrumentId]");
         PrintSharedArray(_workingRisks, "WorkingRisks [instrumentId]");
         PrintSharedArray(_serverPositionHeaders, "ServerPositionHeaders [instrumentId]");
 
-        Console.WriteLine();
-        Console.WriteLine($"--- LocalPositionHeaders [index] clientId.instrumentId x {_localPositionHeaders.Capacity} ---");
-        for (int i = 0; i < _localPositionHeaders.Capacity; i++)
-        {
-            ref SharedArrayEntry<PositionHeader> entry = ref _localPositionHeaders.GetEntry(i);
-            Console.WriteLine($"[{i}] {i / instrumentsLength}.{i % instrumentsLength} seq={entry.GetSeq()} {entry.GetReadonlyRef()}");
-        }
+        PrintLocalSharedArray(_localPositionHeaders, "LocalPositionHeaders", instrumentsLength);
+        PrintLocalSharedArray(_localRiskLimits, "LocalRiskLimits", instrumentsLength);
 
         // Orders grouped per slot: target, state and risk side by side is what slot-level debugging
         // (id mismatches, leaked reservations) actually needs.
@@ -1224,6 +1249,18 @@ public sealed class ServerContext : Context
         {
             ref SharedArrayEntry<T> entry = ref sharedArray.GetEntry(i);
             Console.WriteLine($"[{i}] seq={entry.GetSeq()} {entry.GetReadonlyRef()}");
+        }
+    }
+
+    // A [clientId, instrumentId] array, each row labelled clientId.instrumentId.
+    private static void PrintLocalSharedArray<T>(SharedArray<T> sharedArray, string title, int instrumentsLength) where T : unmanaged
+    {
+        Console.WriteLine();
+        Console.WriteLine($"--- {title} [index] clientId.instrumentId x {sharedArray.Capacity} ---");
+        for (int localIndex = 0; localIndex < sharedArray.Capacity; localIndex++)
+        {
+            ref SharedArrayEntry<T> entry = ref sharedArray.GetEntry(localIndex);
+            Console.WriteLine($"[{localIndex}] {localIndex / instrumentsLength}.{localIndex % instrumentsLength} seq={entry.GetSeq()} {entry.GetReadonlyRef()}");
         }
     }
 
@@ -1262,7 +1299,6 @@ public sealed class ServerContext : Context
         // Why: a test that starts another server in this process takes the leg lookup over, never keeping a pointer into unmapped memory
         if (LeggedHeader.GetLegHeader?.Target == this)
             LeggedHeader.GetLegHeader = null;
-        _serverPositionHeaders.Dispose();
         base.Dispose();
     }
 }

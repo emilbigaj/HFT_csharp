@@ -113,7 +113,7 @@ public enum OrderRejectedReason : byte
     PositionExceedsRiskLimit       = 54,
     NotEnoughMargin        = 55,
     TooManyOrdersPerSecond = 56,
-    TooManyOrdersPerSession    = 57,
+    TooManyFillsPerSession     = 57,   // the session's fills could pass RiskLimit.MaxFillsPerSession (was TooManyOrdersPerSession, never raised)
     MessageEfficiencyViolated  = 58,
     TooManyActiveOrders = 59,
     NotAuthorizedToTrade = 60,
@@ -174,7 +174,7 @@ public struct OrderRejected()
 }
 
 
-[StructLayout(LayoutKind.Sequential, Pack = 1)] // 24 bytes: config only, written on edits
+[StructLayout(LayoutKind.Sequential, Pack = 1)] // 28 bytes: config only, written on edits
 [RegisterJson]
 public struct RiskLimit(int instrumentId)
 {
@@ -183,28 +183,40 @@ public struct RiskLimit(int instrumentId)
     public Timestamp Timestamp = Timestamp.MinValue;
     public int MaxOrderQuantity = 0;
     public int MaxPositionQuantity = 0;
+    public int MaxFillsPerSession = 0;
 
     public readonly int GetLongQuantityAllowance(in WorkingRisk workingRisk)
     {
-        return Math.Max(0, MaxPositionQuantity - workingRisk.Position - workingRisk.WorstLongWorkingQuantity);
+        return Math.Max(0, MaxPositionQuantity - workingRisk.Position - workingRisk.WorstLongQuantity);
     }
     public readonly int GetShortQuantityAllowance(in WorkingRisk workingRisk)
     {
-        return Math.Min(0, -MaxPositionQuantity - workingRisk.Position - workingRisk.WorstShortWorkingQuantity);
+        return Math.Min(0, -MaxPositionQuantity - workingRisk.Position - workingRisk.WorstShortQuantity);
     }
 
     public static RiskLimit GetMaxLimits(int instrumentId) => new RiskLimit(instrumentId)
     {
         MaxOrderQuantity = int.MaxValue,
         MaxPositionQuantity = int.MaxValue,
+        MaxFillsPerSession = int.MaxValue,
         Timestamp = Clock.Now,
     };
     public static RiskLimit GetMinLimits(int instrumentId) => new RiskLimit(instrumentId)
     {
         MaxOrderQuantity = 0,
         MaxPositionQuantity = 0,
+        MaxFillsPerSession = 0,
         Timestamp = Clock.Now,
     };
+
+    // The file's last saved limit, or with no file the mode's default: Max in a simulation, Min in realtime. Allocation only.
+    public static RiskLimit FromFile(string riskLimitPath, int instrumentId)
+    {
+        string? riskLimitLine = Tools.Tools.ReadLastLine(riskLimitPath);
+        RiskLimit riskLimit = riskLimitLine != null ? Json.Deserialize<RiskLimit>(riskLimitLine) : Clock.Mode == ClockMode.Simulation ? GetMaxLimits(instrumentId) : GetMinLimits(instrumentId);
+        riskLimit.InstrumentId = instrumentId;
+        return riskLimit;
+    }
 
     public override string ToString()
     {
@@ -213,14 +225,15 @@ public struct RiskLimit(int instrumentId)
 }
 
 // What RiskLayer has applied for an instrument: its fills and worst-case working reservations. Never persisted.
-[StructLayout(LayoutKind.Sequential, Pack = 1)] // 16 bytes
+[StructLayout(LayoutKind.Sequential, Pack = 1)] // 20 bytes
 [RegisterJson]
 public struct WorkingRisk()
 {
     public Header<OrderType> Header = new(OrderType.WorkingRisk);   // the TCP mirror dispatches every row on its first byte
     public int Position = 0;                     // moves in the same RiskLayer.OnFill as the reservation release
-    public int WorstLongWorkingQuantity = 0;     // >= 0
-    public int WorstShortWorkingQuantity = 0;    // <= 0
+    public int WorstLongQuantity = 0;            // >= 0: the most the working buys could still fill
+    public int WorstShortQuantity = 0;           // <= 0: the most the working sells could still fill
+    public int FillsThisSession = 0;             // >= 0: |fills|, both sides, since the instrument's session opened (0 again at its Closed)
 
     public override string ToString()
     {

@@ -28,10 +28,12 @@ public partial class RiskLimitEditDialog : Window
             InstrumentId = riskLimit.InstrumentId,
             MaxOrderQuantity = riskLimit.MaxOrderQuantity,
             MaxPositionQuantity = riskLimit.MaxPositionQuantity,
+            MaxFillsPerSession = riskLimit.MaxFillsPerSession,
         };
         SymbolText.Text = symbol;
         MaxOrderQuantityInput.Text = riskLimit.MaxOrderQuantity.ToString();
         MaxPositionQuantityInput.Text = riskLimit.MaxPositionQuantity.ToString();
+        MaxFillsPerSessionInput.Text = riskLimit.MaxFillsPerSession.ToString();
     }
 
     private void OnCancelClick(object? sender, RoutedEventArgs e)
@@ -53,8 +55,15 @@ public partial class RiskLimitEditDialog : Window
             return;
         }
 
+        if (!TryParseQuantity(MaxFillsPerSessionInput.Text, out int maxFillsPerSession))
+        {
+            ShowError("Max Fills / Session must be a whole number >= 0.");
+            return;
+        }
+
         _controlRiskLimit.MaxOrderQuantity = maxOrderQuantity;
         _controlRiskLimit.MaxPositionQuantity = maxPositionQuantity;
+        _controlRiskLimit.MaxFillsPerSession = maxFillsPerSession;
 
         Close(_controlRiskLimit);
     }

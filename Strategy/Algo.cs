@@ -136,7 +136,7 @@ public unsafe abstract class Algo
         bool hasSnapshot = _hasSnapshot;
         _hasSnapshot = false;
 
-        if (Position.AlgoStatus == AlgoStatus.Paused)
+        if (!Position.IsAlgoLive)
         {
             CancelAllOrders();
             return false;
