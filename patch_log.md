@@ -4,6 +4,23 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-16 — a manual order is never limited by fills; the risk-limit tests
+
+- `Provider/RiskLayer.cs`, `Execution/Order.cs` — a manual order (house book, or booked to a strategy) is out of the fills
+  limit entirely, on the server and in a strategy: `OnFill` counts only an algo order's fill; the new
+  `WorkingRisk.AlgoWorstQuantity` (24 bytes) holds only the working algo orders' worst, kept in `ApplyWorstQuantityDelta`,
+  and the fills room uses it instead of `WorstLong/ShortQuantity`; `ValidateOrder` runs the fills check for algo orders
+  only. Why: an algo that runs away and uses up the fills is exited by hand, and that exit must go through. Manual
+  orders still move the position and still meet the firm's position limit.
+- Hot path: one more add per leg per reservation change, and one select per fill: about 1 ns. C++: P26 updated.
+- Spec.md — the server trusting a control's `StrategyId` (0 from a strategy workspace, or a stray -1) recorded as out of
+  contract, with the Local Mirror guard it would take.
+- Tested: a scratchpad simulation harness ran 54 checks on 2026-10-15 (strategy clip, firm refusal, manual orders, edit
+  routing and files, reload, fills room and amend delta, counting, the Closed reset, reason order, refusals not
+  discarded): all passed; rerun after this change below.
+
+---
+
 ## 2026-10-15 — strategy risk limits; the firm's limit is the master
 
 - `Provider/Context.cs` — two limit arrays named like the position rows: `ServerRiskLimits` (was `RiskLimits`, the firm's,

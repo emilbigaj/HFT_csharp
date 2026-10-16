@@ -159,6 +159,7 @@ public class RiskLayer
             workingRiskEntry.AcquireLock();
             workingRisk.WorstLongQuantity += legSide > 0 ? legMagnitudeDelta : 0;
             workingRisk.WorstShortQuantity -= legSide < 0 ? legMagnitudeDelta : 0;
+            workingRisk.AlgoWorstQuantity += orderId.IsAlgoOrder() ? legMagnitudeDelta : 0;
             workingRiskEntry.ReleaseLock();
         }
     }
@@ -198,7 +199,7 @@ public class RiskLayer
     }
 
 
-    // Every fill moves Position; only an outright fill of an order this RiskLayer reserved releases one.
+    // Every fill moves Position; only an algo order's counts toward the session's fills, and only an outright fill of an order this RiskLayer reserved releases one.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void OnFill(in Fill fill, bool isReserved = true)
     {
@@ -207,7 +208,7 @@ public class RiskLayer
         ref WorkingRisk workingRisk = ref workingRiskEntry.GetRef();
         workingRiskEntry.AcquireLock();
         workingRisk.Position += fill.Quantity;
-        workingRisk.FillsThisSession += Math.Abs(fill.Quantity);
+        workingRisk.FillsThisSession += fill.OrderHeader.OrderId.IsAlgoOrder() ? Math.Abs(fill.Quantity) : 0;
         workingRiskEntry.ReleaseLock();
 
         // A legged instrument's own fill is accounting only (volume/position view on the spread row); risk lives on the
@@ -238,8 +239,8 @@ public class RiskLayer
 
 
     // The largest |order quantity| (filled included) this order may carry and still pass one limit: its current worst plus the
-    // room left on every leg, the position's or (isFillsRoom) the session's fills', where every working lot on both sides may
-    // fill. Past the limit ValidateOrder lets it keep its worst (a cut always passes); isWithinLimit cuts it back to what fits
+    // room left on every leg, the position's or (isFillsRoom, algo orders only) the session's fills', where every working algo lot
+    // on both sides may fill. Past the limit ValidateOrder lets it keep its worst (a cut always passes); isWithinLimit cuts it back to what fits
     // the limit instead, which the server always accepts (see Spec.md).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int GetAbsAllowedOrderQuantity(in OrderTarget orderTarget, bool isFillsRoom, bool isWithinLimit = false)
@@ -255,7 +256,7 @@ public class RiskLayer
             int legSide = sign * Math.Sign(leg.Weight);
             ref readonly RiskLimit riskLimit = ref _context.GetRiskLimit(leg.InstrumentId).GetReadonlyRef();
             ref readonly WorkingRisk workingRisk = ref _context.GetWorkingRisk(leg.InstrumentId).GetReadonlyRef();
-            long room = isFillsRoom ? (long)riskLimit.MaxFillsPerSession - workingRisk.FillsThisSession - workingRisk.WorstLongQuantity + workingRisk.WorstShortQuantity
+            long room = isFillsRoom ? (long)riskLimit.MaxFillsPerSession - workingRisk.FillsThisSession - workingRisk.AlgoWorstQuantity
                 : legSide > 0 ? (long)riskLimit.MaxPositionQuantity - workingRisk.Position - workingRisk.WorstLongQuantity
                 : (long)riskLimit.MaxPositionQuantity + workingRisk.Position + workingRisk.WorstShortQuantity;
             // Past the limit nothing may grow: keep the worst, or within the limit cut by the overshoot rounded up to whole orders.
@@ -456,7 +457,8 @@ public class RiskLayer
                     orderRejectedReasons.Set((int)OrderRejectedReason.PositionExceedsRiskLimit);
                     return false;
                 }
-                if (!IsWithinRiskLimit(in orderTarget, isFillsRoom: true))
+                // Why algo only: a manual order is how an operator exits an algo that used up the fills, so it must never be refused for them
+                if (orderTarget.OrderHeader.OrderId.IsAlgoOrder() && !IsWithinRiskLimit(in orderTarget, isFillsRoom: true))
                 {
                     orderRejectedReasons.Set((int)OrderRejectedReason.TooManyFillsPerSession);
                     return false;

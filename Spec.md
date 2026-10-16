@@ -442,6 +442,12 @@ asks for 8, which passes its own check (8 <= 8), and the server refuses it (4 + 
   strategy's on its execution channel (Logging's tap keeps `<strategy>/RiskLimits`; the strategy ignores the message). An
   edit of a strategy that is not connected writes the row, but its record can be lost (out of contract: a strategy workspace
   edits its own running strategy).
+- **Out of contract, not checked:** the server applies the `StrategyId` a request names, so a request carrying 0 from a
+  strategy workspace would edit the firm's limit, and one left at -1 throws on the CoreGroup thread and cuts that read pass
+  short. The widget always sends its principal's id, on the box and on a remote desk (the Mirror passes the request through
+  unchanged), so only a crafted packet on the unauthenticated Mirror link or a broken Workspace build could send either;
+  the link's whitelist and VPN are the protection, as for orders and pause controls. The guard if one is wanted: the Local
+  Mirror's stand-in refuses a control whose `StrategyId` is not its GUI name's principal (C#-only, about 4 lines).
 - **The Risk Limits widget** shows the principal's own rows: a server workspace the firm's limits and exposure, a strategy
   workspace the strategy's. On a remote desk a strategy's `WorkingRisks` are not mirrored (they are under the strategy's
   directory), so its exposure columns read 0 there; its limits are (accepted).
@@ -453,14 +459,23 @@ asks for 8, which passes its own check (8 <= 8), and the server refuses it (4 + 
 ### Max fills per session (2026-10-15)
 
 `RiskLimit.MaxFillsPerSession` caps the lots filled on an instrument in one session, buys and sells both counted:
-`WorkingRisk.FillsThisSession` adds `|fill quantity|` in `RiskLayer.OnFill`, and `RiskLayer.OnSessionClosed` zeroes it
+`WorkingRisk.FillsThisSession` adds `|fill quantity|` in `RiskLayer.OnFill` for an algo order's fill only
+(`OrderId.IsAlgoOrder()`), on both sides: the server counts every strategy's algo fills against the firm's limit, a
+strategy its own against its own. A manual fill, house book or booked to a strategy, never counts (decided 2026-10-16),
+though it still moves the position. `RiskLayer.OnSessionClosed` zeroes it
 at the instrument's `Closed` status, on the server beside the message-efficiency day's end and in each client for its
-own copy. The check is strict, assuming every working lot on both sides fills: the fills room is
-`MaxFillsPerSession - FillsThisSession - WorstLongQuantity + WorstShortQuantity` per leg, and an order may carry its
-current worst plus that room, so an amend is measured by its delta (amending a working buy of 10 to 20 needs room 10).
-`ValidateOrder` checks the position room first (`PositionExceedsRiskLimit`) and then the fills room
-(`TooManyFillsPerSession`, value 57, renamed from the never-raised `TooManyOrdersPerSession`); `TryClipToRiskLimit`
-clips to the smaller of the two. `GetAbsAllowedOrderQuantity(target, isFillsRoom, isWithinLimit)` holds both rooms.
+own copy. The check is strict, assuming every working algo lot on both sides fills: the fills room is
+`MaxFillsPerSession - FillsThisSession - AlgoWorstQuantity` per leg, where `WorkingRisk.AlgoWorstQuantity` is the working
+algo orders' worst case, both sides summed, kept in the same `ApplyWorstQuantityDelta` as `WorstLong/ShortQuantity`. An
+order may carry its current worst plus that room, so an amend is measured by its delta (amending a working buy of 10 to
+20 needs room 10). `ValidateOrder` checks the position room first (`PositionExceedsRiskLimit`) and then, for an algo
+order only, the fills room (`TooManyFillsPerSession`, value 57, renamed from the never-raised `TooManyOrdersPerSession`);
+`TryClipToRiskLimit` clips to the smaller of the two. `GetAbsAllowedOrderQuantity(target, isFillsRoom, isWithinLimit)`
+holds both rooms.
+- **A manual order is never limited by fills** (decided 2026-10-16): its fills do not count, its working lots do not take
+  fills room, and it is never refused `TooManyFillsPerSession`. Why: an algo that runs away and uses up the fills is
+  exited by hand, and that exit must go through. Example: limit 10, an algo filled 10: every algo order is refused, a
+  manual sell of 10 is accepted (the position limit still applies to it, as to any manual order).
 - The count is never persisted (accepted 2026-10-15): a server restart in a session starts it at 0, so the cap is
   granted again; a strategy restart resets only its own copy. The design parked for it: the count on the server's
   position row (posted on every fill), zeroed at `Closed`, and dropped at load when the row was last written before
@@ -499,8 +514,9 @@ which the manual client does not track. The rate limit is server-only on both co
 
 `RiskLimit` (28 bytes: `Header`, `InstrumentId`, `Timestamp`, `MaxOrderQuantity`,
 `MaxPositionQuantity`, `MaxFillsPerSession`) is configuration, written only by operator edits. The live numbers are a
-separate row, `WorkingRisk` (20 bytes: `Header` with `OrderType.WorkingRisk = 17` @0, `Position` @4,
-`WorstLongQuantity` @8, >= 0, `WorstShortQuantity` @12, <= 0, `FillsThisSession` @16, >= 0), one per instrument per
+separate row, `WorkingRisk` (24 bytes: `Header` with `OrderType.WorkingRisk = 17` @0, `Position` @4,
+`WorstLongQuantity` @8, >= 0, `WorstShortQuantity` @12, <= 0, `FillsThisSession` @16, >= 0, `AlgoWorstQuantity` @20,
+>= 0), one per instrument per
 context, never persisted. The split is what lets the same `RiskLayer` run on both sides (each side
 has its own `WorkingRisk` and reads its own `RiskLimit`), and it means an edit cannot rewind
 a reservation.

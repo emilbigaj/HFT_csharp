@@ -225,7 +225,7 @@ public struct RiskLimit(int instrumentId)
 }
 
 // What RiskLayer has applied for an instrument: its fills and worst-case working reservations. Never persisted.
-[StructLayout(LayoutKind.Sequential, Pack = 1)] // 20 bytes
+[StructLayout(LayoutKind.Sequential, Pack = 1)] // 24 bytes
 [RegisterJson]
 public struct WorkingRisk()
 {
@@ -233,7 +233,8 @@ public struct WorkingRisk()
     public int Position = 0;                     // moves in the same RiskLayer.OnFill as the reservation release
     public int WorstLongQuantity = 0;            // >= 0: the most the working buys could still fill
     public int WorstShortQuantity = 0;           // <= 0: the most the working sells could still fill
-    public int FillsThisSession = 0;             // >= 0: |fills|, both sides, since the instrument's session opened (0 again at its Closed)
+    public int FillsThisSession = 0;             // >= 0: |fills| of algo orders, both sides, since the session opened (0 again at its Closed); manual fills never count
+    public int AlgoWorstQuantity = 0;            // >= 0: the most the working algo orders, both sides, could still fill: the fills room's reservation
 
     public override string ToString()
     {

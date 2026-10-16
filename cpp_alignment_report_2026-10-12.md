@@ -55,7 +55,7 @@ Words used throughout:
 | P23 | `SideByPrice64` | PORT | no | `TrySetQuantity`: a delete of a price better than the best is a no-op; it used to wipe the worse level sharing its ring slot, unbroadcast |
 | P24 | Message efficiency | PORT (all of it, not C#-only; needs a CME change) | **yes** (L10) | `InstrumentHeader` gains `ProductGroupId` (int8, offset 7) and `ProductGroupRoot` (tag 1151, offset 60); the `MessageEfficiency` row gains a type header (84 bytes); the server assigns rows, ends the day on `Closed` and alone appends `<group>.messageefficiency` (type 18 via Logging at a close, directly at shutdown) |
 | P25 | Algo pause | PORT | no | A second switch: an algo order also needs the server row's `AlgoStatus` `Live` (the master per instrument); strategy 0's control (a server workspace's) turns the master only; the master starts `Live` at every start |
-| P26 | Max fills per session | PORT | **yes** (L11) | `RiskLimit` gains `MaxFillsPerSession` (28 bytes), `WorkingRisk` gains `FillsThisSession` (20 bytes) and renames its worst fields, `ControlRiskLimit` gains the field; reason 57 renamed `TooManyFillsPerSession`; counted per fill, zeroed at `Closed`, checked after the position room |
+| P26 | Max fills per session | PORT | **yes** (L11) | `RiskLimit` gains `MaxFillsPerSession` (28 bytes), `WorkingRisk` gains `FillsThisSession` and `AlgoWorstQuantity` (24 bytes) and renames its worst fields, `ControlRiskLimit` gains the field; reason 57 renamed `TooManyFillsPerSession`; algo fills only, zeroed at `Closed`, checked after the position room for algo orders only (a manual order is never limited by fills) |
 | P27 | Strategy risk limits | PORT | **yes** (L11) | New region `LocalRiskLimits` [strategy, instrument]; `RiskLimits` renamed `ServerRiskLimits`; `ControlRiskLimit` gains `StrategyId` (0 = the firm's row); the server loads strategy rows from `<strategy>/RiskLimits` and records their edits on the strategy's execution channel; the server still checks the firm's limit only |
 | C1-C17 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
@@ -934,31 +934,39 @@ OrderRejectedReason 57: TooManyOrdersPerSession -> TooManyFillsPerSession      /
 
 RiskLimit (Pack 1, 28 bytes): Header@0 InstrumentId@4 Timestamp@8 MaxOrderQuantity@16 MaxPositionQuantity@20
                               MaxFillsPerSession@24 (new; GetMaxLimits int.MaxValue, GetMinLimits 0)
-WorkingRisk (Pack 1, 20 bytes): Header@0 Position@4 WorstLongQuantity@8 WorstShortQuantity@12   // renamed from Worst*WorkingQuantity
-                                FillsThisSession@16 (new, >= 0)
+WorkingRisk (Pack 1, 24 bytes): Header@0 Position@4 WorstLongQuantity@8 WorstShortQuantity@12   // renamed from Worst*WorkingQuantity
+                                FillsThisSession@16 (new, >= 0) AlgoWorstQuantity@20 (new, >= 0: working algo worst, both sides)
 ControlRiskLimit: ... MaxPositionQuantity, MaxFillsPerSession (new, last)
 
-RiskLayer::OnFill:        under the row lock, Position += q; FillsThisSession += |q|
+RiskLayer::OnFill:        under the row lock, Position += q; FillsThisSession += fill.OrderId.IsAlgoOrder() ? |q| : 0
+                          // a manual fill (ClientId != StrategyId) never counts, on the server too
 RiskLayer::OnSessionClosed(instrumentId): under the row lock, FillsThisSession = 0
 Server::OnTradingStatusUpdate: on Closed, after EndMessageEfficiencyDay, riskLayer.OnSessionClosed(instrumentId)
 Server::OnControlRiskLimit: also copies MaxFillsPerSession
 
+ApplyWorstQuantityDelta, per leg, beside the WorstLong/Short update:
+  AlgoWorstQuantity += orderId.IsAlgoOrder() ? legMagnitudeDelta : 0
+
 GetAbsAllowedOrderQuantity(target, isFillsRoom, isWithinLimit), per leg:
-  room = isFillsRoom ? MaxFillsPerSession - FillsThisSession - WorstLongQuantity + WorstShortQuantity
+  room = isFillsRoom ? MaxFillsPerSession - FillsThisSession - AlgoWorstQuantity
        : (as before, the position room)
-ValidateOrder: after the position room check (PositionExceedsRiskLimit), the fills room check -> TooManyFillsPerSession
+ValidateOrder: after the position room check (PositionExceedsRiskLimit),
+  if IsAlgoOrder: the fills room check -> TooManyFillsPerSession          // a manual order never
 TryClipToRiskLimit: the smaller of the two rooms
 ```
 
-- Strict: every working lot on both sides is assumed to fill; an order may carry its current worst plus the room, so an
-  amend is measured by its delta.
+- Strict: every working algo lot on both sides is assumed to fill; an order may carry its current worst plus the room, so
+  an amend is measured by its delta.
+- **A manual order is never limited by fills:** its fills do not count, its working lots take no fills room, and it is
+  never refused 57. Why: the operator exits a runaway algo that used up the fills by hand, and that exit must go through.
 - Never persisted: a server restart starts the count at 0 (accepted).
 - A `.risklimit` line without `MaxFillsPerSession` loads 0, refusing every order until the limit is set.
 - C# deleted its simulation-only discard of a refusal for 57 alone; if C++ has the same carve-out, delete it.
 - **Hot-path cost:** one more add per fill, one more leg loop per order check and per clip.
 
 **Verify:** limit 10, a working buy of 4 and sell of 4: a new buy of 3 is refused `TooManyFillsPerSession` (4 + 4 + 3 > 10),
-of 2 accepted; fill 6 of them, then a `Closed`: `FillsThisSession` is 0.
+of 2 accepted; fill 6 of them, then a `Closed`: `FillsThisSession` is 0. With the algo's fills at the limit, a manual sell
+is accepted, its fill leaves `FillsThisSession` unchanged, and a manual resting buy of 50 leaves the algo's room as it was.
 
 ### P27. Strategy risk limits: the firm's limit is the master (C# `Provider/Context.cs`, `Provider/Server.cs`, `Provider/Allocate.cs`, `Execution/Order.cs`, `Provider/Client.cs`; 2026-10-15)
 
@@ -1161,7 +1169,7 @@ listed.
   a type-18 record as an empty line and never appends the row. The new C# processes on the box (Mirror, Workspace) no
   longer append at all.
 - **L11. Risk limits (P26, P27): the C++ server and every C# process on the box together.** `RiskLimit` grew to 28 bytes and
-  `WorkingRisk` to 20, both shared rows; `ControlRiskLimit` grew 8 bytes (`StrategyId`, `MaxFillsPerSession`); the region
+  `WorkingRisk` to 24, both shared rows; `ControlRiskLimit` grew 8 bytes (`StrategyId`, `MaxFillsPerSession`); the region
   `RiskLimits` is now `ServerRiskLimits`, and `LocalRiskLimits` is new. Old C# strategies throw on the `RiskLimit` the
   server now sends on their execution channel. Before trading, set `MaxFillsPerSession` on every instrument (old lines
   load 0) and each strategy's limits (no file means Min in realtime). Both Mirror ends deploy with it (the layout hash
