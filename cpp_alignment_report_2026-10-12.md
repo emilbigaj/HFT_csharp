@@ -918,8 +918,7 @@ ServerContext::AllocateInstrument: ServerPositionHeaders[instrumentId].AlgoStatu
 - The master never writes a strategy's row. A refusal for `AlgoIsPaused` alone is already discarded (never sent, never
   auto-pauses), so turning the master off and on leaves every strategy's own switch as it was.
 - C# algos read both rows (they map `ServerPositionHeaders` read-only now). A C++ algo, if there is one, does the same.
-- No layout change: `ServerPositionHeaders` is the same array; C# creates it last among the shared arrays, so the C#
-  array ids (C# Mirror only) are unchanged.
+- No layout change: `ServerPositionHeaders` is the same array (the C# array ids, C# Mirror only, are listed under C3).
 - **Hot-path cost:** one byte more per algo order check; reading the server row from a client costs the server's next fill
   write on that row a cache-line transfer.
 
@@ -1008,7 +1007,7 @@ position rows:
 ```
 <server>/WorkingRisks (the server's, per directory)  ->  <server>/ServerWorkingRisks, WorkingRisk x InstrumentIds   // same slot, same rows
 <strategy>/WorkingRisks (each strategy's)            ->  <server>/LocalWorkingRisks, WorkingRisk x (ClientIds x InstrumentIds),
-                                                        index clientId * InstrumentIds + instrumentId              // new, created last
+                                                        index clientId * InstrumentIds + instrumentId              // new
 ```
 
 - The server writes `ServerWorkingRisks` (seeded at `AllocateInstrument`, as before). Each strategy writes its own rows of
@@ -1059,12 +1058,13 @@ listed.
   remote copy (row 0, the Mirror link). **The C++ server neither creates nor writes it**: on the CME box the first C#
   process to open it creates the region, and its rows stay unwritten, so they are never published over a remote copy's.
   Port the accessor only if a C++ context should read it.
-  - **C# array ids** (creation order; used only between the two C# Mirror ends): 0 `ClientHeaders`, 1 `InstrumentHeaders`,
-    2 `InstrumentHeaderIdByInstrumentId`, 3 `InstrumentIdsByClientId`, 4 `ClientIdsByInstrumentId`, 5 `MarketsByPrice`,
-    6 `RiskLimits`, 7 `MessageEfficiency`, 8 `RateLimits`, 9 `CoreGroups`, 10 `OrderStates`, 11 `OrderRisks`,
-    12 `OrderTargets`, 13 `LocalPositionHeaders`, 14 `WorkingRisks`, 15 `Latency`, 16 `ServerPositionHeaders` (a
-    `ServerContext` only). Deleting the alias (P14) moved every id down by one, and `Latency` was appended. C++ has no
-    array ids, so nothing changes there.
+  - **C# array ids** (creation order; used only between the two C# Mirror ends, which ship together): since 2026-10-16
+    grouped by concept: 0 `ClientHeaders`, 1 `InstrumentHeaders`, 2 `InstrumentHeaderIdByInstrumentId`,
+    3 `InstrumentIdsByClientId`, 4 `ClientIdsByInstrumentId`, 5 `MarketsByPrice`, 6 `ServerPositionHeaders`,
+    7 `LocalPositionHeaders`, 8 `ServerRiskLimits`, 9 `LocalRiskLimits`, 10 `ServerWorkingRisks`, 11 `LocalWorkingRisks`,
+    12 `OrderStates`, 13 `OrderRisks`, 14 `OrderTargets`, 15 `MessageEfficiency`, 16 `RateLimits`, 17 `CoreGroups`,
+    18 `Latency`. Until then new arrays were appended last to keep ids stable, which bought nothing, since the layout
+    hash already refuses two different builds. C++ has no array ids, so nothing changes there.
 - **C4. `Context.GetLayoutHash()`**: FNV-1a over each C# array's row size and capacity, in id order. The Local end sends it
   in every server-header packet and the Remote refuses to start when its own differs. It changes whenever a row size or
   capacity changes, so a C++/C# layout change will also require redeploying both Mirror ends (they already deploy together).

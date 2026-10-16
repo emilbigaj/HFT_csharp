@@ -406,8 +406,7 @@ order that races a pause is refused `AlgoIsPaused` at the server.
   changes go on record as a fill's server row does, on the audit channel to `<server>/Positions`.
 - A refusal for `AlgoIsPaused` alone is discarded (`OrderRejected.IsDiscarded`), so it never auto-pauses the strategy:
   turning the master off and on leaves every strategy's own switch as it was.
-- Every context maps `ServerPositionHeaders` (read-only in a client), created last among the shared arrays so a
-  ServerContext keeps its array ids (the Mirror's layout is unchanged).
+- Every context maps `ServerPositionHeaders` (read-only in a client).
 - Cost: one more byte read per algo decision and per algo order check. The server rewrites the row on every fill of the
   instrument, so a client reading it each tick costs that fill's write a cache-line transfer (measured on the CME box at
   about +330 ns on the first write after a read); a Local Mirror already reads every row each pass. If it shows in fill
@@ -451,8 +450,7 @@ asks for 8, which passes its own check (8 <= 8), and the server refuses it (4 + 
 - **The Risk Limits widget** shows the principal's own rows: a server workspace the firm's limits and exposure, a strategy
   workspace the strategy's, on the box and on a remote desk alike (all four arrays are under the server's name, so the
   Mirror copies them).
-- Two arrays, named like the position rows, because the server writes both. `LocalRiskLimits` is created last, so every
-  other array keeps its id; `RiskLimits` was renamed `ServerRiskLimits`.
+- Two arrays, named like the position rows, because the server writes both; `RiskLimits` was renamed `ServerRiskLimits`.
 - Cost: the client's check reads a different row through a virtual `GetRiskLimit` (as `GetPositionHeader`); about 1–2 ns
   per leg, no allocation.
 
@@ -558,8 +556,12 @@ moves the position but releases nothing, because this client never reserved it.
 
 Every `WorkingRisk` write is seq-bumped (`AcquireLock`/`ReleaseLock`; single writer, so two
 volatile stores), so `Read()` and the TCP mirror see untorn rows. `OrderRisk` rows are still written
-by plain ref. The `ServerWorkingRisks` array (`WorkingRisks` until 2026-10-16) is created last among the base
-arrays, so the array ids before it keep their mirror order; `LocalWorkingRisks` is appended after `LocalRiskLimits`.
+by plain ref. `ServerWorkingRisks` was `WorkingRisks` until 2026-10-16.
+
+The shared arrays are created grouped by concept (positions, limits and exposure in server/local pairs, then orders,
+then the rest). Creation order is each array's id between the two C# Mirror ends and nothing else, so it may change
+freely: the layout hash refuses two different builds, and both ends ship together. (Until 2026-10-16 every new array
+was appended last to keep the others' ids, which bought nothing and scattered the pairs.)
 While a Local Mirror runs, its pass reading a strategy's row costs that strategy's next write to it one cache-line
 transfer (about +330 ns measured on the box), at most once per pass, as the server's own row already pays.
 

@@ -4,6 +4,17 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-16 — shared arrays declared and created grouped by concept
+
+- `Provider/Context.cs` — fields and creation now go: client headers, instruments, subscriptions and the book; then
+  positions, limits and exposure as server/local pairs; then orders; then message efficiency, rate limits, core groups
+  and latency. Until now each new array was appended last to keep the others' Mirror ids, which bought nothing (the
+  layout hash refuses two different builds, and both Mirror ends ship together) and scattered the pairs. The "created
+  last" comments are gone; one line says why the order matters. No array changed; the C# array ids did (C++ report C3
+  lists them). Deploys with the layout change already pending (L11).
+
+---
+
 ## 2026-10-16 — strategy exposure rows under the server's name, so a remote desk sees them
 
 - `Provider/Context.cs` — `_workingRisks` (one region per context, under its own directory) is now two arrays named like

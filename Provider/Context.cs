@@ -205,24 +205,24 @@ public abstract class Context
     protected readonly SharedArray<Bitset64> _clientIdsByInstrumentId;
     protected readonly SharedArray<MarketByPrice64> _marketsByPrice;
 
+    // positions, limits and exposure: the server's per instrument, each strategy's per strategy and instrument
+    protected readonly SharedArray<PositionHeader> _serverPositionHeaders;   // every strategy's fills summed; its AlgoStatus is the master switch
+    protected readonly SharedArray<PositionHeader> _localPositionHeaders;
+    protected readonly SharedArray<RiskLimit> _serverRiskLimits;             // the firm's limit, every order the server reads
+    protected readonly SharedArray<RiskLimit> _localRiskLimits;              // the strategy's limit, its own algo orders
+    protected readonly SharedArray<WorkingRisk> _serverWorkingRisks;         // every order on the instrument, written by the server's RiskLayer
+    protected readonly SharedArray<WorkingRisk> _localWorkingRisks;          // the strategy's own orders, written by its RiskLayer
 
-    // execution
-    protected readonly SharedArray<RiskLimit> _serverRiskLimits;   // per instrument: the firm's limit, every order the server reads
-    protected readonly SharedArray<RiskLimit> _localRiskLimits;    // per strategy and instrument: the strategy's limit, its own algo orders
-    protected readonly SharedArray<WorkingRisk> _serverWorkingRisks;   // per instrument: every order on it, written by the server's RiskLayer
-    protected readonly SharedArray<WorkingRisk> _localWorkingRisks;    // per strategy and instrument: its own orders, written by that strategy's RiskLayer
-    protected readonly SharedArray<MessageEfficiency> _messageEfficiency;
-    protected readonly SharedArray<RollingRateLimit> _rateLimits;
-    protected readonly SharedArray<CoreGroup> _coreGroups;
-    protected readonly SharedArray<Duration> _latencies;   // per CoreGroup's link; below 0: disconnected
-
+    // orders
     protected readonly SharedArray<OrderState> _orderStates;
     protected readonly SharedArray<OrderRisk> _orderRisks;
     protected readonly SharedArray<OrderTarget> _orderTargets;
 
-    // positions
-    protected readonly SharedArray<PositionHeader> _localPositionHeaders;
-    protected readonly SharedArray<PositionHeader> _serverPositionHeaders;   // per instrument: every strategy's fills summed; its AlgoStatus is the master switch
+    // execution
+    protected readonly SharedArray<MessageEfficiency> _messageEfficiency;
+    protected readonly SharedArray<RollingRateLimit> _rateLimits;
+    protected readonly SharedArray<CoreGroup> _coreGroups;
+    protected readonly SharedArray<Duration> _latencies;   // per CoreGroup's link; below 0: disconnected
 
     protected readonly Instrument[] _instruments;
     protected readonly Position[] _positions;
@@ -273,6 +273,7 @@ public abstract class Context
 
         ref readonly ServerHeader serverHeader = ref ServerHeader.GetReadonlyRef();
 
+        // Creation order is each array's id in the Mirror; both ends must agree (GetLayoutHash), so they deploy together
         _clientSocketHeaders = NewSharedArray<SocketHeader>(serverName / "ClientHeaders", serverHeader.ClientIds.Length, ServerAccess);
 
         _instrumentHeaders = NewSharedArray<InstrumentHeader128>(serverName / "InstrumentHeaders", serverHeader.InstrumentsCapacity, ServerAccess);
@@ -285,29 +286,27 @@ public abstract class Context
         // directoryPath == serverName for a ServerContext and == clientName for a ClientContext, so this
         // single line keeps the array-id ordering (mirror-safe) while giving each context its own book.
         _marketsByPrice = NewSharedArray<MarketByPrice64>(directoryPath / "MarketsByPrice", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
+
+        // Why every context maps the server's: its AlgoStatus is the master switch each algo checks
+        _serverPositionHeaders = NewSharedArray<PositionHeader>(serverName / "ServerPositionHeaders", serverHeader.InstrumentIds.Length, ServerAccess);
+        _localPositionHeaders = NewSharedArray<PositionHeader>(serverName / "LocalPositionHeaders", serverHeader.LocalPositionsCapacity, ServerAccess, false);
         _serverRiskLimits = NewSharedArray<RiskLimit>(serverName / "ServerRiskLimits", serverHeader.InstrumentIds.Length, ServerAccess);
-        // Why writable on both sides: the server claims, loads and ends each group's day; strategies count into it
-        _messageEfficiency = NewSharedArray<MessageEfficiency>(serverName / "MessageEfficiency", serverHeader.InstrumentIds.Length, ServerAccess == Access.Write ? Access.Write : ClientAccess);
-        _rateLimits = NewSharedArray<RollingRateLimit>(serverName / "RateLimits", serverHeader.CoreGroupIds.Length, ServerAccess);
-        _coreGroups = NewSharedArray<CoreGroup>(serverName / "CoreGroups", serverHeader.CoreGroupIds.Length, ServerAccess);
+        // The server loads and edits every row, a strategy's RiskLayer reads its own
+        _localRiskLimits = NewSharedArray<RiskLimit>(serverName / "LocalRiskLimits", serverHeader.LocalPositionsCapacity, ServerAccess, false);
+        _serverWorkingRisks = NewSharedArray<WorkingRisk>(serverName / "ServerWorkingRisks", serverHeader.InstrumentIds.Length, ServerAccess);
+        // Under the server's name so the Mirror copies them to a remote desk. Why writable on both sides: the server seeds each row at allocation, the strategy moves it
+        _localWorkingRisks = NewSharedArray<WorkingRisk>(serverName / "LocalWorkingRisks", serverHeader.LocalPositionsCapacity, ServerAccess == Access.Write ? Access.Write : ClientAccess, false);
 
         _orderStates = NewSharedArray<OrderState>(serverName / "OrderStates", serverHeader.OrdersCapacity, ServerAccess, false);
         // Per context like the book: the server's covers every order, a client's only its own.
         _orderRisks = NewSharedArray<OrderRisk>(directoryPath / "OrderRisks", serverHeader.OrdersCapacity, this is ServerContext ? serverAccess : clientAccess, false);
         _orderTargets = NewSharedArray<OrderTarget>(serverName / "OrderTargets", serverHeader.OrdersCapacity, ClientAccess, false);
 
-        _localPositionHeaders = NewSharedArray<PositionHeader>(serverName / "LocalPositionHeaders", serverHeader.LocalPositionsCapacity, ServerAccess, false);
-
-        // Last of the base arrays so the ids before it keep their mirror order; the firm's exposure (each strategy's is LocalWorkingRisks)
-        _serverWorkingRisks = NewSharedArray<WorkingRisk>(serverName / "ServerWorkingRisks", serverHeader.InstrumentIds.Length, ServerAccess);
-        // Appended after it for the same reason
+        // Why writable on both sides: the server claims, loads and ends each group's day; strategies count into it
+        _messageEfficiency = NewSharedArray<MessageEfficiency>(serverName / "MessageEfficiency", serverHeader.InstrumentIds.Length, ServerAccess == Access.Write ? Access.Write : ClientAccess);
+        _rateLimits = NewSharedArray<RollingRateLimit>(serverName / "RateLimits", serverHeader.CoreGroupIds.Length, ServerAccess);
+        _coreGroups = NewSharedArray<CoreGroup>(serverName / "CoreGroups", serverHeader.CoreGroupIds.Length, ServerAccess);
         _latencies = NewSharedArray<Duration>(serverName / "Latency", serverHeader.CoreGroupIds.Length, ServerAccess);
-        // Last, so a ServerContext keeps its array ids (it created this one itself before 2026-10-15). Why every context: its AlgoStatus is the master switch each algo checks
-        _serverPositionHeaders = NewSharedArray<PositionHeader>(serverName / "ServerPositionHeaders", serverHeader.InstrumentIds.Length, ServerAccess);
-        // Appended after it for the same reason; the server loads and edits every row, a strategy's RiskLayer reads its own
-        _localRiskLimits = NewSharedArray<RiskLimit>(serverName / "LocalRiskLimits", serverHeader.LocalPositionsCapacity, ServerAccess, false);
-        // Appended after it for the same reason; under the server's name so the Mirror copies them to a remote desk. Why writable on both sides: the server seeds each row at allocation, the strategy moves it
-        _localWorkingRisks = NewSharedArray<WorkingRisk>(serverName / "LocalWorkingRisks", serverHeader.LocalPositionsCapacity, ServerAccess == Access.Write ? Access.Write : ClientAccess, false);
 
         _instruments = new Instrument[serverHeader.InstrumentIds.Length];
         _positions = new Position[serverHeader.InstrumentIds.Length];
