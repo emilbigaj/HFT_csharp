@@ -58,6 +58,7 @@ Words used throughout:
 | P26 | Max fills per session | PORT | **yes** (L11) | `RiskLimit` gains `MaxFillsPerSession` (28 bytes), `WorkingRisk` gains `FillsThisSession` and `WorstWorkingFills` (24 bytes) and renames its worst fields, `ControlRiskLimit` gains the field; reason 57 renamed `TooManyFillsPerSession`; algo fills only, zeroed at `Closed`, checked after the position room for algo orders only (a manual order is never limited by fills) |
 | P27 | Strategy risk limits | PORT | **yes** (L11) | New region `LocalRiskLimits` [strategy, instrument]; `RiskLimits` renamed `ServerRiskLimits`; `ControlRiskLimit` gains `StrategyId` (0 = the firm's row); the server loads strategy rows from `<strategy>/RiskLimits` and records their edits on the strategy's execution channel; the server still checks the firm's limit only |
 | P28 | Strategy exposure rows | PORT | **yes** (L11) | The per-directory `WorkingRisks` region becomes `<server>/ServerWorkingRisks` (the server's, per instrument) and new `<server>/LocalWorkingRisks` (per strategy and instrument, each strategy writes its own); layout of a row unchanged |
+| P29 | `OrderRisk` rows | PORT-IF (optional) | no | C# keeps them as a plain array inside the RiskLayer instead of a shared region per context; no other process ever read them |
 | C1-C17 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
@@ -1024,6 +1025,20 @@ position rows:
 **Verify:** with a strategy trading, a remote desk's strategy workspace shows that strategy's Position, FillsThisSession
 and worst-working columns, equal to the box's.
 
+### P29. PORT-IF (optional): `OrderRisk` rows leave shared memory (C# `Provider/RiskLayer.cs`, `Provider/Context.cs`; 2026-10-16)
+
+The per-order `OrderRisk` rows were a shared region per context (`<directory>/OrderRisks`, one row per order slot). Only
+the RiskLayer of that process ever read or wrote them, and no other process needed them, so C# now keeps them as a plain
+array inside its `RiskLayer` (`OrderRisk[OrdersCapacity]`, indexed by `OrderId.GlobalIndex`, allocated at startup, zero
+= nothing in flight). The region and `Context.GetOrderRisk` are gone.
+
+- No cross-process contract changes: no other process ever read the region. A C++ server may keep its own region or
+  make the same move; it is internal either way. A C++ process that still opens `<directory>/OrderRisks` for a C# strategy
+  will find nothing written there.
+- The RiskLayer's logic is unchanged.
+- **Hot-path cost:** none expected (a row is one plain array element, 64 bytes apart instead of 128, with no shared-memory
+  entry step). Not benchmarked, by the user's call.
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -1062,9 +1077,10 @@ listed.
     grouped by concept: 0 `ClientHeaders`, 1 `InstrumentHeaders`, 2 `InstrumentHeaderIdByInstrumentId`,
     3 `InstrumentIdsByClientId`, 4 `ClientIdsByInstrumentId`, 5 `MarketsByPrice`, 6 `ServerPositionHeaders`,
     7 `LocalPositionHeaders`, 8 `ServerRiskLimits`, 9 `LocalRiskLimits`, 10 `ServerWorkingRisks`, 11 `LocalWorkingRisks`,
-    12 `OrderStates`, 13 `OrderRisks`, 14 `OrderTargets`, 15 `MessageEfficiency`, 16 `RateLimits`, 17 `CoreGroups`,
-    18 `Latency`. Until then new arrays were appended last to keep ids stable, which bought nothing, since the layout
-    hash already refuses two different builds. C++ has no array ids, so nothing changes there.
+    12 `OrderStates`, 13 `OrderTargets`, 14 `MessageEfficiency`, 15 `RateLimits`, 16 `CoreGroups`, 17 `Latency`
+    (`OrderRisks` left shared memory the same day, P29). Until then new arrays were appended last to keep ids stable,
+    which bought nothing, since the layout hash already refuses two different builds. C++ has no array ids, so nothing
+    changes there.
 - **C4. `Context.GetLayoutHash()`**: FNV-1a over each C# array's row size and capacity, in id order. The Local end sends it
   in every server-header packet and the Remote refuses to start when its own differs. It changes whenever a row size or
   capacity changes, so a C++/C# layout change will also require redeploying both Mirror ends (they already deploy together).

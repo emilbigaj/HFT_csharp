@@ -215,7 +215,6 @@ public abstract class Context
 
     // orders
     protected readonly SharedArray<OrderState> _orderStates;
-    protected readonly SharedArray<OrderRisk> _orderRisks;
     protected readonly SharedArray<OrderTarget> _orderTargets;
 
     // execution
@@ -298,8 +297,6 @@ public abstract class Context
         _localWorkingRisks = NewSharedArray<WorkingRisk>(serverName / "LocalWorkingRisks", serverHeader.LocalPositionsCapacity, ServerAccess == Access.Write ? Access.Write : ClientAccess, false);
 
         _orderStates = NewSharedArray<OrderState>(serverName / "OrderStates", serverHeader.OrdersCapacity, ServerAccess, false);
-        // Per context like the book: the server's covers every order, a client's only its own.
-        _orderRisks = NewSharedArray<OrderRisk>(directoryPath / "OrderRisks", serverHeader.OrdersCapacity, this is ServerContext ? serverAccess : clientAccess, false);
         _orderTargets = NewSharedArray<OrderTarget>(serverName / "OrderTargets", serverHeader.OrdersCapacity, ClientAccess, false);
 
         // Why writable on both sides: the server claims, loads and ends each group's day; strategies count into it
@@ -380,7 +377,6 @@ public abstract class Context
         _serverHeaderBox.Dispose();
         _instrumentHeaderIdByInstrumentId.Dispose();
         _instrumentIdsByClientId.Dispose();
-        _orderRisks.Dispose();
         _serverPositionHeaders.Dispose();
         _serverRiskLimits.Dispose();
         _localRiskLimits.Dispose();
@@ -403,9 +399,6 @@ public abstract class Context
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ref SharedArrayEntry<OrderTarget> GetOrderTarget(OrderId orderId) => ref _orderTargets.GetEntry(orderId.GlobalIndex);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref SharedArrayEntry<OrderRisk> GetOrderRisk(OrderId orderId) => ref _orderRisks.GetEntry(orderId.GlobalIndex);
 
     public abstract ref SharedArrayEntry<PositionHeader> GetPositionHeader(int instrumentId);
 
@@ -1224,8 +1217,9 @@ public sealed class ServerContext : Context
         PrintLocalSharedArray(_localRiskLimits, "LocalRiskLimits", instrumentsLength);
         PrintLocalSharedArray(_localWorkingRisks, "LocalWorkingRisks", instrumentsLength);
 
-        // Orders grouped per slot: target, state and risk side by side is what slot-level debugging
-        // (id mismatches, leaked reservations) actually needs.
+        // Orders grouped per slot: target and state side by side is what slot-level debugging (id mismatches) needs; an
+        // order's risk row lives in its process's RiskLayer, not in shared memory
+
         Console.WriteLine();
         Console.WriteLine($"--- Orders [globalOrderIndex] clientId.localOrderIndex x {_orderTargets.Capacity} ---");
         for (int globalOrderIndex = 0; globalOrderIndex < _orderTargets.Capacity; globalOrderIndex++)
@@ -1234,11 +1228,8 @@ public sealed class ServerContext : Context
             int localOrderIndex = globalOrderIndex & (OrderIdAllocator.OrdersPerClient - 1);
             ref SharedArrayEntry<OrderTarget> targetEntry = ref _orderTargets.GetEntry(globalOrderIndex);
             ref SharedArrayEntry<OrderState> stateEntry = ref _orderStates.GetEntry(globalOrderIndex);
-            ref SharedArrayEntry<OrderRisk> riskEntry = ref _orderRisks.GetEntry(globalOrderIndex);
-            OrderRisk orderRisk = riskEntry.GetReadonlyRef();
             Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} target seq={targetEntry.GetSeq()} {targetEntry.GetReadonlyRef()}");
             Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} state  seq={stateEntry.GetSeq()} {stateEntry.GetReadonlyRef()}");
-            Console.WriteLine($"[{globalOrderIndex}] {clientId}.{localOrderIndex} risk   seq={riskEntry.GetSeq()} absWorstOrderQuantity={orderRisk.GetAbsWorstOrderQuantity()}");
         }
 
         PrintSharedArray(_marketsByPrice, "MarketsByPrice [instrumentId]");

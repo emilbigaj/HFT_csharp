@@ -498,7 +498,9 @@ holds both rooms.
 `RiskLayer` is built on the base `Context` and runs the same code in two places: on the server over
 the `ServerContext` (source `Server`, every order on the instrument) and in every client over that
 client's own `ClientContext` (source `Client`, only its own orders). Each side keeps its own
-`OrderRisks` rows under its own directory. Its `WorkingRisk` rows are its own too, but under the
+`OrderRisk` rows, one per order slot (`OrderId.GlobalIndex`), in a plain array inside its `RiskLayer`: only that
+`RiskLayer` reads or writes them and no other process needs them (shared memory under each context's directory until
+2026-10-16; the Mirror skipped them anyway, since they were never stamped). Its `WorkingRisk` rows are its own too, but under the
 server's name, two arrays named like the position rows: the server's in `ServerWorkingRisks` [instrument],
 each strategy's in `LocalWorkingRisks` [strategy, instrument], which each strategy writes (as it writes its
 `OrderTargets`) and the Mirror copies to a remote desk (2026-10-16; until then a strategy's were under its own
@@ -555,8 +557,8 @@ an outright fill of an order this `RiskLayer` reserved releases a reservation. O
 moves the position but releases nothing, because this client never reserved it.
 
 Every `WorkingRisk` write is seq-bumped (`AcquireLock`/`ReleaseLock`; single writer, so two
-volatile stores), so `Read()` and the TCP mirror see untorn rows. `OrderRisk` rows are still written
-by plain ref. `ServerWorkingRisks` was `WorkingRisks` until 2026-10-16.
+volatile stores), so `Read()` and the TCP mirror see untorn rows. `OrderRisk` rows are private to their `RiskLayer`
+(see above), written by plain ref. `ServerWorkingRisks` was `WorkingRisks` until 2026-10-16.
 
 The shared arrays are created grouped by concept (positions, limits and exposure in server/local pairs, then orders,
 then the rest). Creation order is each array's id between the two C# Mirror ends and nothing else, so it may change
@@ -731,8 +733,8 @@ not from the action byte. An exchange adapter maps Reduce to the venue's quantit
   the previous process's finished orders, already in the position rows `WorkingRisk` is seeded from. No wait is needed: the
   server writes each order's row and its ring message microseconds apart on one thread, and `Recover` runs milliseconds after
   admission.
-- **`OrderRisk` rows are not cleared at startup:** a validated Create resets its slot's row, and nothing reads a slot's row
-  before this process's own Create on it.
+- **`OrderRisk` rows start empty with each process:** they are a plain array in its `RiskLayer`, allocated at startup;
+  a validated Create resets its slot's row anyway, so nothing of a previous order is ever read.
 - Instrument allocation then only rewrites `WorkingRisk { Position = own strategy position row, reservations 0 }`; with no
   Active orders zero reservations is exact. The region can outlive a process (the GUI maps it), so it is rewritten on every
   allocation rather than trusted.

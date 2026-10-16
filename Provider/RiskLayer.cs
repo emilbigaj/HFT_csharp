@@ -11,8 +11,11 @@ namespace Provider;
 // This class is not thread safe. Only one thread should ever use it.
 public class RiskLayer
 {
-    // The server's context on the server, the client's own on a client: OrderRisks, WorkingRisks and the RiskLimit checked are per context.
+    // The server's context on the server, the client's own on a client: the WorkingRisk and RiskLimit rows checked are per context.
     private readonly Context _context;
+    // Per order slot (OrderId.GlobalIndex): its in-flight quantities and worst case. Only this RiskLayer reads or writes them and
+    // no other process needs them, so they live here, not in shared memory; allocated at startup, zero = nothing in flight.
+    private readonly OrderRisk[] _orderRisks;
     // CLIENT-side only: the high-water mark of this client's own allocations. Valid there because
     // validation runs at send time on one thread, so validation order IS allocation order. The
     // server must NOT run this check: ids come from one per-client counter but travel on per-core-
@@ -25,7 +28,11 @@ public class RiskLayer
     {
         _context = context;
         _orderRejectedSource = orderRejectedSource;
+        _orderRisks = new OrderRisk[context.ServerHeader.GetReadonlyRef().OrdersCapacity];
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ref OrderRisk GetOrderRisk(OrderId orderId) => ref _orderRisks[orderId.GlobalIndex];
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Bitset64 ValidateClient(int clientId, int strategyId)
@@ -174,7 +181,7 @@ public class RiskLayer
         // "Acceptance before trade").
         if (orderState.OrderStateReason == OrderStateReason.Acked)
         {
-            ref OrderRisk orderRisk = ref _context.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
+            ref OrderRisk orderRisk = ref GetOrderRisk(orderState.OrderHeader.OrderId);
             Side side = orderState.OrderProfile.Side;
 
             int worstOrderQuantityBefore = orderRisk.GetAbsWorstOrderQuantity();
@@ -186,7 +193,7 @@ public class RiskLayer
         }
         else if (orderState.OrderStateStatus == OrderStateStatus.Done)
         {
-            ref OrderRisk orderRisk = ref _context.GetOrderRisk(orderState.OrderHeader.OrderId).GetRef();
+            ref OrderRisk orderRisk = ref GetOrderRisk(orderState.OrderHeader.OrderId);
             Side side = orderState.OrderProfile.Side;
 
             int worstOrderQuantity = orderRisk.GetAbsWorstOrderQuantity();
@@ -226,7 +233,7 @@ public class RiskLayer
         if (orderRejected.OrderRejectedSource == _orderRejectedSource || orderRejected.OrderTargetAction == OrderTargetAction.Cancel)
             return;
 
-        ref OrderRisk orderRisk = ref _context.GetOrderRisk(orderRejected.OrderHeader.OrderId).GetRef();
+        ref OrderRisk orderRisk = ref GetOrderRisk(orderRejected.OrderHeader.OrderId);
         Side side = orderRejected.OrderProfile.Side;
 
         int worstOrderQuantityBefore = orderRisk.GetAbsWorstOrderQuantity();
@@ -246,7 +253,7 @@ public class RiskLayer
     public int GetAbsAllowedOrderQuantity(in OrderTarget orderTarget, bool isFillsRoom, bool isWithinLimit = false)
     {
         // A Create's row still holds the previous order's values until ValidateOrder resets it.
-        int worstOrderQuantity = orderTarget.OrderTargetAction == OrderTargetAction.Create ? 0 : _context.GetOrderRisk(orderTarget.OrderHeader.OrderId).GetReadonlyRef().GetAbsWorstOrderQuantity();
+        int worstOrderQuantity = orderTarget.OrderTargetAction == OrderTargetAction.Create ? 0 : GetOrderRisk(orderTarget.OrderHeader.OrderId).GetAbsWorstOrderQuantity();
         int sign = orderTarget.OrderProfile.Sign;
         long absAllowedOrderQuantity = int.MaxValue;
 
@@ -289,7 +296,7 @@ public class RiskLayer
     {
         OrderId orderId = orderTarget.OrderHeader.OrderId;
         // An amend with 29 targets already in flight would be refused (TooManyActiveTargets): nothing fits until an ack frees one.
-        if (orderTarget.OrderTargetAction != OrderTargetAction.Create && _context.GetOrderRisk(orderId).GetReadonlyRef().IsFull)
+        if (orderTarget.OrderTargetAction != OrderTargetAction.Create && GetOrderRisk(orderId).IsFull)
             return false;
         ref readonly OrderState orderState = ref _context.GetOrderState(orderId).GetReadonlyRef();
         int absQuantityFilled = orderTarget.OrderTargetAction != OrderTargetAction.Create && orderState.OrderHeader.OrderId == orderId ? Math.Abs(orderState.QuantityFilled) : 0;
@@ -464,9 +471,9 @@ public class RiskLayer
                     return false;
                 }
 
-                ref OrderRisk orderRisk = ref _context.GetOrderRisk(orderTarget.OrderHeader.OrderId).GetRef();
+                ref OrderRisk orderRisk = ref GetOrderRisk(orderTarget.OrderHeader.OrderId);
 
-                // Why: a slot's row may hold a previous order's, or a previous process's: a Create always starts it empty
+                // Why: a slot's row may still hold the slot's previous order's: a Create always starts it empty
                 if (orderTarget.OrderTargetAction == OrderTargetAction.Create)
                     orderRisk = new OrderRisk();
 

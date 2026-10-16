@@ -4,6 +4,20 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-16 — OrderRisk rows move from shared memory into the RiskLayer
+
+- `Provider/RiskLayer.cs` — `private readonly OrderRisk[] _orderRisks` (`OrdersCapacity` rows, indexed by
+  `OrderId.GlobalIndex`, allocated in the constructor) and a private `GetOrderRisk`; every use reads it instead of the
+  context's shared region.
+- `Provider/Context.cs` — the `OrderRisks` region (one per context, under its directory), `GetOrderRisk` and the dump's
+  risk line are gone.
+- Why: only the RiskLayer of that process ever read or wrote the rows, the Mirror already skipped them (never stamped),
+  and no restart reads an old row (a Create resets its slot). One owner; one 512 KB region less per process; rows 64
+  bytes apart instead of 128. Not benchmarked (the user's call). C++: P29 (optional, internal). The C# Mirror's
+  array ids shift down by one from `OrderTargets` (C3).
+
+---
+
 ## 2026-10-16 — shared arrays declared and created grouped by concept
 
 - `Provider/Context.cs` — fields and creation now go: client headers, instruments, subscriptions and the book; then
