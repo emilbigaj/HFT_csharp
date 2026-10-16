@@ -1,6 +1,7 @@
 ﻿//BEGIN_FILE HFT/Tools/Application.cs
 using System;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -43,6 +44,9 @@ namespace Tools
         // Windows-specific Import
         [DllImport("Kernel32")]
         private static extern bool SetConsoleCtrlHandler(ConsoleCtrlDelegate handler, bool add);
+
+        [DllImport("Kernel32")]
+        private static extern bool FreeConsole();
 
         // Keep a reference to the delegate to prevent GC collection
         private static readonly ConsoleCtrlDelegate _ctrlHandler = ConsoleCtrlHandler;
@@ -101,6 +105,17 @@ namespace Tools
                 // Unhandled exceptions and standard framework exits trigger this
                 OnExit(null, null);
             };
+        }
+
+        /// Leaves this process's console, whose window then closes on Windows (Windows Terminal or the classic console alike),
+        /// and appends everything it prints to logFilePath instead. Startup only; the process is then stopped from Task Manager.
+        public static void DetachConsole(string logFilePath)
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                FreeConsole();
+            StreamWriter logWriter = new(logFilePath, append: true) { AutoFlush = true };
+            Console.SetOut(logWriter);
+            Console.SetError(logWriter);
         }
 
         /// <summary>Adds an action that will run once on application exit. Cancel the returned action once it is no longer needed.</summary>

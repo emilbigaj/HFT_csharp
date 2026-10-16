@@ -302,7 +302,7 @@ public class Server : IDisposable
         // Step 1: the row: the firm's for strategy 0, never a strategy's (the house book's orders are manual, checked by the firm's alone)
         int strategyId = controlRiskLimit.StrategyId;
         bool isServerRiskLimit = strategyId == OrderIdAllocator.ServerStrategyId;
-        ref SharedArrayEntry<RiskLimit> riskLimitEntry = ref isServerRiskLimit ? ref _serverContext.GetServerRiskLimit(controlRiskLimit.InstrumentId) : ref _serverContext.GetRiskLimit(strategyId, controlRiskLimit.InstrumentId);
+        ref SharedArrayEntry<RiskLimit> riskLimitEntry = ref isServerRiskLimit ? ref _serverContext.GetRiskLimit(controlRiskLimit.InstrumentId) : ref _serverContext.GetRiskLimit(strategyId, controlRiskLimit.InstrumentId);
 
         // Step 2: its config fields
         ref RiskLimit riskLimit = ref riskLimitEntry.GetRef();
@@ -333,7 +333,7 @@ public class Server : IDisposable
     {
         // Step 1: the switch: the master is the server row, never a strategy's (the house book has no algo of its own)
         bool isMasterSwitch = strategyId == OrderIdAllocator.ServerStrategyId;
-        ref SharedArrayEntry<PositionHeader> positionEntry = ref isMasterSwitch ? ref _serverContext.GetServerPositionHeader(instrumentId) : ref _serverContext.GetPositionHeader(strategyId, instrumentId);
+        ref SharedArrayEntry<PositionHeader> positionEntry = ref isMasterSwitch ? ref _serverContext.GetPositionHeader(instrumentId) : ref _serverContext.GetPositionHeader(strategyId, instrumentId);
 
         // Step 2: the row with its new status
         Timestamp now = Clock.Now;

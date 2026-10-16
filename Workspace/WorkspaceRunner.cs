@@ -58,11 +58,12 @@ public sealed class CustomVolumeInfoProvider : IMountedVolumeInfoProvider
     }
 }
 
+// One workspace window to open: a server workspace when ClientName is the server's, with a saved layout unless WorkspacePath is empty.
+internal sealed record WorkspaceRequest(string ServerName, string ClientName, ClockMode Mode, string? WorkspacePath);
+
 public static class WorkspaceRunner
 {
-    private record WorkspaceRequest(string ServerName, string ClientName, ClockMode Mode, string? WorkspacePath);
-
-    private static WorkspaceRequest? s_startupRequest;
+    private static IReadOnlyList<WorkspaceRequest> s_startupRequests = [];
     private static IClassicDesktopStyleApplicationLifetime? s_desktopLifetime;
     private static Thread? s_uiThread;
     private static readonly object s_lock = new object();
@@ -72,12 +73,12 @@ public static class WorkspaceRunner
     // True when a running strategy opened the workspace (RunOnBackgroundThread): its Clock is the one driving the simulation.
     internal static bool IsHostedByStrategy => !s_ownsContextManager;
 
-    // Starts UI programmatically on the current thread. Blocks thread until closed.
-    public static void RunOnThisThread(string serverName, string clientName, ClockMode mode, string? workspacePath = null)
+    // Starts the UI on the current thread with these windows, the first the main one. Blocks the thread until the last closes.
+    internal static void RunOnThisThread(IReadOnlyList<WorkspaceRequest> startupRequests)
     {
         s_ownsContextManager = true;
         Thread.CurrentThread.Name = "Workspace-UI";
-        s_startupRequest = new WorkspaceRequest(serverName, clientName, mode, workspacePath);
+        s_startupRequests = startupRequests;
         StartAvalonia(Array.Empty<string>(), ShutdownMode.OnExplicitShutdown);
     }
 
@@ -204,8 +205,8 @@ public static class WorkspaceRunner
     {
         s_desktopLifetime = desktop;
 
-        if (s_startupRequest != null)
-            ProcessRequestToStartWorkspace(s_startupRequest, desktop);
+        foreach (WorkspaceRequest startupRequest in s_startupRequests)
+            ProcessRequestToStartWorkspace(startupRequest, desktop);
 
         FlushQueuedWorkspaces(desktop);
     }

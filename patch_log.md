@@ -4,6 +4,50 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-16 — strategy exposure rows under the server's name, so a remote desk sees them
+
+- `Provider/Context.cs` — `_workingRisks` (one region per context, under its own directory) is now two arrays named like
+  the position rows: `ServerWorkingRisks` (the firm's, in the old slot, same id) and `LocalWorkingRisks` ([strategy,
+  instrument], created last), which each strategy writes, as it writes its `OrderTargets`. `GetWorkingRisk(instrumentId)`
+  is per context (as `GetRiskLimit`): each override reads its own array, and there is no "server" accessor (on the server
+  there is nothing to tell apart). `GetServerRiskLimit` and `GetServerPositionHeader` deleted for the same reason (the
+  server's `GetRiskLimit(instrumentId)` / `GetPositionHeader(instrumentId)` are those rows). `_marketsByPrice` and
+  `_orderRisks` stay under each context's directory (the user's call).
+- The server also seeds a strategy's `LocalWorkingRisks` row when it allocates the instrument to it (so the region is
+  writable on both sides, as `MessageEfficiency`): after a server restart replays the allocations, a strategy that has
+  not reconnected yet still has a readable row. The strategy reseeds it at its start, as before.
+- Why: the Mirror copies only the server's regions, so a remote strategy workspace's Risk Limits widget could not read
+  the strategy's exposure; its `Read()` threw on the unwritten row and the grid came up empty (found on a desk copy of
+  `CME_NewRelease`, `Equity_Testing`). The RiskLayer and the widget are unchanged.
+- Hot path: the strategy's row moves region, and a client's `GetWorkingRisk` is now a virtual call plus the local index
+  (about 1–2 ns per leg, as `GetRiskLimit`). While a Local Mirror runs, its read of a strategy's row costs that
+  strategy's next write a cache-line transfer, at most once per pass. C++: P28, L11. Layout hash changes.
+
+---
+
+## 2026-10-16 — the risk desk package: one zip, one double-click
+
+- `Publish\` (new) holds both deploy scripts, each building into a `Staging` folder beside itself (ignored):
+  - `Publish\CME\PublishAndDeploy.ps1`: the CME deploy, copied in from `C:\Home\csharp\Scripts\deploy_aot.ps1` (that copy
+    is unchanged). It now finds the solution from its own location when no folder is passed, and stages into
+    `Publish\CME\Staging` instead of `deploy_stage`; the build, rsync and snapshot are as before.
+  - `Publish\RiskDesk\Publish.ps1` builds `Mirror.exe` and `Workspace.exe` (NativeAOT for AVX2, one build node) with
+    `Start.bat` and the two config templates into `Staging\BigajRiskDesk\`, and zips it to `Staging\BigajRiskDesk.zip`
+    beside that folder. `Start.bat` starts this folder's Mirror unless it runs, then the Workspace.
+- `Workspace\WorkspaceConfig.cs` (new) and `Workspace\Program.cs`: with no arguments the Workspace reads
+  `WorkspaceConfig.json` beside it (server, directories root, one window per entry, Realtime); the command line becomes
+  a one-entry list through the same code. `WorkspaceRunner.RunOnThisThread` takes the list (`WorkspaceRequest` is now
+  internal and shared). `Main` brought up to the naming rules (`argumentIndex`) and numbered steps.
+- `Mirror\MirrorConfig.cs` `IsConsoleVisible`, `Tools\Application.cs` `DetachConsole`: a hidden Mirror leaves its
+  console and writes `Mirror.log`.
+- Why: the second trader, the risk desk and a home desk each get the GUI from one zip and a double-click.
+- Tested on this PC with a localhost-only copy: a first double-click starts the folder's Mirror (hidden, no console host,
+  `Mirror.log` written) and a Workspace that reads its config and waits on `Data\Servers\Realtime\CME_NewRelease`; a
+  second double-click starts no second Mirror; a Mirror run from another folder is ignored. Not tested: windows opening
+  against a live copy (needs the box).
+
+---
+
 ## 2026-10-16 — WorkingRisk names; the Risk Limits widget shows worst-case positions and fills
 
 - `Execution/Order.cs`, `Provider/RiskLayer.cs` — renamed `WorstLongQuantity`/`WorstShortQuantity` to

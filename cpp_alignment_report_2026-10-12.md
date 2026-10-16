@@ -57,6 +57,7 @@ Words used throughout:
 | P25 | Algo pause | PORT | no | A second switch: an algo order also needs the server row's `AlgoStatus` `Live` (the master per instrument); strategy 0's control (a server workspace's) turns the master only; the master starts `Live` at every start |
 | P26 | Max fills per session | PORT | **yes** (L11) | `RiskLimit` gains `MaxFillsPerSession` (28 bytes), `WorkingRisk` gains `FillsThisSession` and `WorstWorkingFills` (24 bytes) and renames its worst fields, `ControlRiskLimit` gains the field; reason 57 renamed `TooManyFillsPerSession`; algo fills only, zeroed at `Closed`, checked after the position room for algo orders only (a manual order is never limited by fills) |
 | P27 | Strategy risk limits | PORT | **yes** (L11) | New region `LocalRiskLimits` [strategy, instrument]; `RiskLimits` renamed `ServerRiskLimits`; `ControlRiskLimit` gains `StrategyId` (0 = the firm's row); the server loads strategy rows from `<strategy>/RiskLimits` and records their edits on the strategy's execution channel; the server still checks the firm's limit only |
+| P28 | Strategy exposure rows | PORT | **yes** (L11) | The per-directory `WorkingRisks` region becomes `<server>/ServerWorkingRisks` (the server's, per instrument) and new `<server>/LocalWorkingRisks` (per strategy and instrument, each strategy writes its own); layout of a row unchanged |
 | C1-C17 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
@@ -998,6 +999,32 @@ ServerContext::AllocateInstrument(clientId, instrumentId): LocalRiskLimits[clien
 **Verify:** firm limit 10, strategy X's 4: X's algo targeting 5 sends 4; from X's workspace raise X's limit to 6: the row
 changes, `<X>/RiskLimits/<symbol>.risklimit` gets the line, the server's file does not.
 
+### P28. Strategy exposure rows move under the server's name (C# `Provider/Context.cs`; 2026-10-16)
+
+Each context's `WorkingRisk` rows were one region per context, under its own directory (`<directory>/WorkingRisks`). A
+remote desk could not see a strategy's, because the Mirror copies only the server's regions. Now, named like the
+position rows:
+
+```
+<server>/WorkingRisks (the server's, per directory)  ->  <server>/ServerWorkingRisks, WorkingRisk x InstrumentIds   // same slot, same rows
+<strategy>/WorkingRisks (each strategy's)            ->  <server>/LocalWorkingRisks, WorkingRisk x (ClientIds x InstrumentIds),
+                                                        index clientId * InstrumentIds + instrumentId              // new, created last
+```
+
+- The server writes `ServerWorkingRisks` (seeded at `AllocateInstrument`, as before). Each strategy writes its own rows of
+  `LocalWorkingRisks` (reseeded at its start, then moved by its RiskLayer), the way it writes its `OrderTargets`. New: the
+  server seeds a strategy's row once, when it allocates the instrument to the strategy:
+  `AllocateInstrument(clientId, instrumentId)`: LocalWorkingRisks[clientId, instrumentId] = WorkingRisk { Position = that strategy's position row's Quantity }
+  so the row is readable before the strategy first runs (after a server restart replays the allocations). The region is
+  therefore writable by the server and by each strategy; the writes never overlap (the server seeds before it replies).
+  The C++ server creates both regions; a C++ strategy, if there is one, writes its own rows there.
+- `WorkingRisk` itself is unchanged (24 bytes, P26). The RiskLayer logic is unchanged: each side moves its own row.
+- **Hot-path cost:** none on the server. A strategy's row now sits in the server's region, one row per cache-line pair as
+  before.
+
+**Verify:** with a strategy trading, a remote desk's strategy workspace shows that strategy's Position, FillsThisSession
+and worst-working columns, equal to the box's.
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -1168,9 +1195,10 @@ listed.
   counts 4 bytes off. An old C# Logging writes
   a type-18 record as an empty line and never appends the row. The new C# processes on the box (Mirror, Workspace) no
   longer append at all.
-- **L11. Risk limits (P26, P27): the C++ server and every C# process on the box together.** `RiskLimit` grew to 28 bytes and
+- **L11. Risk limits (P26, P27, P28): the C++ server and every C# process on the box together.** `RiskLimit` grew to 28 bytes and
   `WorkingRisk` to 24, both shared rows; `ControlRiskLimit` grew 8 bytes (`StrategyId`, `MaxFillsPerSession`); the region
-  `RiskLimits` is now `ServerRiskLimits`, and `LocalRiskLimits` is new. Old C# strategies throw on the `RiskLimit` the
+  `RiskLimits` is now `ServerRiskLimits`, and `LocalRiskLimits` is new; the per-directory `WorkingRisks` regions are now
+  `ServerWorkingRisks` and the new `LocalWorkingRisks`. Old C# strategies throw on the `RiskLimit` the
   server now sends on their execution channel. Before trading, set `MaxFillsPerSession` on every instrument (old lines
   load 0) and each strategy's limits (no file means Min in realtime). Both Mirror ends deploy with it (the layout hash
   changes).

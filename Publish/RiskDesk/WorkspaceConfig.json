@@ -1,0 +1,7 @@
+{
+  "ServerName": "CME_NewRelease",
+  "DirectoriesRoot": "Data",
+  "Workspaces": [
+    { "StrategyName": "", "WorkspaceName": "" }
+  ]
+}

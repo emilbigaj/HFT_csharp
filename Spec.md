@@ -449,8 +449,8 @@ asks for 8, which passes its own check (8 <= 8), and the server refuses it (4 + 
   the link's whitelist and VPN are the protection, as for orders and pause controls. The guard if one is wanted: the Local
   Mirror's stand-in refuses a control whose `StrategyId` is not its GUI name's principal (C#-only, about 4 lines).
 - **The Risk Limits widget** shows the principal's own rows: a server workspace the firm's limits and exposure, a strategy
-  workspace the strategy's. On a remote desk a strategy's `WorkingRisks` are not mirrored (they are under the strategy's
-  directory), so its exposure columns read 0 there; its limits are (accepted).
+  workspace the strategy's, on the box and on a remote desk alike (all four arrays are under the server's name, so the
+  Mirror copies them).
 - Two arrays, named like the position rows, because the server writes both. `LocalRiskLimits` is created last, so every
   other array keeps its id; `RiskLimits` was renamed `ServerRiskLimits`.
 - Cost: the client's check reads a different row through a virtual `GetRiskLimit` (as `GetPositionHeader`); about 1–2 ns
@@ -500,9 +500,14 @@ holds both rooms.
 `RiskLayer` is built on the base `Context` and runs the same code in two places: on the server over
 the `ServerContext` (source `Server`, every order on the instrument) and in every client over that
 client's own `ClientContext` (source `Client`, only its own orders). Each side keeps its own
-`OrderRisks` and `WorkingRisks` rows under its own directory; the limit rows (each side reads its
-own, see "Two levels of risk limit"), `OrderStates`, `OrderTargets` and the position rows stay the
-one server-wide set.
+`OrderRisks` rows under its own directory. Its `WorkingRisk` rows are its own too, but under the
+server's name, two arrays named like the position rows: the server's in `ServerWorkingRisks` [instrument],
+each strategy's in `LocalWorkingRisks` [strategy, instrument], which each strategy writes (as it writes its
+`OrderTargets`) and the Mirror copies to a remote desk (2026-10-16; until then a strategy's were under its own
+directory, which the Mirror does not copy, so a remote desk could not see a strategy's exposure).
+`GetWorkingRisk(instrumentId)` picks the context's own, as `GetRiskLimit` does. The limit rows (each side reads
+its own, see "Two levels of risk limit"), `OrderStates`, `OrderTargets` and the position rows stay the one
+server-wide set.
 
 The client needs the numbers so the algo can clip a target to what the server will accept (see
 `TryTarget`), and it needs its own copy rather than the server's rows for two reasons: reading the
@@ -537,7 +542,15 @@ itself.
 
 Seeding: the server writes `WorkingRisk { Position = server-wide position }` when it first
 allocates an instrument; a client writes `WorkingRisk { Position = its own strategy's position row }`
-on every process start (see "Client restart"). After that `Position` moves only in
+on every process start (see "Client restart"). The server also writes that same strategy row when it allocates the
+instrument to the strategy (`AllocateInstrument(clientId, instrumentId)`, 2026-10-16), so the row is readable before the
+strategy first runs, for example after a server restart replays the allocations (a Risk Limits grid, on the box or a
+remote desk, would otherwise have nothing to read); the two writes never overlap, since the server seeds before it
+replies to the allocation and the strategy reseeds after. On a reconnect the allocations survive (the client is only
+Detached), so only the instruments the new process asks for are reseeded; one it does not ask for keeps the dead
+process's last row, worst-working quantities included, though the server has since closed those orders (accepted
+2026-10-16; the declined fix: the server reseeds every allocated row of the strategy when `IsClientReady` admits it).
+After that `Position` moves only in
 `RiskLayer.OnFill`, for every fill, a legged instrument's own fill included (accounting only); only
 an outright fill of an order this `RiskLayer` reserved releases a reservation. On a client that is
 `isReserved = (fill's ClientId == own ClientId)`: a fill of a manual order booked to the strategy
@@ -545,9 +558,10 @@ moves the position but releases nothing, because this client never reserved it.
 
 Every `WorkingRisk` write is seq-bumped (`AcquireLock`/`ReleaseLock`; single writer, so two
 volatile stores), so `Read()` and the TCP mirror see untorn rows. `OrderRisk` rows are still written
-by plain ref. The `WorkingRisks` array is created last among the base arrays, so the array ids
-before it keep their mirror order; the one cost is that the server-only `ServerPositionHeaders`
-moved from id 15 to 16.
+by plain ref. The `ServerWorkingRisks` array (`WorkingRisks` until 2026-10-16) is created last among the base
+arrays, so the array ids before it keep their mirror order; `LocalWorkingRisks` is appended after `LocalRiskLimits`.
+While a Local Mirror runs, its pass reading a strategy's row costs that strategy's next write to it one cache-line
+transfer (about +330 ns measured on the box), at most once per pass, as the server's own row already pays.
 
 Reservations are per leg (an outright is its own single leg, weight +1).
 `ApplyWorstQuantityDelta` applies an order-unit delta to each leg as `legSide = orderSide ×
@@ -1454,9 +1468,39 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   made while the link is declared dead is dropped (`TcpLink.Write`), and the stand-ins' orders are cancelled. (Until
   2026-10-12 the Local end dropped any call whose copy was over 1 s old by its own clock; removed by the user's decision.)
 
+### Risk desk package (2026-10-16)
+
+Both deploy scripts live under `Publish\`, each building into a `Staging` folder beside itself (ignored by git):
+`Publish\CME\PublishAndDeploy.ps1` publishes the solution for Linux into `Publish\CME\Staging` and sends it to the CME box
+(rsync plus a dated snapshot there); `Publish\RiskDesk\Publish.ps1` builds the desk package into
+`Publish\RiskDesk\Staging\BigajRiskDesk` and zips it to `Publish\RiskDesk\Staging\BigajRiskDesk.zip` beside that folder,
+sending nothing.
+
+A desk gets that one zip. It unzips to a
+`BigajRiskDesk` folder holding `Mirror.exe`, `Workspace.exe` (NativeAOT, no .NET install, built for `x86-64-v3` (AVX2):
+the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs), Avalonia's three native libraries,
+`Start.bat`, and the templates `Publish\RiskDesk\MirrorConfig.json` and `Publish\RiskDesk\WorkspaceConfig.json`.
+- **`Start.bat`**, the double-click: starts this folder's `Mirror.exe` unless one runs from this folder (matched by full
+  path, so a Mirror run from elsewhere on the same PC does not count), with the folder as its working directory, so it
+  reads `MirrorConfig.json` there; then starts `Workspace.exe`. Both can start at once: the Workspace waits for the
+  Mirror's copy (`Context.EnsureConnected` retries every second). Closing the Workspace leaves the Mirror running; a
+  second double-click starts another Workspace beside the first.
+- **`WorkspaceConfig`** (`Workspace\WorkspaceConfig.cs`, static JSON beside the executable, read when `Workspace.exe` has
+  no arguments): `ServerName`, `DirectoriesRoot` (as `MirrorConfig`'s, so `"Data"` on a desk; the two must agree, or the
+  Workspace waits forever on a copy that does not exist, naming the path it waits for), and `Workspaces`, one window
+  each: `StrategyName` (`""` a server workspace) and `WorkspaceName` (a saved layout, `""` a blank window). Always
+  Realtime. With arguments the Workspace runs as before (one window from `-s -m -c -w -d`); both build the same list of
+  `WorkspaceRequest`s, the first the main window.
+- **`MirrorConfig.IsConsoleVisible`** (default true): false makes the Mirror leave its console (`Application.DetachConsole`:
+  `FreeConsole`, which closes the window under Windows Terminal and the classic console alike, where hiding it does not)
+  after the config checks, appending its output to `Mirror.log` beside the executable. It is then stopped from Task
+  Manager.
+- The templates carry the box's address and the server name, so a release changes them in one place. In JSON a backslash
+  is doubled (`"C:\\Desk\\Data"`).
+
 ### Setting up a remote desk
 
-- Ship the Build output folder (Mirror, Workspace and their libraries; Logging is not run there) with a `MirrorConfig.json`,
+- The usual way is the risk desk package above. By hand: ship the Build output folder (Mirror, Workspace and their libraries; Logging is not run there) with a `MirrorConfig.json`,
   and start `Mirror.exe` from that folder or with the file's absolute path:
   `{ "MirrorRole": "Remote", "ServerName": "<server leaf>", "ClockMode": "Realtime", "ListenPort": 7400, "IPWhitelist": ["<CME box egress IP>"], "DirectoriesRoot": "Data" }`.
   Nothing lives outside that folder: `DirectoriesRoot` is relative to the executables, so no S: drive is needed. Keep the

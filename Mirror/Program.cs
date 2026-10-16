@@ -11,6 +11,9 @@ using Tools;
 string mirrorConfigPath = args.Length > 0 ? args[0] : MirrorConfig.s_fileName;
 MirrorConfig mirrorConfig = MirrorConfig.LoadOrCreate(mirrorConfigPath);
 mirrorConfig.ThrowIfInvalid(mirrorConfigPath);
+// Why after the checks: a config that cannot work still shows its error in the console it was started from
+if (!mirrorConfig.IsConsoleVisible)
+    Application.DetachConsole(Path.Combine(AppContext.BaseDirectory, "Mirror.log"));
 Clock.Mode = mirrorConfig.ClockMode;
 // Before any path is built. Why: a remote risk desk has no S: drive; a relative DirectoriesRoot is beside this executable
 if (mirrorConfig.DirectoriesRoot.Length > 0)

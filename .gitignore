@@ -2,6 +2,7 @@
 [Bb]in/
 [Oo]bj/
 deploy_stage/
+Publish/*/Staging/
 *.dll
 *.exe
 *.pdb

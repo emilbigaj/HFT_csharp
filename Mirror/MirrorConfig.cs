@@ -27,6 +27,7 @@ public sealed class MirrorConfig
     public string[] IPWhitelist = [];                   // the only IP addresses a listening end accepts: the peer's (a Remote: the CME box's; a Local: each risk desk's)
     public string[] ConnectAddresses = [];              // "host:port", each dialled every second until connected
     public string DirectoriesRoot = "";                 // "" keeps S:\ (/mnt/S/); a relative folder is beside the executable ("Data" on a risk desk)
+    public bool IsConsoleVisible = true;                // false: this end closes its console window at startup and writes Mirror.log beside the executable
 
     /// The MirrorConfig at this path; a missing one is written with the defaults, to be filled in.
     public static MirrorConfig LoadOrCreate(string mirrorConfigPath)
