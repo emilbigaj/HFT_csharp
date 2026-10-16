@@ -99,7 +99,7 @@ public sealed class Position
 
                 PositionHeader positionHeader = _headerEntry.Read();
 
-                if (Instrument.TryGetQuote(out Quote quote))
+                if (_context.TryGetQuote(Instrument.InstrumentId, out Quote quote))
                 {
                     double floating = Instrument.GetProfit(positionHeader.AvgPrice, quote.MidPrice, positionHeader.Quantity);
                     return new Profit(Clock.Now, floating + positionHeader.RealizedProfit, floating, positionHeader.RealizedProfit, positionHeader.Quantity, positionHeader.AvgPrice, quote.MidPrice);

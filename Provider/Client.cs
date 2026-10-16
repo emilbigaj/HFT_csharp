@@ -414,8 +414,7 @@ public abstract class Client
         ReadOnlySocket reader = _instrumentData[instrumentId]!;
         while (reader.TryRead(out _) == ReadStatus.New) { }
 
-        MarketByPrice64 snapshot = ContextManager.ServerContext.GetMarketByPrice64(instrumentId).Read();
-        Context.GetMarketByPrice64(instrumentId).Write(in snapshot);
+        Context.GetInstrument(instrumentId).MarketByPrice = ContextManager.ServerContext.GetMarketByPrice64(instrumentId).Read();
     }
     
     public void ReadSocket()
@@ -535,17 +534,14 @@ public abstract class Client
         NicTimestamp = mbp.TickHeader.NicTimestamp;
         ExchangeTimestamp = mbp.TickHeader.ExchangeTimestamp;
 
-        ref SharedArrayEntry<MarketByPrice64> entry = ref Context.GetMarketByPrice64(instrumentId);
-        ref MarketByPrice64 mbp64 = ref entry.GetRef();
-
         Instrument instrument = Context.GetInstrument(instrumentId);
+        // Why no sequence bumps: this is the process's own book, read and written on this thread only
+        ref MarketByPrice64 mbp64 = ref instrument.MarketByPrice;
         if (mbp.TickHeader.TickType == TickType.MarketByPriceDelta)
         {
             ReadOnlySpan<byte> deltaSpan = rsrc;
             
-            entry.AcquireLock();
             bool isDeltas = mbp64.TrySet(deltaSpan);
-            entry.ReleaseLock();
             if (!isDeltas)
                 return;
 
@@ -557,9 +553,7 @@ public abstract class Client
             Span<byte> deltaSpan = stackalloc byte[rsrc.Length];
             rsrc.CopyTo(deltaSpan);
 
-            entry.AcquireLock();
             bool isDeltas = mbp64.TrySetAsDeltas(deltaSpan);
-            entry.ReleaseLock();
 
             if (!isDeltas)
                 return;
@@ -580,9 +574,7 @@ public abstract class Client
             
             Span<byte> deltaSpan = updateSpan.Slice(0, update.SizeOf());
 
-            entry.AcquireLock();
             bool isDeltas = mbp64.TrySetAsDeltas(deltaSpan);
-            entry.ReleaseLock();
 
             if (!isDeltas)
                 return;

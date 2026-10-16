@@ -104,7 +104,7 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
 
     private WorkingRisk GetWorkingRisk(int instrumentId) => _context.Primary.GetWorkingRisk(instrumentId).Read();
 
-    private int GetPositionQuantity(int instrumentId) => _context.Primary.GetPosition(instrumentId).Profit.Quantity;
+    private int GetPositionQuantity(int instrumentId) => _context.Primary.GetPositionHeader(instrumentId).Read().Quantity;
 
     /// Refreshes each allocated instrument's row in place, creating it on first sight, and posts the active rows to the grid.
     private void Refresh()

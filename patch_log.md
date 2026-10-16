@@ -4,6 +4,32 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-16 — a strategy's own book is a field of its Instrument; a GUI's P&L marks to the server's book
+
+- `Provider/Position.cs`, `Provider/Context.cs` — `Profit` marks to the new `Context.TryGetQuote`, which picks the book:
+  in a strategy's own process (its context open for writing) its own book, anywhere else (a GUI, the server) the
+  server's, read in place between two sequence reads (no copy of the book; false instead of a spin
+  when the row is mid-write). Why: a strategy workspace's P&L read the strategy's own book from the GUI process, which
+  is what made that book shared; marking a GUI to the server's book also gives a remote strategy workspace its P&L
+  (only the server's book is copied to a desk). A strategy never reads the server's book for P&L.
+- `Widget/RiskLimitsWidget.axaml.cs` — the Position column reads the position row, not `.Profit` (which built a quote it
+  never used).
+- `Data/Instrument.cs` — the book is a plain `MarketByPrice64` field (`ref MarketByPrice`); the constructors no longer take
+  a shared entry; `TryGetQuote(out quote)` lost its sequence-retry loop (only the feed thread reads the field); the quote
+  rule is written once in `TryGetQuote(in book, out quote)`.
+- `Provider/Client.cs` — the snapshot is copied into the instrument's field; the three `AcquireLock`/`ReleaseLock` pairs
+  around book updates are gone. `Provider/Context.cs` — `MarketsByPrice` is the server's book only (`<server>/...`); no
+  shared array uses a context's own directory now.
+- Hot path: two volatile stores fewer per book update on the strategy's feed thread, and the book sits in the instrument
+  object. Not benchmarked (the user's call). C++: C18 (nothing to port).
+- Breaks (realtime only, open): a strategy's P&L series runs on the Clock thread and now reads the instrument's own book
+  without a sequence check, as it already read the cached quote; torn values are possible. Proposed fix in Spec.md (the
+  trading thread fires the due reminders, as in simulation).
+- Tested: the risk suite (50/50, 13/13 on reload), with a new check that a strategy's P&L marks to its own book's quote
+  and a GUI-style read-only view of the same strategy marks to the server's book's quote (`Context.TryGetQuote`).
+
+---
+
 ## 2026-10-16 — OrderRisk rows move from shared memory into the RiskLayer
 
 - `Provider/RiskLayer.cs` — `private readonly OrderRisk[] _orderRisks` (`OrdersCapacity` rows, indexed by

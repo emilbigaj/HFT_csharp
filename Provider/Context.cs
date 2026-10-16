@@ -280,11 +280,8 @@ public abstract class Context
 
         _instrumentIdsByClientId = NewSharedArray<Bitset64>(serverName / "InstrumentIdsByClientId", serverHeader.ClientIds.Length, ServerAccess);
         _clientIdsByInstrumentId = NewSharedArray<Bitset64>(serverName / "ClientIdsByInstrumentId", serverHeader.InstrumentIds.Length, ServerAccess);
-        // Book ownership: the server owns the authoritative book (serverName-keyed, writable); each client
-        // owns its own replica (clientName-keyed, writable) that it builds from snapshot + ring deltas.
-        // directoryPath == serverName for a ServerContext and == clientName for a ClientContext, so this
-        // single line keeps the array-id ordering (mirror-safe) while giving each context its own book.
-        _marketsByPrice = NewSharedArray<MarketByPrice64>(directoryPath / "MarketsByPrice", serverHeader.InstrumentIds.Length, this is ServerContext ? serverAccess : clientAccess);
+        // The server's book, which the server writes and every other process reads; a strategy's own book is a field of its Instrument
+        _marketsByPrice = NewSharedArray<MarketByPrice64>(serverName / "MarketsByPrice", serverHeader.InstrumentIds.Length, ServerAccess);
 
         // Why every context maps the server's: its AlgoStatus is the master switch each algo checks
         _serverPositionHeaders = NewSharedArray<PositionHeader>(serverName / "ServerPositionHeaders", serverHeader.InstrumentIds.Length, ServerAccess);
@@ -488,6 +485,24 @@ public abstract class Context
         return isWritten;
     }
 
+    // The instrument's quote as this context sees it: in a strategy's own context (open for writing, the only one fed) its own
+    // book; in any other (a GUI, the server) the server's book, read in place between two reads of the row's sequence (no copy).
+    // False while there is no quote, or the server's row is unwritten, mid-write or changes under the read.
+    // Why no spin: a writer that died mid-write leaves the row odd forever; a caller just asks again on its next refresh.
+    public bool TryGetQuote(int instrumentId, out Quote quote)
+    {
+        if (ClientAccess == Access.Write)
+            return GetInstrument(instrumentId).TryGetQuote(out quote);
+        ref SharedArrayEntry<MarketByPrice64> marketByPriceEntry = ref GetMarketByPrice64(instrumentId);
+        ulong sequenceBefore = marketByPriceEntry.GetSeq();
+        quote = default;
+        if (sequenceBefore == 0UL || Protocol.IsWriteInProgress(sequenceBefore))
+            return false;
+        bool isQuotable = GetInstrument(instrumentId).TryGetQuote(in marketByPriceEntry.GetReadonlyRef(), out quote);
+        Thread.MemoryBarrier();   // Why: the field reads above must complete before the sequence is read again (as SharedArrayEntry.TryRead)
+        return isQuotable && marketByPriceEntry.GetSeq() == sequenceBefore;
+    }
+
     // Common shared memory accessors
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ref SharedArrayEntry<InstrumentHeader128> GetInstrumentHeader(int instrumentHeaderId)
@@ -617,12 +632,11 @@ public abstract class Context
         ref SharedArrayEntry<InstrumentHeader128> header128Entry = ref GetInstrumentHeader(instrumentHeaderId);
         InstrumentHeader instrHeader = header128Entry.GetReadonlyRef().AsInstrumentHeader();
 
-        ref SharedArrayEntry<MarketByPrice64> mbpEntry = ref _marketsByPrice[instrumentId];
         Instrument? instrument = null;
 
         if (instrHeader.InstrumentType == InstrumentType.Future)
         {
-            instrument = new Future(header128Entry.Cast<FutureHeader>(), mbpEntry);
+            instrument = new Future(header128Entry.Cast<FutureHeader>());
         }
         else if (instrHeader.InstrumentType == InstrumentType.Spread)
         {
@@ -640,11 +654,11 @@ public abstract class Context
                     shortLeg = legFuture;
             }
 
-            instrument = new Spread(header128Entry.Cast<LeggedHeader>(), mbpEntry, longLeg, shortLeg);
+            instrument = new Spread(header128Entry.Cast<LeggedHeader>(), longLeg, shortLeg);
         }
         else if (instrHeader.InstrumentType == InstrumentType.Forex)
         {
-            instrument = new Forex(header128Entry.Cast<ForexHeader>(), mbpEntry);
+            instrument = new Forex(header128Entry.Cast<ForexHeader>());
         }
         else
         {

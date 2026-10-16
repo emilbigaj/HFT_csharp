@@ -59,7 +59,7 @@ Words used throughout:
 | P27 | Strategy risk limits | PORT | **yes** (L11) | New region `LocalRiskLimits` [strategy, instrument]; `RiskLimits` renamed `ServerRiskLimits`; `ControlRiskLimit` gains `StrategyId` (0 = the firm's row); the server loads strategy rows from `<strategy>/RiskLimits` and records their edits on the strategy's execution channel; the server still checks the firm's limit only |
 | P28 | Strategy exposure rows | PORT | **yes** (L11) | The per-directory `WorkingRisks` region becomes `<server>/ServerWorkingRisks` (the server's, per instrument) and new `<server>/LocalWorkingRisks` (per strategy and instrument, each strategy writes its own); layout of a row unchanged |
 | P29 | `OrderRisk` rows | PORT-IF (optional) | no | C# keeps them as a plain array inside the RiskLayer instead of a shared region per context; no other process ever read them |
-| C1-C17 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
+| C1-C18 | Mirror, Workspace, widgets, harness, Logging, simulator, a strategy's own book | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
 **Kinds.** PORT: change the C++ code. PORT-IF: change it only if C++ has the same construct (the item says what to look
@@ -1136,6 +1136,12 @@ listed.
   posts its process id in `<server>/RemoteMirrorProcessId`, a desk-only letterbox); the desk's latency text; the GUI
   refactor. Its shared-type helpers (`OrderState.NewCancel()`, `Instrument.TicksToPriceString`, `Instrument.TickDecimals`,
   spelled `TicKDecimals` before) are GUI conveniences: port only if a C++ GUI or tool builds the same things.
+- **C18. 2026-10-16, a strategy's own book is a field of its `Instrument`** (C# strategies and GUI only, nothing to port):
+  each C# strategy kept its replica of the book in a shared region under its own directory (`<strategy>/MarketsByPrice`),
+  written under sequence bumps because a strategy workspace's P&L read it. Now the replica is a plain `MarketByPrice64`
+  field of `Instrument`, written by the feed thread with no sequence bumps; a strategy marks its P&L to it, a GUI to the server's book.
+  `<server>/MarketsByPrice` (the server's book, which the C++ server writes) is unchanged: same name, same rows, same
+  sequence bumps. A C++ strategy, if there is one, may keep its replica wherever it likes.
 
 ---
 

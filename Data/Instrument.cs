@@ -219,12 +219,14 @@ public abstract class Instrument
     protected SharedArrayEntry<InstrumentHeader128> _headerEntry;
     public ref readonly InstrumentHeader Header => ref _headerEntry.GetReadonlyRef().AsInstrumentHeader();
 
-    private SharedArrayEntry<MarketByPrice64> _mbpEntry;
+    // This process's own book, built by its Client from the server's snapshot and the instrument's feed, on the feed thread
+    // only; never filled in a process with no feed (the server writes its shared book through its Context, a GUI reads that).
+    private MarketByPrice64 _marketByPrice;
 
-    public ref readonly MarketByPrice64 MarketByPrice
+    public ref MarketByPrice64 MarketByPrice
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => ref _mbpEntry.GetReadonlyRef();
+        get => ref _marketByPrice;
     }
 
 
@@ -290,56 +292,24 @@ public abstract class Instrument
         }
     }
 
+    // This process's own book's quote: the one its feed last set, else read from the book (before the first update after the
+    // snapshot). False while the instrument is not open or either side is empty. Feed thread only.
     public bool TryGetQuote(out Quote quote)
     {
-        if (Header.TradingStatus != TradingStatus.Open)
-        {
-            quote = default!;
-            return false;
-        }
-
-        if (_isQuoteValid)
+        if (_isQuoteValid && Header.TradingStatus == TradingStatus.Open)
         {
             quote = _quote;
             return true;
         }
+        return TryGetQuote(in _marketByPrice, out quote);
+    }
 
-        // this path is used by the gui
-        ref readonly MarketByPrice64 mbp = ref MarketByPrice;
-        ulong seq0;
-        ulong seq1;
-        while (true)
-        {
-            seq0 = _mbpEntry.GetSeq();
-            if (Protocol.IsWriteInProgress(seq0))
-            {
-                X86BaseWrapper.Pause();
-                continue;
-            }
-
-            if (Header.TradingStatus != TradingStatus.Open)
-            {
-                quote = default!;
-                return false;
-            }
-
-            if (mbp.BidsCount == 0 || mbp.AsksCount == 0)
-            {
-                seq1 = _mbpEntry.GetSeq();
-                if (seq0 == seq1)
-                {
-                    quote = default!;
-                    return false;
-                }
-                continue;
-            }
-
-            quote = new Quote(mbp.BestBid, mbp.BestAsk, TickSize);
-
-            seq1 = _mbpEntry.GetSeq();
-            if (seq0 == seq1)
-                return true;
-        }
+    // The quote this book shows (this process's own or a copy of the server's); false while the instrument is not open or either side is empty.
+    public bool TryGetQuote(in MarketByPrice64 marketByPrice, out Quote quote)
+    {
+        bool isQuotable = Header.TradingStatus == TradingStatus.Open && marketByPrice.BidsCount > 0 && marketByPrice.AsksCount > 0;
+        quote = isQuotable ? new Quote(marketByPrice.BestBid, marketByPrice.BestAsk, TickSize) : default;
+        return isQuotable;
     }
 
     public Symbology Symbology { get; }
@@ -364,9 +334,8 @@ public abstract class Instrument
     // > 1: every instrument is its own single leg (base ctor); legged means legs BEYOND itself.
     public bool IsLegged => _legs.Length > 1;
 
-    protected Instrument(SharedArrayEntry<InstrumentHeader128> headerEntry, SharedArrayEntry<MarketByPrice64> mbpEntry)
+    protected Instrument(SharedArrayEntry<InstrumentHeader128> headerEntry)
     {
-        _mbpEntry = mbpEntry;
         _headerEntry = headerEntry;
         _quote = new Quote() { TickSize = TickSize };
         TickDecimals = Tools.Tools.GetNumberOfDecimalPlaces(TickSize);
@@ -418,8 +387,8 @@ public class Future : Instrument
     public Timestamp MaturityDate => _headerEntry.GetReadonlyRef().AsFuture().MaturityDate;
     public ref readonly FutureHeader FutureHeader => ref _headerEntry.GetReadonlyRef().AsFuture();
 
-    public Future(SharedArrayEntry<FutureHeader> headerEntry, SharedArrayEntry<MarketByPrice64> mbpEntry)
-        : base(headerEntry.Cast<InstrumentHeader128>(), mbpEntry)
+    public Future(SharedArrayEntry<FutureHeader> headerEntry)
+        : base(headerEntry.Cast<InstrumentHeader128>())
     {
         Multiplier = FutureHeader.Multiplier;
     }
@@ -455,8 +424,8 @@ public sealed class Forex : Instrument
    public ref readonly ForexHeader ForexHeader => ref _headerEntry.GetReadonlyRef().AsForex();
 
 
-    public Forex(SharedArrayEntry<ForexHeader> headerEntry, SharedArrayEntry<MarketByPrice64> mbpEntry)
-        : base(headerEntry.Cast<InstrumentHeader128>(), mbpEntry)
+    public Forex(SharedArrayEntry<ForexHeader> headerEntry)
+        : base(headerEntry.Cast<InstrumentHeader128>())
     {
     }
 }
@@ -473,8 +442,8 @@ public sealed class Spread : Instrument
     public ref readonly LeggedHeader SpreadHeader => ref _headerEntry.GetReadonlyRef().AsLegged();
 
 
-    public Spread(SharedArrayEntry<LeggedHeader> headerEntry, SharedArrayEntry<MarketByPrice64> mbpEntry, Future @long, Future @short)
-        : base(headerEntry.Cast<InstrumentHeader128>(), mbpEntry)
+    public Spread(SharedArrayEntry<LeggedHeader> headerEntry, Future @long, Future @short)
+        : base(headerEntry.Cast<InstrumentHeader128>())
     {
         Long = @long;
         Short = @short;

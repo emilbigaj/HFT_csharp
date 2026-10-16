@@ -1058,6 +1058,36 @@ standard deviation per run, no allocation; kept, because correctness comes first
 under NativeAOT. The C++ server is a port of this type and needs the same change
 (cpp_alignment_report_2026-10-12.md P23).
 
+## Two kinds of book: the server's is shared, a strategy's is its Instrument's (2026-10-16)
+
+- **The server's book** is the shared region `<server>/MarketsByPrice`, one row per instrument. The server writes it (under
+  the row's sequence bump); every other process reads it through its own `Context` (`GetMarketByPrice64`,
+  `TryReadMarketByPrice64` for a whole copy): the GUI's ladders and Send Order, each strategy's starting snapshot, and the
+  Mirror, which copies it to a remote desk. A GUI's (and the server's) positions mark P&L to it through
+  `Context.TryGetQuote(instrumentId)`, which reads the best bid and ask in place between two reads of the row's sequence,
+  copying nothing, and returns false rather than spin when the row is mid-write (the caller asks again next refresh).
+- **A strategy's own book** is a plain `MarketByPrice64` field of each `Instrument` (`Instrument.MarketByPrice`). Its Client
+  fills it on the feed thread: the server's book as the snapshot when the instrument's data socket opens, then every
+  delta, update and snapshot from the feed. Only that thread reads it (the algo's quotes, `Position.TryGetQuote`, the
+  queue estimate, and the strategy's own P&L), so it takes no sequence bumps. In a process with no feed (the server, a
+  GUI) the field stays empty and nothing reads it.
+- **Which book a quote comes from** is the context's to decide (`Context.TryGetQuote`, which `Position.Profit` marks to):
+  a context open for writing, which only a strategy's own process has, gives its instrument's own book; any other (a GUI,
+  the server) the server's. So a strategy never reads the server's book for P&L, and a GUI's P&L, on the box or a remote
+  desk, is the server's.
+- **Open (2026-10-16): a strategy's timers race its trading thread in realtime.** In simulation one thread reads the
+  socket and fires every Clock reminder; in realtime `Scenario.Start` reads the socket on the main thread and runs the
+  Clock (reminders, `TickTocker`s, `TickTock`) on a background thread. A reminder that reads strategy state, such as a
+  P&L series calling `Position.Profit` (the instrument's own book and cached quote), can see a torn value. The cached
+  quote was already read this way before; the own book now is too. Proposed fix: in realtime the trading thread fires
+  the due reminders on its idle passes, as simulation does, and a strategy process runs no Clock thread.
+- `Instrument.TryGetQuote(out quote)` is the own book's quote: the one the feed last set, else read from the book;
+  `Instrument.TryGetQuote(in book, out quote)` is the one quote rule (open, both sides present) for any book.
+- Until 2026-10-16 each strategy's book was a shared region under its own directory, written under sequence bumps
+  because a strategy workspace's P&L read it from the GUI process (through a retry loop that would have spun forever on
+  a row left mid-write). That P&L now marks to the server's book, which also gives a remote strategy workspace its P&L
+  (the strategy's region was never copied to a desk).
+
 ## Session state is the exchange's TradingStatus
 
 Whether an instrument is trading is what the exchange says, not what a timetable predicts. The
