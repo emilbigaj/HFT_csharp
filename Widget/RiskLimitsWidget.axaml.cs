@@ -37,9 +37,13 @@ public sealed class WidgetRiskLimit : INotifyPropertyChanged
     public int LongQuantityAllowance => _riskLimit.GetLongQuantityAllowance(in _workingRisk);
     public int ShortQuantityAllowance => _riskLimit.GetShortQuantityAllowance(in _workingRisk);
 
-    public int WorstLongQuantity => _workingRisk.WorstLongQuantity;
-    public int WorstShortQuantity => _workingRisk.WorstShortQuantity;
     public int FillsThisSession => _workingRisk.FillsThisSession;
+    public int WorstWorkingLongQuantity => _workingRisk.WorstWorkingLongQuantity;
+    public int WorstWorkingLongPosition => _positionQuantity + _workingRisk.WorstWorkingLongQuantity;     // the position if every working buy filled
+    public int WorstWorkingShortQuantity => _workingRisk.WorstWorkingShortQuantity;
+    public int WorstWorkingShortPosition => _positionQuantity + _workingRisk.WorstWorkingShortQuantity;   // the position if every working sell filled
+    public int WorstWorkingFills => _workingRisk.WorstWorkingFills;
+    public int WorstWorkingFillsThisSession => _workingRisk.FillsThisSession + _workingRisk.WorstWorkingFills;   // the session's fills if every working algo lot filled
 
     public string Timestamp => _riskLimit.Timestamp == Tools.Timestamp.MinValue ? "—" : _riskLimit.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
 

@@ -157,9 +157,9 @@ public class RiskLayer
             ref SharedArrayEntry<WorkingRisk> workingRiskEntry = ref _context.GetWorkingRisk(leg.InstrumentId);
             ref WorkingRisk workingRisk = ref workingRiskEntry.GetRef();
             workingRiskEntry.AcquireLock();
-            workingRisk.WorstLongQuantity += legSide > 0 ? legMagnitudeDelta : 0;
-            workingRisk.WorstShortQuantity -= legSide < 0 ? legMagnitudeDelta : 0;
-            workingRisk.AlgoWorstQuantity += orderId.IsAlgoOrder() ? legMagnitudeDelta : 0;
+            workingRisk.WorstWorkingLongQuantity += legSide > 0 ? legMagnitudeDelta : 0;
+            workingRisk.WorstWorkingShortQuantity -= legSide < 0 ? legMagnitudeDelta : 0;
+            workingRisk.WorstWorkingFills += orderId.IsAlgoOrder() ? legMagnitudeDelta : 0;
             workingRiskEntry.ReleaseLock();
         }
     }
@@ -256,9 +256,9 @@ public class RiskLayer
             int legSide = sign * Math.Sign(leg.Weight);
             ref readonly RiskLimit riskLimit = ref _context.GetRiskLimit(leg.InstrumentId).GetReadonlyRef();
             ref readonly WorkingRisk workingRisk = ref _context.GetWorkingRisk(leg.InstrumentId).GetReadonlyRef();
-            long room = isFillsRoom ? (long)riskLimit.MaxFillsPerSession - workingRisk.FillsThisSession - workingRisk.AlgoWorstQuantity
-                : legSide > 0 ? (long)riskLimit.MaxPositionQuantity - workingRisk.Position - workingRisk.WorstLongQuantity
-                : (long)riskLimit.MaxPositionQuantity + workingRisk.Position + workingRisk.WorstShortQuantity;
+            long room = isFillsRoom ? (long)riskLimit.MaxFillsPerSession - workingRisk.FillsThisSession - workingRisk.WorstWorkingFills
+                : legSide > 0 ? (long)riskLimit.MaxPositionQuantity - workingRisk.Position - workingRisk.WorstWorkingLongQuantity
+                : (long)riskLimit.MaxPositionQuantity + workingRisk.Position + workingRisk.WorstWorkingShortQuantity;
             // Past the limit nothing may grow: keep the worst, or within the limit cut by the overshoot rounded up to whole orders.
             int absWeight = Math.Abs(leg.Weight);
             long roomOrderQuantity = room >= 0 ? room / absWeight : isWithinLimit ? -((absWeight - 1 - room) / absWeight) : 0;

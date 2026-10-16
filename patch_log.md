@@ -4,6 +4,17 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-16 — WorkingRisk names; the Risk Limits widget shows worst-case positions and fills
+
+- `Execution/Order.cs`, `Provider/RiskLayer.cs` — renamed `WorstLongQuantity`/`WorstShortQuantity` to
+  `WorstWorkingLongQuantity`/`WorstWorkingShortQuantity` and `AlgoWorstQuantity` to `WorstWorkingFills`. Layout unchanged.
+- `Widget/RiskLimitsWidget` — after the limits: `Position`, `FillsThisSession`, `WorstWorkingLongPosition` (position +
+  working buys), `WorstWorkingShortPosition`, `WorstWorkingFillsThisSession` (fills + working algo lots); the raw
+  `WorstWorkingLongQuantity`, `WorstWorkingShortQuantity` and `WorstWorkingFills` are hidden until turned on. Why: the
+  sums are what a limit is compared with. C++: P26's field names.
+
+---
+
 ## 2026-10-16 — a manual order is never limited by fills; the risk-limit tests
 
 - `Provider/RiskLayer.cs`, `Execution/Order.cs` — a manual order (house book, or booked to a strategy) is out of the fills

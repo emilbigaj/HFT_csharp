@@ -465,8 +465,8 @@ strategy its own against its own. A manual fill, house book or booked to a strat
 though it still moves the position. `RiskLayer.OnSessionClosed` zeroes it
 at the instrument's `Closed` status, on the server beside the message-efficiency day's end and in each client for its
 own copy. The check is strict, assuming every working algo lot on both sides fills: the fills room is
-`MaxFillsPerSession - FillsThisSession - AlgoWorstQuantity` per leg, where `WorkingRisk.AlgoWorstQuantity` is the working
-algo orders' worst case, both sides summed, kept in the same `ApplyWorstQuantityDelta` as `WorstLong/ShortQuantity`. An
+`MaxFillsPerSession - FillsThisSession - WorstWorkingFills` per leg, where `WorkingRisk.WorstWorkingFills` is the working
+algo orders' worst case, both sides summed, kept in the same `ApplyWorstQuantityDelta` as `WorstWorkingLong/ShortQuantity`. An
 order may carry its current worst plus that room, so an amend is measured by its delta (amending a working buy of 10 to
 20 needs room 10). `ValidateOrder` checks the position room first (`PositionExceedsRiskLimit`) and then, for an algo
 order only, the fills room (`TooManyFillsPerSession`, value 57, renamed from the never-raised `TooManyOrdersPerSession`);
@@ -482,8 +482,13 @@ holds both rooms.
   `Session.CME.GetLastClose`.
 - A `.risklimit` line saved before 2026-10-15 has no `MaxFillsPerSession`, so it loads 0 and refuses every order until
   the limit is set: set it on every instrument before deploying.
-- Renamed at the same time: `WorstLongWorkingQuantity`/`WorstShortWorkingQuantity` to `WorstLongQuantity`/
-  `WorstShortQuantity`, and `ApplyWorstWorkingQuantityDelta` to `ApplyWorstQuantityDelta`.
+- Renamed at the same time: `WorstLongWorkingQuantity`/`WorstShortWorkingQuantity` to `WorstWorkingLongQuantity`/
+  `WorstWorkingShortQuantity` (2026-10-16; briefly `WorstLong/ShortQuantity`), and `ApplyWorstWorkingQuantityDelta` to
+  `ApplyWorstQuantityDelta`.
+- The Risk Limits widget shows `Position`, `FillsThisSession`, `WorstWorkingLongPosition` (= `Position +
+  WorstWorkingLongQuantity`, the position if every working buy filled), `WorstWorkingShortPosition` (the same for the
+  sells) and `WorstWorkingFillsThisSession` (= `FillsThisSession + WorstWorkingFills`, the session's fills if every
+  working algo lot filled); the three raw worst quantities are columns a user turns on.
 - `Client.IsDiscarded`, whose simulation-only carve-out discarded a refusal for `TooManyOrdersPerSession` alone, was
   deleted: with 57 renamed it would discard `TooManyFillsPerSession` in a simulation. Both callers use
   `OrderRejected.IsDiscarded`, so the refusal pauses the algo in a simulation as in realtime.
@@ -515,7 +520,7 @@ which the manual client does not track. The rate limit is server-only on both co
 `RiskLimit` (28 bytes: `Header`, `InstrumentId`, `Timestamp`, `MaxOrderQuantity`,
 `MaxPositionQuantity`, `MaxFillsPerSession`) is configuration, written only by operator edits. The live numbers are a
 separate row, `WorkingRisk` (24 bytes: `Header` with `OrderType.WorkingRisk = 17` @0, `Position` @4,
-`WorstLongQuantity` @8, >= 0, `WorstShortQuantity` @12, <= 0, `FillsThisSession` @16, >= 0, `AlgoWorstQuantity` @20,
+`WorstWorkingLongQuantity` @8, >= 0, `WorstWorkingShortQuantity` @12, <= 0, `FillsThisSession` @16, >= 0, `WorstWorkingFills` @20,
 >= 0), one per instrument per
 context, never persisted. The split is what lets the same `RiskLayer` run on both sides (each side
 has its own `WorkingRisk` and reads its own `RiskLimit`), and it means an edit cannot rewind
@@ -594,7 +599,7 @@ One function holds the room arithmetic for both the check and the clip:
 `GetAbsAllowedOrderQuantity(target, isFillsRoom, isWithinLimit)` is the largest `|order quantity|` (filled
 included) the order may carry; with `isFillsRoom` it measures the fills room instead (see "Max fills per
 session"). For each leg, with `room = MaxPositionQuantity - Position -
-WorstLong` on the long side and `MaxPositionQuantity + Position + WorstShort` on the short side
+WorstWorkingLongQuantity` on the long side and `MaxPositionQuantity + Position + WorstWorkingShortQuantity` on the short side
 (64-bit), it allows `worst + room / |weight|`, and the minimum over legs wins. `worst` is the
 order's current `GetAbsWorstOrderQuantity()`, or 0 for a Create (the row still holds the slot's
 previous order until `ValidateOrder` resets it). Since the room already counts this order's own

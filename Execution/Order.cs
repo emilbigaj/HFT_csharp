@@ -187,11 +187,11 @@ public struct RiskLimit(int instrumentId)
 
     public readonly int GetLongQuantityAllowance(in WorkingRisk workingRisk)
     {
-        return Math.Max(0, MaxPositionQuantity - workingRisk.Position - workingRisk.WorstLongQuantity);
+        return Math.Max(0, MaxPositionQuantity - workingRisk.Position - workingRisk.WorstWorkingLongQuantity);
     }
     public readonly int GetShortQuantityAllowance(in WorkingRisk workingRisk)
     {
-        return Math.Min(0, -MaxPositionQuantity - workingRisk.Position - workingRisk.WorstShortQuantity);
+        return Math.Min(0, -MaxPositionQuantity - workingRisk.Position - workingRisk.WorstWorkingShortQuantity);
     }
 
     public static RiskLimit GetMaxLimits(int instrumentId) => new RiskLimit(instrumentId)
@@ -230,11 +230,11 @@ public struct RiskLimit(int instrumentId)
 public struct WorkingRisk()
 {
     public Header<OrderType> Header = new(OrderType.WorkingRisk);   // the TCP mirror dispatches every row on its first byte
-    public int Position = 0;                     // moves in the same RiskLayer.OnFill as the reservation release
-    public int WorstLongQuantity = 0;            // >= 0: the most the working buys could still fill
-    public int WorstShortQuantity = 0;           // <= 0: the most the working sells could still fill
-    public int FillsThisSession = 0;             // >= 0: |fills| of algo orders, both sides, since the session opened (0 again at its Closed); manual fills never count
-    public int AlgoWorstQuantity = 0;            // >= 0: the most the working algo orders, both sides, could still fill: the fills room's reservation
+    public int Position = 0;                       // moves in the same RiskLayer.OnFill as the reservation release
+    public int WorstWorkingLongQuantity = 0;       // >= 0: the most the working buys could still fill
+    public int WorstWorkingShortQuantity = 0;      // <= 0: the most the working sells could still fill
+    public int FillsThisSession = 0;               // >= 0: |fills| of algo orders, both sides, since the session opened (0 again at its Closed); manual fills never count
+    public int WorstWorkingFills = 0;              // >= 0: the most the working algo orders, both sides, could still fill: the fills room's reservation
 
     public override string ToString()
     {

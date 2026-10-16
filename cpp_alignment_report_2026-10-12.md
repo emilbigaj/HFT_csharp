@@ -55,7 +55,7 @@ Words used throughout:
 | P23 | `SideByPrice64` | PORT | no | `TrySetQuantity`: a delete of a price better than the best is a no-op; it used to wipe the worse level sharing its ring slot, unbroadcast |
 | P24 | Message efficiency | PORT (all of it, not C#-only; needs a CME change) | **yes** (L10) | `InstrumentHeader` gains `ProductGroupId` (int8, offset 7) and `ProductGroupRoot` (tag 1151, offset 60); the `MessageEfficiency` row gains a type header (84 bytes); the server assigns rows, ends the day on `Closed` and alone appends `<group>.messageefficiency` (type 18 via Logging at a close, directly at shutdown) |
 | P25 | Algo pause | PORT | no | A second switch: an algo order also needs the server row's `AlgoStatus` `Live` (the master per instrument); strategy 0's control (a server workspace's) turns the master only; the master starts `Live` at every start |
-| P26 | Max fills per session | PORT | **yes** (L11) | `RiskLimit` gains `MaxFillsPerSession` (28 bytes), `WorkingRisk` gains `FillsThisSession` and `AlgoWorstQuantity` (24 bytes) and renames its worst fields, `ControlRiskLimit` gains the field; reason 57 renamed `TooManyFillsPerSession`; algo fills only, zeroed at `Closed`, checked after the position room for algo orders only (a manual order is never limited by fills) |
+| P26 | Max fills per session | PORT | **yes** (L11) | `RiskLimit` gains `MaxFillsPerSession` (28 bytes), `WorkingRisk` gains `FillsThisSession` and `WorstWorkingFills` (24 bytes) and renames its worst fields, `ControlRiskLimit` gains the field; reason 57 renamed `TooManyFillsPerSession`; algo fills only, zeroed at `Closed`, checked after the position room for algo orders only (a manual order is never limited by fills) |
 | P27 | Strategy risk limits | PORT | **yes** (L11) | New region `LocalRiskLimits` [strategy, instrument]; `RiskLimits` renamed `ServerRiskLimits`; `ControlRiskLimit` gains `StrategyId` (0 = the firm's row); the server loads strategy rows from `<strategy>/RiskLimits` and records their edits on the strategy's execution channel; the server still checks the firm's limit only |
 | C1-C17 | Mirror, Workspace, widgets, harness, Logging, simulator | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
@@ -934,8 +934,8 @@ OrderRejectedReason 57: TooManyOrdersPerSession -> TooManyFillsPerSession      /
 
 RiskLimit (Pack 1, 28 bytes): Header@0 InstrumentId@4 Timestamp@8 MaxOrderQuantity@16 MaxPositionQuantity@20
                               MaxFillsPerSession@24 (new; GetMaxLimits int.MaxValue, GetMinLimits 0)
-WorkingRisk (Pack 1, 24 bytes): Header@0 Position@4 WorstLongQuantity@8 WorstShortQuantity@12   // renamed from Worst*WorkingQuantity
-                                FillsThisSession@16 (new, >= 0) AlgoWorstQuantity@20 (new, >= 0: working algo worst, both sides)
+WorkingRisk (Pack 1, 24 bytes): Header@0 Position@4 WorstWorkingLongQuantity@8 WorstWorkingShortQuantity@12   // renamed from WorstLong/ShortWorkingQuantity
+                                FillsThisSession@16 (new, >= 0) WorstWorkingFills@20 (new, >= 0: working algo worst, both sides)
 ControlRiskLimit: ... MaxPositionQuantity, MaxFillsPerSession (new, last)
 
 RiskLayer::OnFill:        under the row lock, Position += q; FillsThisSession += fill.OrderId.IsAlgoOrder() ? |q| : 0
@@ -944,11 +944,11 @@ RiskLayer::OnSessionClosed(instrumentId): under the row lock, FillsThisSession =
 Server::OnTradingStatusUpdate: on Closed, after EndMessageEfficiencyDay, riskLayer.OnSessionClosed(instrumentId)
 Server::OnControlRiskLimit: also copies MaxFillsPerSession
 
-ApplyWorstQuantityDelta, per leg, beside the WorstLong/Short update:
-  AlgoWorstQuantity += orderId.IsAlgoOrder() ? legMagnitudeDelta : 0
+ApplyWorstQuantityDelta, per leg, beside the WorstWorkingLong/Short update:
+  WorstWorkingFills += orderId.IsAlgoOrder() ? legMagnitudeDelta : 0
 
 GetAbsAllowedOrderQuantity(target, isFillsRoom, isWithinLimit), per leg:
-  room = isFillsRoom ? MaxFillsPerSession - FillsThisSession - AlgoWorstQuantity
+  room = isFillsRoom ? MaxFillsPerSession - FillsThisSession - WorstWorkingFills
        : (as before, the position room)
 ValidateOrder: after the position room check (PositionExceedsRiskLimit),
   if IsAlgoOrder: the fills room check -> TooManyFillsPerSession          // a manual order never
