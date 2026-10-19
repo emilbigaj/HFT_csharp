@@ -253,7 +253,7 @@ public sealed class RemoteMirror : IDisposable
             _listedMirrorGuis.Add(new MirrorGui() { GuiProcessId = mirrorGui.GuiProcessId, ClientName = MirrorPacket.RewriteName(mirrorGui.ClientName, isTravelling: true) });
         }
         foreach ((string clientName, int guiProcessId) in _pendingClientIds.Keys)
-            _listedMirrorGuis.Add(new MirrorGui() { GuiProcessId = guiProcessId, ClientName = MirrorPacket.RewriteName(new String128(clientName), isTravelling: true) });
+            _listedMirrorGuis.Add(new MirrorGui() { GuiProcessId = guiProcessId, ClientName = MirrorPacket.RewriteName(new String256(clientName), isTravelling: true) });
         _tcpLink.Write(MirrorPacket.CreateGuiPacket(MirrorPacketType.GuiList, CollectionsMarshal.AsSpan(_listedMirrorGuis)));
     }
 

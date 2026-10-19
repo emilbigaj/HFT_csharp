@@ -329,7 +329,7 @@ public abstract class Context
     }
 
     // Finds a client by its exact name; false when no client has it.
-    public bool TryGetClientId(in String128 clientName, out int clientId)
+    public bool TryGetClientId(in String256 clientName, out int clientId)
     {
         foreach (int candidateClientId in ServerHeader.GetReadonlyRef().ClientIds)
         {
@@ -768,7 +768,7 @@ public sealed class ClientContext : Context
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int GetClientIdFromMap(string clientName)
     {
-        if (TryGetClientId(new String128(clientName), out int clientId))
+        if (TryGetClientId(new String256(clientName), out int clientId))
             return clientId;
         throw new InvalidOperationException($"{GetType()}.GetClientIdFromMap({clientName}), Client not connected to server '{ServerName}'.");
     }

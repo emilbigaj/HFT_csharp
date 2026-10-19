@@ -131,7 +131,7 @@ public class DataSimulator
                 Console.WriteLine(_date);
             }
 
-            if (tickHeader.TickType == TickType.Trade || tickHeader.TickType == TickType.Settlement)
+            if (tickHeader.TickType.IsTick())
             {
                 Tick tick = MemoryMarshal.AsRef<Tick>(src);
                 _exchangeSimulator.OnTick(ref tick);

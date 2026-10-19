@@ -1315,7 +1315,7 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   that server reads. A remote desk's GUI names end `@<machine>` (`ManualClient.GetGuiName`): no Workspace on the CME box or
   on another desk can hold one, so after a link loss nobody else can take a remote GUI's name, and with it its client id,
   before its stand-in is started again. The Local end reads the principal from the name before `_GUI<n>@`
-  (`ManualClient.TryParseRemoteGuiName`). Names still fit 128 characters, folder included (see "Setting up a remote desk").
+  (`ManualClient.TryParseRemoteGuiName`). Names still fit 256 characters, folder included (see "Setting up a remote desk").
 - **A `RemoteClient` holds nothing.** Each call (order target, allocation, algo status, risk limit) goes unchanged into its
   socket's admin channel; the Remote Mirror forwards it, and the Local end makes the same call on the stand-in, which takes
   the slot, runs the RiskLayer, writes the target row and sends. Nothing comes back down the GUI's socket. The
@@ -1524,7 +1524,18 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
   Workspace waits forever on a copy that does not exist, naming the path it waits for), and `Workspaces`, one window
   each: `StrategyName` (`""` a server workspace) and `WorkspaceName` (a saved layout, `""` a blank window). Always
   Realtime. With arguments the Workspace runs as before (one window from `-s -m -c -w -d`); both build the same list of
-  `WorkspaceRequest`s, the first the main window.
+  `WorkspaceRequest`s, the first the main window. Every window, startup ones included, goes through one queue that
+  `WorkspaceRunner.FlushQueuedWorkspaces` posts to Avalonia's loop. A window that cannot open (e.g. a strategy the server
+  does not know) is reported on the console and skipped; the others open.
+- **No kernel wait on a GUI thread.** `LowLatency.StartBackgroundThread` waits for its new thread to start by spinning on a
+  flag (`Volatile.Read` + `Thread.Yield`), not on an event. Why: under NativeAOT a kernel wait on the UI thread (a COM STA
+  thread) pumps window messages (`CoWaitForMultipleHandles`), so Avalonia re-enters and builds the next window inside the
+  wait; that window's own start-up wait reuses the thread's single monitor waiter and can consume the outer wait's signal,
+  which then sleeps forever although its thread is running. Seen 2026-10-19 on a desk with four windows: 2 of 7 AOT starts
+  loaded every window (native stacks: the UI thread in `Workspace.Connect` → `StartBackgroundThread` →
+  `ManualResetEventSlim.Wait` with all four client threads already looping), 10 of 10 with the spin; the JIT build never
+  hung. `Workspace.Disconnect` waits for its client thread to end the same way (`Thread.Sleep(1)` polls, not `Join`), since
+  a desk rebuilding after a server restart could otherwise start a second rebuild inside the first (2026-10-20).
 - **`MirrorConfig.IsConsoleVisible`** (default true): false makes the Mirror leave its console (`Application.DetachConsole`:
   `FreeConsole`, which closes the window under Windows Terminal and the classic console alike, where hiding it does not)
   after the config checks, appending its output to `Mirror.log` beside the executable. It is then stopped from Task
@@ -1538,7 +1549,7 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
   and start `Mirror.exe` from that folder or with the file's absolute path:
   `{ "MirrorRole": "Remote", "ServerName": "<server leaf>", "ClockMode": "Realtime", "ListenPort": 7400, "IPWhitelist": ["<CME box egress IP>"], "DirectoriesRoot": "Data" }`.
   Nothing lives outside that folder: `DirectoriesRoot` is relative to the executables, so no S: drive is needed. Keep the
-  folder near the drive root: every name (folder included) must fit 128 characters, and the Mirror stops with a message
+  folder near the drive root: every name (folder included) must fit 256 characters, and the Mirror stops with a message
   naming the path that does not. A remote GUI's name also carries `@<machine>` (up to 15 characters on Windows).
   Workspace shortcut: `Workspace.exe -s <server leaf> -m Realtime [-c <strategy>] -d Data`.
 - The CME box's config: `MirrorRole Local`, the same server name and mode, and each remote's address in
@@ -1547,7 +1558,7 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
 - Reversed, when the networks make a desk dialling the box easier: the box's config has `"ListenPort": 7400,
   "IPWhitelist": ["<each risk desk's IP>"]` and no `ConnectAddresses`; each desk's has `"ConnectAddresses": ["<CME box
   IP>:7400"]` and no `ListenPort` or `IPWhitelist`. One box listener serves every desk (each link is its own session).
-- A listening end accepts only `IPWhitelist` (`TcpLinkConnector.AcceptTcpLinks` closes any other connection at once; `MirrorConfig.ThrowIfInvalid` refuses to start a listener with the list empty). Why: on a Remote any new link replaces the live one, and the Local end then closes that desk's stand-ins, so the server cancels every remote order; an internet scanner touching the port would do that several times a day. Firewall the port to the same address too: links are still plain TCP, unauthenticated and
+- A listening end accepts only `IPWhitelist`, each entry one address or a CIDR range (`"10.10.0.0/16"` admits 10.10.*.*, for desks whose VPN address changes; keep the range as small as the VPN pool) (`TcpLinkConnector.AcceptTcpLinks` closes any other connection at once; `MirrorConfig.ThrowIfInvalid` refuses to start a listener with the list empty). Why: on a Remote any new link replaces the live one, and the Local end then closes that desk's stand-ins, so the server cancels every remote order; an internet scanner touching the port would do that several times a day. Firewall the port to the same address too: links are still plain TCP, unauthenticated and
   unencrypted for now.
 
 ### Residuals
@@ -1584,7 +1595,7 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
   next write to it about 330 ns). Only remote-desk orders trigger them, so the rate is a few tens a second while a remote
   trader is active; a 10 ms gap would cap it at 100 a second if a measurement on the CME box ever shows it matters.
 - The Local Mirror alerts every exception its loop catches, unthrottled: one that recurs every pass (1 ms) floods
-  Telegram, and a name that does not fit 128 characters under the Local root alerts once per `GuiList` (each second).
+  Telegram, and a name that does not fit 256 characters under the Local root alerts once per `GuiList` (each second).
 - Links are not encrypted or authenticated yet.
 - **Simulation, by design:** an algo restarted under the same name within one simulation run fails to start, because it
   deletes its audit files before connecting and that run's Logging still holds today's file open (`Persistance` keeps the

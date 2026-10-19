@@ -67,8 +67,8 @@ public enum ChannelDirection
 [RegisterJson]
 public struct SocketHeader
 {
-    public String128 ServerName;
-    public String128 ClientName;
+    public String256 ServerName;
+    public String256 ClientName;
     public Timestamp Timestamp;
     public int ClientId = -1;
     public int ClientProcessId;
@@ -79,8 +79,8 @@ public struct SocketHeader
 
     public SocketHeader(string serverName, string clientName, int[] clientToServerLengths, int[] serverToClientLengths, int clientProcessId)
     {
-        ServerName = new String128(serverName);
-        ClientName = new String128(clientName);
+        ServerName = new String256(serverName);
+        ClientName = new String256(clientName);
         Timestamp = Timestamp.UtcNow;
         ClientProcessId = clientProcessId;
 

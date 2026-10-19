@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using Tools;
 
 namespace Mirror;
@@ -24,7 +25,7 @@ public sealed class MirrorConfig
     public string ServerName = "";                      // the trading server's leaf name; the remote copies it under the same name
     public ClockMode ClockMode = ClockMode.Realtime;
     public int ListenPort;                              // > 0: accept a peer that dials in
-    public string[] IPWhitelist = [];                   // the only IP addresses a listening end accepts: the peer's (a Remote: the CME box's; a Local: each risk desk's)
+    public string[] IPWhitelist = [];                   // the only peers a listening end accepts, each an address or a CIDR range ("10.10.0.0/16"): the peer's (a Remote: the CME box's; a Local: each risk desk's)
     public string[] ConnectAddresses = [];              // "host:port", each dialled every second until connected
     public string DirectoriesRoot = "";                 // "" keeps S:\ (/mnt/S/); a relative folder is beside the executable ("Data" on a risk desk)
     public bool IsConsoleVisible = true;                // false: this end closes its console window at startup and writes Mirror.log beside the executable
@@ -49,7 +50,18 @@ public sealed class MirrorConfig
             throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: set ListenPort, ConnectAddresses or both in {mirrorConfigFullPath}");
         // Why: links are not authenticated, so an unknown peer must never get one: a listening Local end would give it order entry,
         // and on a Remote a new link replaces the live one, which cancels every remote order
-        if (ListenPort > 0 && (IPWhitelist.Length == 0 || !Array.TrueForAll(IPWhitelist, address => IPAddress.TryParse(address, out _))))
-            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: IPWhitelist is [{string.Join(", ", IPWhitelist)}], must list the IP addresses allowed to connect (on a Remote the CME box's address, on a Local each risk desk's); fill it in {mirrorConfigFullPath}");
+        if (ListenPort > 0 && (IPWhitelist.Length == 0 || !Array.TrueForAll(IPWhitelist, entry => TryParseIPNetwork(entry, out _))))
+            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: IPWhitelist is [{string.Join(", ", IPWhitelist)}], must list the addresses or ranges allowed to connect (\"10.172.13.228\", or \"10.10.0.0/16\" for 10.10.*.*; on a Remote the CME box's, on a Local each risk desk's); fill it in {mirrorConfigFullPath}");
+    }
+
+    // An IPWhitelist entry: one address (exactly that address) or a range in CIDR notation ("10.10.0.0/16" admits 10.10.*.*).
+    public static bool TryParseIPNetwork(string entry, out IPNetwork ipNetwork)
+    {
+        if (IPAddress.TryParse(entry, out IPAddress? ipAddress))
+        {
+            ipNetwork = new IPNetwork(ipAddress, ipAddress.AddressFamily == AddressFamily.InterNetwork ? 32 : 128);
+            return true;
+        }
+        return IPNetwork.TryParse(entry, out ipNetwork);
     }
 }

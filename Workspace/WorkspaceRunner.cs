@@ -63,7 +63,6 @@ internal sealed record WorkspaceRequest(string ServerName, string ClientName, Cl
 
 public static class WorkspaceRunner
 {
-    private static IReadOnlyList<WorkspaceRequest> s_startupRequests = [];
     private static IClassicDesktopStyleApplicationLifetime? s_desktopLifetime;
     private static Thread? s_uiThread;
     private static readonly object s_lock = new object();
@@ -78,7 +77,9 @@ public static class WorkspaceRunner
     {
         s_ownsContextManager = true;
         Thread.CurrentThread.Name = "Workspace-UI";
-        s_startupRequests = startupRequests;
+        lock (s_lock)
+            foreach (WorkspaceRequest startupRequest in startupRequests)
+                s_pendingQueue.Enqueue(startupRequest);
         StartAvalonia(Array.Empty<string>(), ShutdownMode.OnExplicitShutdown);
     }
 
@@ -200,14 +201,10 @@ public static class WorkspaceRunner
         lifetime.Start(args ?? Array.Empty<string>());
     }
 
-    // Hook called by App.axaml.cs when Avalonia engine is fully booted.
+    // Hook called by App.axaml.cs when Avalonia engine is fully booted. Every window, startup ones included, goes through the one queue.
     internal static void OnAppReady(IClassicDesktopStyleApplicationLifetime desktop)
     {
         s_desktopLifetime = desktop;
-
-        foreach (WorkspaceRequest startupRequest in s_startupRequests)
-            ProcessRequestToStartWorkspace(startupRequest, desktop);
-
         FlushQueuedWorkspaces(desktop);
     }
 
@@ -229,7 +226,15 @@ public static class WorkspaceRunner
         {
             Dispatcher.UIThread.Post(() =>
             {
-                ProcessRequestToStartWorkspace(request, desktop);
+                // Why: one window that cannot open (a strategy the server does not know) must not take the others down
+                try
+                {
+                    ProcessRequestToStartWorkspace(request, desktop);
+                }
+                catch (Exception exception)
+                {
+                    Console.WriteLine($"WorkspaceRunner: {request.ClientName} could not open: {exception.Message}");
+                }
             });
         }
     }

@@ -2,9 +2,9 @@
   "MirrorRole": "Remote",
   "ServerName": "CME_NewRelease",
   "ClockMode": "Realtime",
-  "ListenPort": 47793,
-  "IPWhitelist": ["10.172.13.228"],   /// only the CME box may connect
-  "ConnectAddresses": [],
+  "ListenPort": 0,
+  "IPWhitelist": [],
+  "ConnectAddresses": ["10.172.13.228:47793"],
   "DirectoriesRoot": "Data",
   "IsConsoleVisible": true
 }

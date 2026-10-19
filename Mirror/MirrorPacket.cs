@@ -64,7 +64,7 @@ public struct MirrorGui()
 {
     public int ClientId = -1;
     public int GuiProcessId;        // a new GUI process under a name starts clean: what the last one left is cancelled
-    public String128 ClientName;    // relative to Context.DirectoriesRoot: each end puts its own root in front
+    public String256 ClientName;    // relative to Context.DirectoriesRoot: each end puts its own root in front
 }
 
 /// Builds and reads the variable-length packets. Cold path: allocates per packet, in a process that holds no hot path.
@@ -106,15 +106,15 @@ public static class MirrorPacket
     }
 
     /// One path: made relative to Context.DirectoriesRoot to travel, or put back under it on arrival; an empty name stays empty.
-    public static String128 RewriteName(in String128 name, bool isTravelling)
+    public static String256 RewriteName(in String256 name, bool isTravelling)
     {
         string path = name.ToString();
         if (path.Length == 0)
             return name;
         string rewrittenPath = isTravelling ? Path.GetRelativePath(Context.DirectoriesRoot, path) : Context.DirectoriesRoot / path;
-        // Why: names are 128-character fields, and on a remote the install folder is part of every one
-        if (rewrittenPath.Length > 128)
-            throw new InvalidDataException($"MirrorPacket.RewriteName: {rewrittenPath} is {rewrittenPath.Length} characters; names must fit 128: move the Mirror's folder nearer the drive root");
-        return new String128(rewrittenPath);
+        // Why: names are 256-character fields, and on a remote the install folder is part of every one
+        if (rewrittenPath.Length > 256)
+            throw new InvalidDataException($"MirrorPacket.RewriteName: {rewrittenPath} is {rewrittenPath.Length} characters; names must fit 256: move the Mirror's folder nearer the drive root");
+        return new String256(rewrittenPath);
     }
 }

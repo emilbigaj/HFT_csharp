@@ -46,6 +46,13 @@ public enum TickType : byte
     TradingStatus = 20,
 }
 
+public static class TickTypeExtensions
+{
+    // A record stored as one 64-byte Tick (header plus fixed fields), not a variable-length book update: Trade, Settlement, TradingStatus.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IsTick(this TickType tickType) => tickType == TickType.Trade || tickType == TickType.Settlement || tickType == TickType.TradingStatus;
+}
+
 
 [RegisterJson]
 public enum TradingStatus : byte
@@ -130,6 +137,7 @@ public struct Tick
         {
             TickType.Trade => Unsafe.SizeOf<Trade>(),
             TickType.Settlement => Unsafe.SizeOf<Settlement>(),
+            TickType.TradingStatus => Unsafe.SizeOf<TradingStatusUpdate>(),
             _ => throw new NotSupportedException($"Unsupported tick type: {TickHeader.TickType}")
         };
     }

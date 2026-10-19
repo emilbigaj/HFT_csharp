@@ -252,7 +252,8 @@ public class TickHistoryWriter : IDisposable
                 TickHistory.DeltaTrade(ref _tomorrow, ref Unsafe.As<Tick, Trade>(ref copy));
                 break;
             case TickType.Settlement:
-                TickHistory.DeltaSettlement(ref _tomorrow, ref Unsafe.As<Tick, Settlement>(ref copy));
+            case TickType.TradingStatus:
+                TickHistory.DeltaHeader(ref _tomorrow, ref copy.TickHeader);   // header-only: their other fields are stored as they are
                 break;
             default:
                 throw new NotSupportedException($"WriteTick does not support TickType {copy.TickHeader.TickType}");
@@ -630,16 +631,6 @@ public class TickHistory
         DeltaLevel(ref tickHistoryHeader, ref trade.Level);
     }
 
-    internal static void RestoreSettlement(ref TickHistoryHeader tickHistoryHeader, ref Settlement settlement)
-    {
-        RestoreTickHeader(ref tickHistoryHeader, ref settlement.TickHeader);
-    }
-
-    internal static void DeltaSettlement(ref TickHistoryHeader tickHistoryHeader, ref Settlement settlement)
-    {
-        DeltaHeader(ref tickHistoryHeader, ref settlement.TickHeader);
-    }
-
     // 48 bits: PriorityId occupies bytes 2-7 of Order's packed word (byte 0 side, byte 1 action)
     private const ulong PriorityId48Mask = (1UL << 48) - 1;
 
@@ -722,10 +713,9 @@ public class TickHistory
             ref Trade trade = ref MemoryMarshal.AsRef<Trade>(dst);
             RestoreTrade(ref dayHeader, ref trade);
         }
-        else if (tick.TickHeader.TickType == TickType.Settlement)
+        else if (tick.TickHeader.TickType == TickType.Settlement || tick.TickHeader.TickType == TickType.TradingStatus)
         {
-            ref Settlement settlement = ref MemoryMarshal.AsRef<Settlement>(dst);
-            RestoreSettlement(ref dayHeader, ref settlement);
+            RestoreTickHeader(ref dayHeader, ref tick.TickHeader);   // header-only, as WriteTick stored them
         }
         else
         {
@@ -835,8 +825,8 @@ public class TickHistory
         }
         ref TickHeader tickHeader = ref MemoryMarshal.AsRef<TickHeader>(dst);
         tickType = tickHeader.TickType;
-        // Trade, Settlement, and any other Tick-shaped (Size=64) types share one decode path.
-        if (tickHeader.TickType == TickType.Trade || tickHeader.TickType == TickType.Settlement)
+        // Every Tick-shaped (64-byte) record shares one decode path.
+        if (tickHeader.TickType.IsTick())
         {
             int sizeOfTick = Unsafe.SizeOf<Tick>();
             bytesRead = ReadExact(decompressionStream, dst.Slice(sizeOfTickHeader, sizeOfTick - sizeOfTickHeader));

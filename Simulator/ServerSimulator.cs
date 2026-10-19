@@ -87,6 +87,11 @@ public class InstrumentSimulator
         ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Tick(ref Unsafe.As<TradingStatusUpdate, Tick>(ref tradingStatusUpdate));
     }
 
+    // The exchange's own announced status, replayed from a .TradingStatus tick history. Not applied yet: the session schedule and the crossed-book guess still set the status (see spec.txt).
+    public void OnRecordedTradingStatus(in TradingStatusUpdate tradingStatusUpdate)
+    {
+    }
+
     // The session's hours set the status; in session, a crossed book is the exchange's pre-open auction (see Spec.md).
     public void OnSessionChanged(Timestamp timestamp, TradingStatus sessionTradingStatus)
     {
@@ -162,13 +167,6 @@ public class InstrumentSimulator
         _inOnMarketByOrder = true;
         if (mbo.TickHeader.TickType == TickType.MarketByOrderSnapshot)
         {
-            // Each snapshot starts a new PriorityId sequence: both sides restart from its highest id and re-stamp their live queues (see spec.txt).
-            ulong snapshotPriorityId = 0;
-            foreach (Order order in mbo.BidsAsSpan(src)) snapshotPriorityId = Math.Max(snapshotPriorityId, order.PriorityId);
-            foreach (Order order in mbo.AsksAsSpan(src)) snapshotPriorityId = Math.Max(snapshotPriorityId, order.PriorityId);
-            Buys.OnMarketByOrderSnapshot(mbo.BidsAsSpan(src), snapshotPriorityId);
-            Sells.OnMarketByOrderSnapshot(mbo.AsksAsSpan(src), snapshotPriorityId);
-
             // hooks stay silent (Clear does not report removals); the derived snapshot diffs through the MBP path instead
             _marketByPriceByOrder.ApplySnapshot(src);
 
@@ -244,42 +242,19 @@ public class InstrumentSimulator
         }
     }
 
+    // Sets a level in the update being built. The list is in feed order, not price order (an MBO update lists levels in event order), so the price is looked for everywhere: one entry per price, never two.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void OverwriteBid(ref StackList<Level> bids, Level bid)
+    private static void OverwriteLevel(ref StackList<Level> levels, Level level)
     {
-        for(int i = 0; i < bids.Count; i++)
+        for (int levelIndex = 0; levelIndex < levels.Count; levelIndex++)
         {
-            if (bids[i].Ticks == bid.Ticks)
+            if (levels[levelIndex].Ticks == level.Ticks)
             {
-                bids[i] = bid;
-                return;
-            }
-            else if (bids[i].Ticks < bid.Ticks) // larger bids go infront
-            {
-                bids.InsertAt(i, bid);
+                levels[levelIndex] = level;
                 return;
             }
         }
-        bids.Add(bid);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void OverwriteAsk(ref StackList<Level> asks, Level ask)
-    {
-        for (int i = 0; i < asks.Count; i++)
-        {
-            if (asks[i].Ticks == ask.Ticks)
-            {
-                asks[i] = ask;
-                return;
-            }
-            else if (asks[i].Ticks > ask.Ticks) // smallers asks go infront
-            {
-                asks.InsertAt(i, ask);
-                return;
-            }
-        }
-        asks.Add(ask);
+        levels.Add(level);
     }
 
     private void OnMarketByPriceUpdate(in MarketByPrice update, ReadOnlySpan<byte> src)
@@ -329,7 +304,7 @@ public class InstrumentSimulator
         {
             {
                 ref QueueManager firstBuys = ref Buys.QueueManagers.FirstRef;
-                int askMask = _askMask + Buys.CrossMask;
+                int askMask = _askMask;
                 SideByPrice64.Enumerator asks = _marketByPrice64.Asks.GetEnumerator();
                 Level ask;
                 while (!Unsafe.IsNullRef(in firstBuys) && asks.MoveNext() && (ask = asks.Current).Ticks <= firstBuys.Ticks)
@@ -351,7 +326,7 @@ public class InstrumentSimulator
             }
             {
                 ref QueueManager firstSells = ref Sells.QueueManagers.FirstRef;
-                int bidMask = _bidMask + Sells.CrossMask;
+                int bidMask = _bidMask;
                 var bids = _marketByPrice64.Bids.GetEnumerator();
                 Level bid;
 
@@ -377,11 +352,11 @@ public class InstrumentSimulator
         /// RESTORE DEPTH AT PRICES WHERE USER ORDERS HAVE BEEN REMOVED
         
         foreach (int ticks in Buys.TicksRemoved)
-            OverwriteBid(ref _bids, new Level(ticks, _marketByPrice64.GetBidQuantity(ticks)));
+            OverwriteLevel(ref _bids, new Level(ticks, _marketByPrice64.GetBidQuantity(ticks)));
         Buys.TicksRemoved.Clear();
 
         foreach (int ticks in Sells.TicksRemoved)
-            OverwriteAsk(ref _asks, new Level(ticks, _marketByPrice64.GetAskQuantity(ticks)));
+            OverwriteLevel(ref _asks, new Level(ticks, _marketByPrice64.GetAskQuantity(ticks)));
         Sells.TicksRemoved.Clear();
 
         /// FIRST REMOVE MARKET DEPTH WITH MASKS TO CORRECT FOR WHEN WE HIT MARKET OR BIDS CROSSED ASKS
@@ -398,7 +373,7 @@ public class InstrumentSimulator
                 int bidMasked = Math.Min(bidQuantity, bidMask);
                 bidQuantity -= bidMasked;
                 bidMask -= bidMasked;
-                OverwriteBid(ref _bids, new Level(bid.Ticks, bidQuantity));
+                OverwriteLevel(ref _bids, new Level(bid.Ticks, bidQuantity));
             }
             _minMaskBid = _bidMask == 0 ? int.MaxValue : _minMaskBid; // reset min mask bid
         }
@@ -416,7 +391,7 @@ public class InstrumentSimulator
                 int askMasked = Math.Min(askQuantity, askMask);
                 askQuantity -= askMasked;
                 askMask -= askMasked;
-                OverwriteAsk(ref _asks, new Level(ask.Ticks, askQuantity));
+                OverwriteLevel(ref _asks, new Level(ask.Ticks, askQuantity));
             }
             _maxMaskAsk = _askMask == 0 ? int.MinValue : _maxMaskAsk;
         }
@@ -441,7 +416,7 @@ public class InstrumentSimulator
 
             // Add our UserQuantity to the ADJUSTED quantity
             adjustedQty += queueManager.UserQuantity;
-             OverwriteBid(ref _bids, new Level(queueManager.Ticks, adjustedQty));
+             OverwriteLevel(ref _bids, new Level(queueManager.Ticks, adjustedQty));
         }
 
         // --- ASKS ---
@@ -462,7 +437,7 @@ public class InstrumentSimulator
             }
             // Add our UserQuantity to the Mask adjusted quantity
             adjustedQty += queueManager.UserQuantity;
-            OverwriteAsk(ref _asks, new Level(queueManager.Ticks, adjustedQty));
+            OverwriteLevel(ref _asks, new Level(queueManager.Ticks, adjustedQty));
         }
 
         // Why before the book: both share the instrument's queue, so the client hears Auction before it sees the crossed book
@@ -470,7 +445,6 @@ public class InstrumentSimulator
         FromExchangeToNic_MarketByPriceAggregatedUpdate(in update.TickHeader, _bids, _asks);
 
     }
-
 
     protected void FromExchangeToNic_MarketByPriceAggregatedUpdate(in TickHeader header, StackList<Level> bids, StackList<Level> asks)
     {
@@ -1047,6 +1021,10 @@ public class ExchangeSimulator
         {
             ServerSimulator.FromExchangeToNicToClient_Tick(ref tick);
         }
+        else if (tick.TickHeader.TickType == TickType.TradingStatus)
+        {
+            _instrumentSimulators[tick.TickHeader.InstrumentId].OnRecordedTradingStatus(in tick.AsTradingStatusUpdate());
+        }
         else
         {
             throw new NotSupportedException($"ExchangeSimulator.OnTick does not support TickType {tick.TickHeader.TickType}");
@@ -1192,7 +1170,7 @@ public class ServerSimulator
         Console.WriteLine($"Server Simulator Running PID: {Environment.ProcessId}");
         ServerHeader serverHeader = new ServerHeader()
         {
-            ServerName = new String128(ServerName),
+            ServerName = new String256(ServerName),
             InstrumentsCapacity = s_instrumentsCapacity,
             OrdersPerClient = s_ordersPerClient,
         };
@@ -1516,11 +1494,30 @@ public class ServerSimulator
                 }
             }
             _server.OnInstrumentHeader(in header128);
-            foreach(InstrumentDetail instrumentDetail in instrumentDetails.Schedule)
+            foreach (InstrumentDetail instrumentDetail in instrumentDetails.Schedule)
             {
-                Clock.AddReminder(new Reminder(instrumentDetail.Timestamp, ts =>
+                Console.WriteLine(instrumentDetails.Symbol);
+                Console.WriteLine(instrumentDetail.ToString());
+                Clock.AddReminder(new Reminder(instrumentDetail.Timestamp, timestamp =>
                 {
-                    throw new NotImplementedException();
+                    // Step 1: the server's header row as it stands
+                    ref SharedArrayEntry<InstrumentHeader128> header128Entry = ref ServerContext.GetInstrumentHeader(instrumentHeaderId);
+                    InstrumentHeader128 changedHeader128 = header128Entry.Read();
+                    ref InstrumentHeader changedHeader = ref changedHeader128.AsInstrumentHeader();
+
+                    // Step 2: the scheduled change
+                    switch (instrumentDetail)
+                    {
+                        case InstrumentDetail<double> tickSize when instrumentDetail.Field == nameof(InstrumentDetails.TickSize):
+                            changedHeader.TickSize = tickSize.Value;
+                            changedHeader.InverseTickSize = (double)(1.0m / (decimal)tickSize.Value);   // Why: as InstrumentDetails.TickSize computes it, so RoundToTicks agrees
+                            break;
+                        default:
+                            throw new NotImplementedException($"ServerSimulator.OnInstrumentDetails: a scheduled {instrumentDetail.Field} change is not implemented");
+                    }
+
+                    // Step 3: publish it
+                    header128Entry.Write(changedHeader128);
                 }));
             }
         }

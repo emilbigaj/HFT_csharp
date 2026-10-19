@@ -125,7 +125,7 @@ namespace Data
                 if (queue.TryPeek(out ReadOnlySpan<byte> src))
                 {
                     tickType = MemoryMarshal.AsRef<TickHeader>(src).TickType;
-                    if (tickType == TickType.Trade || tickType == TickType.Settlement)
+                    if (tickType.IsTick())
                         src.Slice(0, Unsafe.SizeOf<Tick>()).CopyTo(dst);
                     else if (tickType == TickType.MarketByPriceSnapshot || tickType == TickType.MarketByPriceUpdate)
                     {
@@ -502,7 +502,7 @@ namespace Data
                     dst = new Span<byte>(writePtr + sizeof(int), bytesNeeded);
                     ref TickHeader tickHeader = ref MemoryMarshal.AsRef<TickHeader>(_header.AsSpan());
 
-                    if (tickHeader.TickType == TickType.Trade || tickHeader.TickType == TickType.Settlement)
+                    if (tickHeader.TickType.IsTick())
                     {
                         _header.AsSpan().Slice(0, Unsafe.SizeOf<Tick>()).CopyTo(dst);
                         ReadTick(dst);

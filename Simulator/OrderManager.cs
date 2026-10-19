@@ -132,31 +132,6 @@ public class QueueManager
         return quantityAhead;
     }
 
-    // levelOrders: this level's snapshot orders ascending by PriorityId, i.e. head to tail. Each market blob takes the id of the
-    // snapshot order where its cumulative quantity lands; each user order takes the id of the blobs in front of it.
-    public void RestampPriorityIds(System.Collections.Generic.List<(ulong PriorityId, int Quantity)> levelOrders, ulong snapshotPriorityId)
-    {
-        ulong boundaryPriorityId = levelOrders.Count > 0 ? levelOrders[0].PriorityId - 1 : snapshotPriorityId;
-        int marketQuantity = 0;
-        int snapshotQuantity = 0;
-        int levelOrderIndex = 0;
-        foreach (ref NodeList<SimOrder>.Node node in Orders.Nodes)
-        {
-            ref SimOrder order = ref node.Item;
-            if (!order.IsUserOrder)
-            {
-                marketQuantity += order.Quantity;
-                while (snapshotQuantity < marketQuantity && levelOrderIndex < levelOrders.Count)
-                {
-                    snapshotQuantity += levelOrders[levelOrderIndex].Quantity;
-                    boundaryPriorityId = levelOrders[levelOrderIndex].PriorityId;
-                    levelOrderIndex++;
-                }
-            }
-            order.PriorityId = boundaryPriorityId;
-        }
-    }
-
     public void OnTrade(bool isHistoricalTrade, in Trade trade, ref int marketQuantityFilled, ref int userQuantityFilled)
     {
         bool isAddGhost = trade.Level.Ticks == Ticks && isHistoricalTrade;
@@ -190,8 +165,6 @@ public class QueueManager
                 marketQuantityFilled += fill;
                 if (!isAddGhost)
                     ReduceGhost(fill);
-                if (!isHistoricalTrade && InstrumentSimulator.ExchangeSimulator.MaskCrossed)
-                    _orderManager.CrossMask += fill;
             }
 
             if (order.Quantity == 0)
@@ -217,22 +190,11 @@ public class QueueManager
         PublishQuantityAhead();
     }
 
-    private int _totalMarketQuantity = 0;
-    private double _inverseTotalMarketQuantity = 0;
-
     private void AddGhost()
     {
         int newGhost = Math.Max(_traded + MarketQuantity - SideByPrice.GetQuantity(Ticks), 0);
-        int ghostAdded = newGhost - Ghost;
-
-        if (ghostAdded <= 0)
-            return;
-
-        int totalMarketQuantity = SideByPrice.Quantity;
-
-        _totalMarketQuantity = (int)((Ghost * _totalMarketQuantity + ghostAdded * totalMarketQuantity) * double.ReciprocalEstimate(Ghost + ghostAdded))+1;
-        _inverseTotalMarketQuantity = double.ReciprocalEstimate(_totalMarketQuantity); //acceptable accuracy
-        Ghost = newGhost;
+        if (newGhost > Ghost)
+            Ghost = newGhost;
     }
 
     private void ReduceGhost(int quantity)
@@ -243,12 +205,13 @@ public class QueueManager
     }
 
     private double _accumulatedGhostDecay = 0;
+    // Each same-side delta returns Ghost's share of the side's current depth, remainder carried (see spec.txt).
     public void DecayGhost(int quantity)
     {
-        if (Ghost <= 0)
+        if (Ghost <= 0 || SideByPrice.Quantity <= 0)
             return;
 
-        double ghostReduceExact = Ghost * (Math.Abs(quantity) * _inverseTotalMarketQuantity);
+        double ghostReduceExact = Ghost * (Math.Abs(quantity) * double.ReciprocalEstimate(SideByPrice.Quantity)); //acceptable accuracy
         _accumulatedGhostDecay += ghostReduceExact;
         int ghostReduce = Math.Min((int)_accumulatedGhostDecay, Ghost);
         _accumulatedGhostDecay -= ghostReduce; // this is the remainder that will be cancelled next time
@@ -427,8 +390,6 @@ public class QueueManager
         Ghost = 0;
         _accumulatedGhostDecay = 0;
         _traded = 0;
-        _totalMarketQuantity = 0;
-        _inverseTotalMarketQuantity = 1;
         UserQuantity = 0;
         MarketQuantity = 0;
     }
@@ -441,25 +402,6 @@ public class OrderManager
     public void OnPriorityId(ulong priorityId)
     {
         PriorityId = Math.Max(PriorityId, priorityId);
-    }
-
-    // A snapshot starts a new PriorityId sequence: restart the baseline from it and re-stamp every live queue against its level (see spec.txt).
-    public void OnMarketByOrderSnapshot(ReadOnlySpan<Order> orders, ulong snapshotPriorityId)
-    {
-        PriorityId = snapshotPriorityId;
-        System.Collections.Generic.List<(ulong PriorityId, int Quantity)> levelOrders = new System.Collections.Generic.List<(ulong PriorityId, int Quantity)>();
-        foreach (ref NodeList<QueueManager>.Node node in QueueManagers.Nodes)
-        {
-            QueueManager queueManager = node.Item;
-            levelOrders.Clear();
-            foreach (Order order in orders)
-            {
-                if (order.OrderAction == MarketByOrderAction.Add && order.Level.Ticks == queueManager.Ticks)
-                    levelOrders.Add((order.PriorityId, order.Level.Quantity));
-            }
-            levelOrders.Sort((left, right) => left.PriorityId.CompareTo(right.PriorityId));
-            queueManager.RestampPriorityIds(levelOrders, snapshotPriorityId);
-        }
     }
 
     private readonly ArrayList<QueueManager> _pool = new ArrayList<QueueManager>(16);
@@ -489,7 +431,6 @@ public class OrderManager
 
     public readonly int Sign;
     public readonly Side Side;
-    public int CrossMask { get; set;  } = 0;
 
     // Custom LinkedList class from Tools for better performance, avoids allocations, avoids pointer chasing, and allows delete during iteration
     protected internal NodeList<QueueManager> QueueManagers { get; } = new NodeList<QueueManager>();
@@ -544,8 +485,6 @@ public class OrderManager
 
     public void Clear()
     {
-        CrossMask = 0;
-        _accumulatedCrossMaskDecay = 0;
         foreach (ref NodeList<QueueManager>.Node node in QueueManagers.Nodes)
         {
             RemoveQueueManager(in node, true);
@@ -669,6 +608,7 @@ public class OrderManager
     }
 
 
+    // Fills our queues at and through the trade's price. Returns the quantity it filled there, market and ours: what a cross has spent of the opposite side.
     public int OnTrade(bool isHistoricalTrade, Trade trade)
     {
         int marketQuantityFilled = 0;
@@ -709,28 +649,11 @@ public class OrderManager
         {
             InstrumentSimulator.ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Trade(new Trade(trade.TickHeader.InstrumentId, trade.TickHeader.ExchangeTimestamp, trade.TickHeader.SendingTimestamp, trade.TickHeader.NicTimestamp, trade.Level.Ticks, trade.Level.Quantity - marketQuantityFilled, trade.Direction));
         }
-        return userQuantityFilled;
-    }
-
-    private double _accumulatedCrossMaskDecay = 0;
-
-    // Makers we crossed refill with same-side book activity: each delta returns CrossMask's share of the side's depth (see spec.txt).
-    private void DecayCrossMask(int quantity)
-    {
-        if (CrossMask <= 0 || SideByPrice64.Quantity <= 0)
-            return;
-
-        _accumulatedCrossMaskDecay += CrossMask * (Math.Abs(quantity) * double.ReciprocalEstimate(SideByPrice64.Quantity)); //acceptable accuracy
-        int crossMaskReduce = Math.Min((int)_accumulatedCrossMaskDecay, CrossMask);
-        _accumulatedCrossMaskDecay -= crossMaskReduce; // this is the remainder that will be cancelled next time
-        CrossMask -= crossMaskReduce;
-        if (CrossMask == 0)
-            _accumulatedCrossMaskDecay = 0; // a spent CrossMask carries no remainder into the next one
+        return marketQuantityFilled + userQuantityFilled;
     }
 
     public void OnMarketByPriceByOrderDelta(ulong priorityId, int ticks, int delta)
     {
-        DecayCrossMask(delta);
         foreach (ref NodeList<QueueManager>.Node node in QueueManagers.Nodes)
         {
             QueueManager queueManager = node.Item;
@@ -744,7 +667,6 @@ public class OrderManager
 
     public void OnMarketByPriceDelta(int ticks, int quantity)
     {
-        DecayCrossMask(quantity);
         foreach (ref NodeList<QueueManager>.Node node in QueueManagers.Nodes)
         {
             QueueManager queueManager = node.Item;

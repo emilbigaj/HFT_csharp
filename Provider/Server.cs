@@ -91,7 +91,7 @@ public class Server : IDisposable
 
     public static readonly ServerHeader DefaultServerHeader = new ServerHeader()
     {
-        ServerName = new String128("ServerName"),
+        ServerName = new String256("ServerName"),
         Timestamp = new Timestamp(0),
         InstrumentsCapacity = 4096,
         InstrumentsCount = 0,

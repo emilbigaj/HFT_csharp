@@ -41,7 +41,7 @@ namespace Simulator
 
                 Sells.OnMarketByPriceDelta(ticks, delta);
 
-                int mask = Buys.CrossMask + _askMask;
+                int mask = _askMask;
                 foreach (Level ask in MarketByPrice64.EnumerateAsks())
                 {
                     int crossQuantity = ask.Quantity;

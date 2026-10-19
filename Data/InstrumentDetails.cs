@@ -38,6 +38,11 @@ public abstract class InstrumentDetail
     public string Field { get; set; } = string.Empty;
     [JsonIgnore]
     public object Value { get; set; } = null!;   // boxed view; the typed leaf property is the JSON one
+
+    public override string ToString()
+    {
+        return Json.Serialize(this);
+    }
 }
 
 // Deliberately unregistered: open generics can't be source-gen registered; only the closed leaves are.

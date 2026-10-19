@@ -4,6 +4,85 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-20 — Names are 256 bytes; IPWhitelist ranges; Disconnect polls instead of Join
+
+- `Socket/Socket.cs`, `Provider/Allocate.cs`, `Provider/Context.cs`, `Provider/Server.cs`, `Simulator/ServerSimulator.cs`,
+  `Mirror/MirrorPacket.cs`, `Mirror/LocalMirror.cs`, `Mirror/RemoteMirror.cs` — `SocketHeader.ServerName/ClientName`,
+  `ServerHeader.ServerName`, `AllocateClient.ClientName` and `MirrorGui.ClientName` are `String256` (were `String128`);
+  `ServerHeader` is 305 bytes (`Persistance` @300, `ServerProcessId` @301). Why: a name is the full folder path, and a
+  desk's install folder is part of every name it sends, so 128 ran out on ordinary desk folders. C++: P30, MUST PORT,
+  deploy in lockstep with fresh shared memory (the Mirror's layout hash changes).
+- `Mirror/MirrorConfig.cs`, `Mirror/TcpLink.cs` — an `IPWhitelist` entry may be a CIDR range (`"10.10.0.0/16"` admits
+  10.10.*.*), for desks on a VPN whose addresses change; a plain address still means exactly that address.
+- `Workspace/Workspace.axaml.cs` — `Disconnect` waits for its client thread with `Thread.Sleep(1)` polls instead of
+  `Join`: the same STA message pumping as the start-up freeze, here letting another window's refresh start a second
+  rebuild inside the first after a server restart.
+- Verified: whole solution builds; a scratch check of the whitelist parser (exact address, /16, /24, /8, and refusals of
+  `10.10.*`, `/33`, empty, text); an end-to-end run (simulated server, Local and Remote Mirror on loopback, desk Workspace
+  with two windows) with ~185-character names and a `127.0.0.0/8` whitelist: both windows connected and loaded. The
+  `Disconnect` path (a server restart) was not exercised.
+- Guides: the folder-path limit reads 256.
+
+---
+
+## 2026-10-19 — Desk Workspace froze with several windows (NativeAOT): no kernel wait in StartBackgroundThread
+
+- `Tools/LowLatency.cs` — `StartBackgroundThread` waits for its thread to start by spinning on a flag instead of a
+  `ManualResetEventSlim`. Why: a desk `WorkspaceConfig` with several windows froze the NativeAOT `Workspace.exe` at random.
+  Native stacks (scratch dbghelp walker against the AOT PDB) showed the UI thread in `Workspace.Connect` →
+  `StartBackgroundThread` → `ManualResetEventSlim.Wait` → `CoWaitForMultipleHandles`, with every client thread already
+  running: a kernel wait on the STA UI thread pumps messages under NativeAOT, Avalonia re-entered and built the next
+  window inside the wait, and the nested wait consumed the outer one's wake-up. 2 of 7 AOT starts loaded every window
+  before, 10 of 10 after; the JIT build never hung. Every caller keeps "running and pinned on return".
+- `Workspace/WorkspaceRunner.cs` — startup requests go into the same queue as later ones (`s_startupRequests` is gone), and
+  a window that cannot open (a strategy unknown to the server) is printed and skipped instead of ending the Workspace.
+  An earlier entry today blamed Avalonia's XAML load before the loop for the freeze; that was wrong, and posting the
+  windows alone did not fix it.
+- Open: `Workspace.Disconnect` joins its client thread on the UI thread (a desk rebuild), the same kind of wait.
+  C++: nothing to port.
+
+---
+
+## 2026-10-19 — Recorded trading status: plumbing (applying it pending)
+
+- `Data/Tick.cs` — `TickTypeExtensions.IsTick()`: the "one 64-byte Tick record" decision, written five times as
+  `Trade || Settlement` (TickHistory decode, both TickQueue paths, DataSimulator), now in one place and including
+  `TradingStatus`; `Tick.SizeOf` knows `TradingStatusUpdate`.
+- `Data/TickHistory.cs` — `WriteTick`/`ReadTick` store Settlement and TradingStatus header-only in one shared case;
+  `DeltaSettlement`/`RestoreSettlement` (one-line wrappers) are gone.
+- `Simulator/ServerSimulator.cs` — `ExchangeSimulator.OnTick` routes a TradingStatus tick to
+  `InstrumentSimulator.OnRecordedTradingStatus`, which does nothing yet (the status is not applied) until the final piece is
+  written. A `{Symbol}.TradingStatus.Tick.zstd` beside the MBO file is found by the
+  existing search and merged by time. Why: the session schedule has no holidays or halts and the crossed-book guess
+  flickers through a pre-open (2025-11-28). Verified: a three-update file written with `TickHistoryWriter` reads back
+  identical (status, exchange and NIC time, instrument) through `TickHistoryReader`. C++: nothing to port (simulator and
+  tick history are C#-only).
+
+---
+
+## 2026-10-19 — Simulator: one Mask per side; Ghost decays against the current depth
+
+- `Simulator/OrderManager.cs`, `Simulator/ServerSimulator.cs`, `Simulator/Program.cs` — `OrderManager.CrossMask` is
+  gone: a cross adds everything it fills on our side (our orders and the Ghost market ahead of them) to the opposite
+  side's `_bidMask`/`_askMask` (`OrderManager.OnTrade` returns market + user filled), which decays only on historical
+  trades. Why: CrossMask decayed on same-side book activity and was subtracted only during cross processing, not at
+  publication or in Take, so the published book showed spent asks beside our own bid at the same price: a locked book
+  with status Open, which made Testing's `Make` throw "Self-crossing targets" (reproduced on 6J and 6A, 2025-11-25).
+  Trades, not book activity, are the clock: a maker pegged to the mid shows book activity at every mid move without
+  its liquidity returning. One trade of Q now releases at most Q, not Q from each of two masks.
+- `QueueManager.DecayGhost` divides by the side's current depth instead of a Ghost-weighted depth snapshot taken when
+  Ghost was added; the snapshot fields are gone.
+- `Simulator/spec.txt` — Ledger Catalog, Ghost Decay, Crossed Market Sweeps and both lifecycle tables rewritten; Ghost
+  decays on its own side (the text said "anywhere in the book", the code never did).
+- Simulated fills change: after a cross the opposite side shows less depth until real trades eat the mask. C++: nothing
+  to port (no C++ simulator).
+- `Simulator/ServerSimulator.cs` — `OverwriteBid`/`OverwriteAsk` (mirror copies) are one `OverwriteLevel` that finds the
+  price anywhere in the update being built. They assumed price order and inserted before the first worse price, but the
+  list starts in feed order (MBO: event order), so a masked level could be published ahead of its own raw entry and the
+  raw quantity won at the client: seen as `bids[ 12771x0 12770x-1 12771x1]` on 6J, a masked bid beside our ask at 12771.
+
+---
+
 ## 2026-10-17 — File menu: New Server Workspace
 
 - `Workspace/Workspace.axaml(.cs)` — "New Global Workspace" is "New Server Workspace" (handler

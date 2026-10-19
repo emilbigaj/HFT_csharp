@@ -5,7 +5,7 @@ do not need the C# conversation, `patch_log.md` or `Spec.md` to act on it. C# is
 checked against the C# working tree on 2026-10-13.
 
 - **Baseline:** C# commit `9d6f3ab` ("Align with C++ (csharp_alignment_report_2026-10-05)"), which the C++ branch
-  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17).
+  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17, P30 and C20 on 2026-10-20).
 - **Supersedes** `cpp_alignment_report_2026-10-07.md`, which was written piecemeal from 2026-10-07 to 2026-10-12 and never
   handed over. Everything in it that still holds is folded in here; what later work made stale is listed in §9. Read this
   report, not that one. Earlier reports (`2026-10-04` and before) stay valid for their own items, except where §9 says
@@ -15,7 +15,7 @@ checked against the C# working tree on 2026-10-13.
 
 Words used throughout:
 
-- **Name**: a client's name (`SocketHeader.ClientName`, a path, at most 128 characters). Under `Persistance` a name keeps
+- **Name**: a client's name (`SocketHeader.ClientName`, a path, at most 256 characters since P30). Under `Persistance` a name keeps
   its client id for the whole week.
 - **Slot**: one of a client's 64 order rows (`OrderId.LocalIndex` 0..63). Each slot has an `OrderTarget` row (written by the
   client), an `OrderState` row (written by the server) and an `OrderRisk` row.
@@ -702,7 +702,7 @@ Client names the C++ server now sees (all from C# Workspaces and stand-ins):
   still holds the old `_GUI` name's client id until the weekly clients file is emptied on Monday.
 - On a remote desk: `<principal>_GUI<n>@<machine>` (Windows machine names, up to 15 characters). These connect to the C++
   server as stand-ins on the CME box (§8, C1).
-- A name is still at most 128 characters including its folder path.
+- A name is at most 256 characters including its folder path (128 before P30).
 
 What the C++ server must do: accept these names. Region names are sanitised the same way on both sides: every character
 outside `[A-Za-z0-9_.-]` becomes `_` (C# `Tools.Sanitize`, written to match C++ `isalnum` in the "C" locale), so `@` maps
@@ -1039,6 +1039,25 @@ array inside its `RiskLayer` (`OrderRisk[OrdersCapacity]`, indexed by `OrderId.G
 - **Hot-path cost:** none expected (a row is one plain array element, 64 bytes apart instead of 128, with no shared-memory
   entry step). Not benchmarked, by the user's call.
 
+### P30. MUST PORT: names are 256 bytes (C# `Socket/Socket.cs`, `Provider/Allocate.cs`, `Provider/Context.cs`, `Provider/Server.cs`; 2026-10-20)
+
+Client and server names are full folder paths, and a risk desk's install folder is part of every name it sends, so 128
+bytes ran out on ordinary desk folders. The name fields are now `String256` (fixed 256 bytes, UTF-8, zero-padded, as
+`String128` was). Symbols and every other `String128` are unchanged (they live inside the 128-byte instrument header).
+
+| Struct (C++ file) | Field | Before | After |
+|---|---|---|---|
+| `SocketHeader` (`Socket.hpp`), the `ClientSocketHeaders` rows | `ServerName`, `ClientName` | 128 + 128 | 256 + 256; every later field moves +256 |
+| `ServerHeader` (`Provider/Allocate.hpp`), the `ServerHeader` box | `ServerName` | 128 | 256; `Persistance` at offset 300 (was 172), `ServerProcessId` at 301 (was 173), `sizeof` 305 (was 177). C# checks 305 at start-up |
+| `AllocateClient` (`Provider/Allocate.hpp`), admin channel | `ClientName` | 128 | 256 |
+
+- Lookups by name (`TryGetClientId`) compare all 256 bytes, as before all 128. A name longer than 256 is refused where it
+  is built (C# `FixedString.Set` throws); refuse it the same way.
+- **Deploy in lockstep, at a week start with fresh shared memory:** the C++ server, the C# Local Mirror on the box and every
+  desk's package together. The row sizes change, so the Mirror's layout hash changes and an old desk refuses a new box
+  (and the reverse) with its "array layout" message; a region an old build created must not be reopened by a new one.
+- **Hot path:** none; names are read at connect and allocation only.
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -1150,6 +1169,13 @@ listed.
   the master row for strategy id 0 (P25); no wire or layout change. Also C#-only: the Risk Limits menu lost "Copy
   .risklimit File Path" and "Open RiskLimits Folder"; File > "New Global Workspace" is "New Server Workspace"; the desk's
   `MirrorConfig.json` and `WorkspaceConfig.json` carry `//` comments (the C# reader skips them; neither file is read by C++).
+- **C20. 2026-10-19 and 2026-10-20, Mirror, Workspace and the simulator** (C# only, nothing to port):
+  `MirrorConfig.IPWhitelist` entries may be CIDR ranges (`"10.10.0.0/16"`) for desks whose VPN address changes;
+  `LowLatency.StartBackgroundThread` spins instead of waiting on an event and `Workspace.Disconnect` polls instead of
+  `Join` (a kernel wait on a GUI's STA thread pumps messages under NativeAOT and lost a wake-up, freezing a multi-window
+  desk); startup windows go through one queue; the simulator's `CrossMask` is merged into the per-side masks and Ghost
+  decays against the current depth; recorded TradingStatus tick histories are carried through but not yet applied. If a
+  C++ GUI or tool ever blocks on its UI thread, the same rule applies.
 
 ---
 

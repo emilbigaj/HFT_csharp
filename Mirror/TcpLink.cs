@@ -165,7 +165,7 @@ public sealed class TcpLinkConnector
     // a failure is logged, never fatal.
     private void AcceptTcpLinks()
     {
-        IPAddress[] ipWhitelist = Array.ConvertAll(_mirrorConfig.IPWhitelist, IPAddress.Parse);
+        IPNetwork[] ipWhitelist = Array.ConvertAll(_mirrorConfig.IPWhitelist, entry => MirrorConfig.TryParseIPNetwork(entry, out IPNetwork ipNetwork) ? ipNetwork : throw new InvalidDataException($"TcpLinkConnector: IPWhitelist entry {entry} is no address or range"));
         TcpListener tcpListener = new(IPAddress.Any, _mirrorConfig.ListenPort);
         tcpListener.Start();
         while (true)
@@ -174,7 +174,7 @@ public sealed class TcpLinkConnector
             {
                 TcpClient tcpClient = tcpListener.AcceptTcpClient();
                 IPAddress peerAddress = ((IPEndPoint)tcpClient.Client.RemoteEndPoint!).Address;
-                if (Array.IndexOf(ipWhitelist, peerAddress) < 0)
+                if (!Array.Exists(ipWhitelist, ipNetwork => ipNetwork.Contains(peerAddress)))
                 {
                     Console.WriteLine($"TcpLinkConnector: refused {peerAddress}, not in IPWhitelist");
                     tcpClient.Dispose();

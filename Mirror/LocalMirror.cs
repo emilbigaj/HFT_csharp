@@ -295,7 +295,7 @@ public sealed class LocalMirror
     // Queues an AllocatedClientId: the GUI's id, or a negative ConnectRefusal.
     private static void SendAllocatedClientId(MirrorSession mirrorSession, string clientName, int guiProcessId, int clientId)
     {
-        MirrorGui mirrorGui = new() { ClientId = clientId, GuiProcessId = guiProcessId, ClientName = MirrorPacket.RewriteName(new String128(clientName), isTravelling: true) };
+        MirrorGui mirrorGui = new() { ClientId = clientId, GuiProcessId = guiProcessId, ClientName = MirrorPacket.RewriteName(new String256(clientName), isTravelling: true) };
         mirrorSession.QueuedPackets.Add(MirrorPacket.CreateGuiPacket(MirrorPacketType.AllocatedClientId, new ReadOnlySpan<MirrorGui>(in mirrorGui)));
     }
 }

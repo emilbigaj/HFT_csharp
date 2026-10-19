@@ -52,8 +52,8 @@ The detailed version (every column, every dialog, troubleshooting) is RiskDeskGu
 
 <h2>0. Before you start</h2>
 <ol>
-  <li><b>Unzip (once):</b> unzip <b>BigajRiskDesk.zip</b> to a short path such as <code>C:\BigajRiskDesk</code>. The directory path must be less than 128 characters.</li>
-  <li><b>Firewall (once):</b> open <code>MirrorConfig.json</code> in that folder and note the <code>ListenPort</code> (e.g. <code>47793</code>). Allow incoming TCP on that port: <b>Windows Security &gt; Firewall &amp; network protection &gt; Advanced settings &gt; Inbound Rules &gt; New Rule... &gt; Port</b>, TCP, that port, <b>Allow the connection</b>, name it <code>BigajRiskDesk Mirror</code>. The CME box connects in to your Mirror on this port.</li>
+  <li><b>Unzip (once):</b> unzip <b>BigajRiskDesk.zip</b> to a short path such as <code>C:\BigajRiskDesk</code>. The directory path, including the strategy names inside it, must be less than 256 characters.</li>
+  <li><b>Firewall:</b> nothing to open. Your Mirror connects out to the CME box (the address in <code>ConnectAddresses</code> in <code>MirrorConfig.json</code>); the box decides which desks it accepts.</li>
   <li><b>VPN (every time):</b> connect to the <b>TNS VPN</b> with the account <code>arb-risk</code>. Your PC reaches the CME box only through it.</li>
 </ol>
 
@@ -78,11 +78,11 @@ The detailed version (every column, every dialog, troubleshooting) is RiskDeskGu
 <img class="menu" src="images/menu-widgets.png" alt="The Widgets menu open">
 <p><b>Right-click:</b> every action is on a right-click menu. Right-click a row for that row's actions, or a column header to show or hide columns. For example, a Positions row (its items are explained in section 3):</p>
 <img class="menu" src="images/positions-row-menu.png" alt="Right-click menu on the 6E row: Pause Algo, Create Order, Create Close Order, Open Ladder">
-<p><b>Save a layout:</b> <b>File &gt; Save Workspace As...</b>, type <code>RiskDesk</code>, click <b>OK</b>. The desk opens the layout named <code>RiskDesk</code> at every start-up.</p>
+<p><b>Save a layout:</b> <b>File &gt; Save Workspace As...</b>, type <code>default</code>, click <b>OK</b>. The desk opens the layout named <code>default</code> at every start-up.</p>
 <img class="menu" src="images/menu-file.png" alt="The File menu open">
 <ul>
   <li><b>Load a layout:</b> <b>File &gt; Open Workspace...</b>, pick the file, click <b>OK</b>.</li>
-  <li><b>Open a different layout at start-up:</b> in <code>WorkspaceConfig.json</code> change <code>"WorkspaceName"</code> (it is <code>"RiskDesk"</code>).</li>
+  <li><b>Open a different layout at start-up:</b> in <code>WorkspaceConfig.json</code> change <code>"WorkspaceName"</code> (it is <code>"default"</code>).</li>
 </ul>
 
 <h2>3. Positions</h2>

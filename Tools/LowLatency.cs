@@ -82,13 +82,13 @@ public static class LowLatency
     /// </summary>
     public static Thread StartBackgroundThread(string name, Action action)
     {
-        using ManualResetEventSlim startedEvent = new ManualResetEventSlim(false);
+        int _isStarted = 0;   // set by the new thread once pinned; read by the starter
 
         Thread thread = new Thread(() =>
         {
             PinCurrentThreadToCoreRange(HouseKeepingCores);
             SetThreadPriorityNormal();
-            startedEvent.Set();
+            Volatile.Write(ref _isStarted, 1);
             action();
         });
 
@@ -98,7 +98,9 @@ public static class LowLatency
         Console.WriteLine("Starting background thread: " + name);
         thread.Start();
 
-        startedEvent.Wait();
+        // Why a spin, not a wait: a kernel wait on a GUI's STA thread pumps messages under NativeAOT, re-enters the dispatcher and can lose its wake-up (see Spec.md)
+        while (Volatile.Read(ref _isStarted) == 0)
+            Thread.Yield();
 
         return thread;
     }

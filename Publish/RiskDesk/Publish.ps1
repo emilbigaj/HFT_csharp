@@ -1,5 +1,5 @@
 # Builds the risk-desk package: the Remote Mirror and the Workspace as standalone exes for any x64 Windows PC, with Start.bat
-# and the two config templates beside them, into Staging\BigajRiskDesk beside this script, and zips it to Staging\BigajRiskDesk.zip
+# the two config templates and the short guide beside them, into Staging\BigajRiskDesk beside this script, and zips it to Staging\BigajRiskDesk.zip
 # (see Spec.md "Risk desk package"). Sends nothing anywhere. Run from anywhere: .\Publish\RiskDesk\Publish.ps1
 $ErrorActionPreference = 'Stop'
 $solutionDirectory = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
@@ -22,7 +22,16 @@ foreach ($projectName in 'Mirror', 'Workspace') {
 Copy-Item (Join-Path $PSScriptRoot 'Start.bat'), (Join-Path $PSScriptRoot 'MirrorConfig.json'), (Join-Path $PSScriptRoot 'WorkspaceConfig.json') $packageDirectory
 Remove-Item (Join-Path $packageDirectory '*.pdb'), (Join-Path $packageDirectory '*.dbg'), (Join-Path $packageDirectory 'Generator.*'), (Join-Path $packageDirectory '*.runtimeconfig.json'), (Join-Path $packageDirectory '*.deps.json')
 
-# Step 4: the zip to hand out, unzipping to a BigajRiskDesk folder
+# Step 4: the short guide beside Start.bat with only the screenshots it shows, minus its owner-check comment; the detailed guide stays behind
+$guideSourceDirectory = Join-Path $PSScriptRoot 'Guide'
+$guideHtml = [System.IO.File]::ReadAllText((Join-Path $guideSourceDirectory 'RiskDeskGuide.html'))
+New-Item -ItemType Directory -Force (Join-Path $packageDirectory 'images') | Out-Null
+foreach ($imagePath in ([regex]::Matches($guideHtml, 'images/[^"]+\.png') | ForEach-Object { $_.Value } | Sort-Object -Unique)) {
+    Copy-Item (Join-Path $guideSourceDirectory $imagePath) (Join-Path $packageDirectory $imagePath)
+}
+[System.IO.File]::WriteAllText((Join-Path $packageDirectory 'RiskDeskGuide.html'), ($guideHtml -replace '(?s)<!--\s*OWNER CHECK.*?-->\s*', ''))
+
+# Step 5: the zip to hand out, unzipping to a BigajRiskDesk folder
 if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
 Compress-Archive -Path $packageDirectory -DestinationPath $zipPath
 Write-Host "Publish.ps1: $zipPath"

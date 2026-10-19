@@ -132,7 +132,9 @@ public partial class Workspace : Window, IWidgetHost
             return;
         _isConnected = false;
         _isClientStopping = true;
-        _clientThread.Join();
+        // Why a poll, not Join: a kernel wait on the UI thread pumps messages under NativeAOT, so another window's refresh could start a second rebuild inside this one (see Spec.md)
+        while (_clientThread.IsAlive)
+            Thread.Sleep(1);
         foreach ((_, IWidget widget) in EnumerateWidgets())
             (widget as IDisposable)?.Dispose();
         if (AlertManager != null)
