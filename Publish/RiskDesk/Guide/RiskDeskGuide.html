@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<!--
+OWNER CHECK (delete this block before handing the guide out):
+1. Manual-order limits: the guide follows the code. A manual order is checked against the team's Max Order Qty and Max
+   Position Qty, the rate limit and the market being open; not against fills or any strategy limit. You asked for
+   "position limit only": either the code changes or this stays.
+The detailed version (every column, every dialog, troubleshooting) is RiskDeskGuide-detailed.html.
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Risk Desk Guide</title>
+<style>
+  :root { --text: #1d2125; --muted: #5b636b; --background: #fbfbf9; --border: #d9dcdf; --accent: #1f5f99; --note: #eef4fa; --warn: #fff5e6; --warn-border: #e2a64b; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --text: #e4e6e8; --muted: #a3aab1; --background: #17191b; --border: #3a3f44; --accent: #7fb3e6; --note: #1c2a38; --warn: #33281a; --warn-border: #8a6427; }
+  }
+  :root[data-theme="dark"] { --text: #e4e6e8; --muted: #a3aab1; --background: #17191b; --border: #3a3f44; --accent: #7fb3e6; --note: #1c2a38; --warn: #33281a; --warn-border: #8a6427; }
+  body { margin: 0; background: var(--background); color: var(--text); font-family: "Segoe UI", system-ui, sans-serif; font-size: 21px; line-height: 1.5; }
+  main { margin: 0; padding: 24px 3vw 48px; }
+  h1 { margin: 0 0 4px; font-size: 2.2rem; }
+  h2 { margin: 40px 0 10px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 1.6rem; }
+  p, ul, ol { margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; margin: 6px 0 14px; font-size: 1rem; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  td:first-child { white-space: nowrap; font-weight: 600; }
+  img { display: block; width: auto; max-width: 100%; height: auto; border: 1px solid var(--border); border-radius: 4px; margin: 8px 0 16px; background: #fff; }
+  .callout-image { position: relative; display: inline-block; max-width: 100%; margin: 8px 0 16px; }
+  .callout-image img { margin: 0; }
+  .callout { position: absolute; top: -6px; bottom: -6px; right: -6px; border: 3px solid #d32f2f; border-radius: 6px; pointer-events: none; }
+  .muted { color: var(--muted); }
+  .box { background: var(--note); border-left: 4px solid var(--accent); padding: 8px 12px; margin: 8px 0 12px; }
+  .warn { background: var(--warn); border-left-color: var(--warn-border); }
+  @media print {
+    body { font-size: 12px; line-height: 1.35; }
+    main { padding: 0; max-width: none; }
+    h2 { border-top: none; margin-top: 0; }
+    h2:not(:first-of-type):not(.same-page) { break-before: page; }
+    img { max-height: 6.5cm; width: auto; }
+    img.menu { max-height: 4cm; }
+    table { font-size: 11px; }
+    th, td { padding: 3px 6px; }
+  }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Risk Desk Guide</h1>
+<p class="muted">For the risk team and the second trader. Always use the <b>server workspace</b>: it shows the trading team's limits, positions and orders: the aggregate over all the team's algos and manual orders.</p>
+
+<h2>0. Before you start</h2>
+<ol>
+  <li><b>Unzip (once):</b> unzip <b>BigajRiskDesk.zip</b> to a short path such as <code>C:\BigajRiskDesk</code>. The directory path must be less than 128 characters.</li>
+  <li><b>Firewall (once):</b> open <code>MirrorConfig.json</code> in that folder and note the <code>ListenPort</code> (e.g. <code>47793</code>). Allow incoming TCP on that port: <b>Windows Security &gt; Firewall &amp; network protection &gt; Advanced settings &gt; Inbound Rules &gt; New Rule... &gt; Port</b>, TCP, that port, <b>Allow the connection</b>, name it <code>BigajRiskDesk Mirror</code>. The CME box connects in to your Mirror on this port.</li>
+  <li><b>VPN (every time):</b> connect to the <b>TNS VPN</b> with the account <code>arb-risk</code>. Your PC reaches the CME box only through it.</li>
+</ol>
+
+<h2 class="same-page">1. Starting up and the Mirror</h2>
+<p>Double-click <b>Start.bat</b>. Two console windows open (the Mirror and the Workspace); leave both open. The Workspace window fills in a few seconds later.</p>
+<p><b>Why the Mirror:</b> the trading server lives on a machine at CME, and your PC cannot read its memory directly. The Mirror keeps a live copy of the server on your PC over one network link, and carries your orders, limit edits and pause/play up to the box.</p>
+<div class="box warn">If the link drops for 10 seconds, the box cancels every working manual order placed from this desk. While the link is down your clicks are dropped. If the latency in the top bar is climbing, it indicates the connection might be broken and your clicks will be lost.</div>
+<p>If the Mirror stops with a message about <b>"array layout"</b>, the desk and the box run different versions: ask for the matching zip.</p>
+<img src="images/workspace-overview.png" alt="A server workspace with Positions, Risk Limits, Orders, a ladder, Message Efficiency, Rate Limits and Send Order">
+
+<h2>2. The top bar and the Workspace window</h2>
+<p><b>Top bar (right):</b> the latency, then the clock.</p>
+<div class="callout-image"><img src="images/topbar.png" alt="The top bar: menus on the left, latency and clock on the right"><span class="callout" style="left: 82%"></span></div>
+<table>
+  <tr><th>Shows</th><th>Meaning</th></tr>
+  <tr><td>e.g. 264.764 ms</td><td>Connected. Round trip to the CME box and back. If it is climbing, the connection might be broken and your clicks will be lost.</td></tr>
+  <tr><td>Connection broken – reconnecting…</td><td>The link to the box is down. Your working manual orders are cancelled after 10 s.</td></tr>
+  <tr><td>Remote Mirror offline</td><td>The Mirror on this PC stopped. Double-click <b>Mirror.exe</b> in the package folder.</td></tr>
+  <tr><td>The clock (UTC)</td><td>Time of the latest market-data update from the server. It should keep ticking during trading hours; if it stops while the market is active, call the trader. It stops normally when the market is closed.</td></tr>
+</table>
+<p><b>Add a widget:</b> <b>Widgets</b> menu. Drag its title bar to move it, drag an edge to resize, ✕ to close.</p>
+<img class="menu" src="images/menu-widgets.png" alt="The Widgets menu open">
+<p><b>Right-click:</b> every action is on a right-click menu. Right-click a row for that row's actions, or a column header to show or hide columns. For example, a Positions row (its items are explained in section 3):</p>
+<img class="menu" src="images/positions-row-menu.png" alt="Right-click menu on the 6E row: Pause Algo, Create Order, Create Close Order, Open Ladder">
+<p><b>Save a layout:</b> <b>File &gt; Save Workspace As...</b>, type <code>RiskDesk</code>, click <b>OK</b>. The desk opens the layout named <code>RiskDesk</code> at every start-up.</p>
+<img class="menu" src="images/menu-file.png" alt="The File menu open">
+<ul>
+  <li><b>Load a layout:</b> <b>File &gt; Open Workspace...</b>, pick the file, click <b>OK</b>.</li>
+  <li><b>Open a different layout at start-up:</b> in <code>WorkspaceConfig.json</code> change <code>"WorkspaceName"</code> (it is <code>"RiskDesk"</code>).</li>
+</ul>
+
+<h2>3. Positions</h2>
+<p>One row per instrument: the trading team's position, the aggregate over all the team's algos and manual fills. Also where you pause the algos.</p>
+<img src="images/positions.png" alt="Positions widget with the play and pause buttons in the title bar">
+<table>
+  <tr><th>Column</th><th>Meaning</th></tr>
+  <tr><td>AlgoStatus</td><td>The team's master algo switch for the instrument (every algo): Live or Paused.</td></tr>
+  <tr><td>Quantity</td><td>Net position in lots (+ long, − short).</td></tr>
+  <tr><td>AvgPrice</td><td>Average entry price of the open position (NaN when flat).</td></tr>
+  <tr><td>Profit</td><td>Realized + Floating, in US dollars.</td></tr>
+  <tr><td>Realized</td><td>Profit locked in on closed lots.</td></tr>
+  <tr><td>Floating</td><td>Profit on the open position at the mid price. NaN when the book has no bid or no ask.</td></tr>
+  <tr><td>QuantityTraded</td><td>All lots filled on the instrument, both sides, kept across sessions.</td></tr>
+  <tr><td>ProfitPerSide</td><td>Profit per lot traded.</td></tr>
+</table>
+<p><b>Right-click a row</b> for everything you can do on that instrument (the menu is shown in section 2):</p>
+<ul>
+  <li><b>Pause Algo</b> / <b>Resume Algo</b>: the master algo switch for the instrument. ⏸ and ▶ in the title bar do every instrument at once. Pausing stops every algo on that instrument from sending new orders and they cancel their own; it never touches manual orders.</li>
+  <li><b>Create Order</b>: opens Send Order for the instrument (section 8).</li>
+  <li><b>Create Close Order</b>: opens Send Order filled with the quantity that flattens the position. Nothing is sent until you click the button.</li>
+  <li><b>Open Ladder</b>: the instrument's ladder (section 8).</li>
+</ul>
+
+<h2>4. Risk Limits</h2>
+<p>One row per instrument: the trading team's limits and its exposure, aggregated over every algo and manual order.</p>
+<img src="images/risk-limits.png" alt="Risk Limits widget">
+<table>
+  <tr><th>Column</th><th>Meaning</th></tr>
+  <tr><td>MaxOrderQuantity</td><td>Largest single order, in lots. 0 blocks every new order.</td></tr>
+  <tr><td>MaxPositionQuantity</td><td>Largest team position, long or short, counting every working order as if it filled.</td></tr>
+  <tr><td>MaxFillsPerSession</td><td>Most lots the algos may fill this session (algos only; manual orders ignore it).</td></tr>
+  <tr><td>Position</td><td>The team's net position.</td></tr>
+  <tr><td>FillsThisSession</td><td>Lots filled by algos this session, both sides. Back to 0 at the session close.</td></tr>
+  <tr><td>WorstWorkingLongPosition</td><td>Position if every working buy filled. Compare with MaxPositionQuantity.</td></tr>
+  <tr><td>WorstWorkingShortPosition</td><td>Position if every working sell filled. Compare with −MaxPositionQuantity.</td></tr>
+  <tr><td>WorstWorkingFillsThisSession</td><td>Algo fills this session if every working algo order filled. Compare with MaxFillsPerSession.</td></tr>
+  <tr><td>Timestamp</td><td>When the limits were last changed (UTC).</td></tr>
+</table>
+<p><b>To change a limit:</b> right-click the row &gt; <b>Edit RiskLimit</b>, type the new values, click <b>Confirm</b>. The row shows them within a second; they apply to the next order and are saved on the box. Lowering a limit does not cancel working orders.</p>
+<img style="width: 340px" src="images/risk-limit-edit-dialog-edited.png" alt="The Edit Risk Limit dialog">
+<div class="box">An instrument nobody has set limits for starts at 0 / 0 / 0, which blocks every order on it until you set them.</div>
+
+<h2>5. Rate Limits</h2>
+<p>How many order messages the team may send. One row per order channel (exchange session).</p>
+<img src="images/rate-limits.png" alt="Rate Limits widget">
+<table>
+  <tr><th>Column</th><th>Meaning</th></tr>
+  <tr><td>CoreGroup</td><td>The order channel's name.</td></tr>
+  <tr><td>Duration</td><td>The length of the rolling window, e.g. 3 s.</td></tr>
+  <tr><td>Limit</td><td>Most messages allowed in any window of that length.</td></tr>
+  <tr><td>Count</td><td>Messages in the window right now.</td></tr>
+</table>
+<p>When the window is full, new orders and amends are refused (manual and algo alike). Cancels are never refused.</p>
+<p class="muted">The server's limit sits below CME's own per-session throttle, which rejects and then logs out a session that sends too fast: <a href="https://www.cmegroup.com/confluence/display/EPICSANDBOX/Messaging+Controls">CME Globex Messaging Controls</a>.</p>
+
+<h2>6. Message Efficiency</h2>
+<p>CME compares the team's order messages with the lots it trades, per product group and day, and charges if the ratio passes its benchmark. This widget only displays the numbers; it never refuses an order. Weights: new order 0, amend 1, cancel 3 (×0.1 outside 07:00–16:00 CME time).</p>
+<img src="images/message-efficiency.png" alt="Message Efficiency widget">
+<table>
+  <tr><th>Column</th><th>Meaning</th></tr>
+  <tr><td>ProductGroupRoot</td><td>CME product group, e.g. 6E.</td></tr>
+  <tr><td>TradeDate</td><td>The trading day the counts belong to.</td></tr>
+  <tr><td>RawMessages</td><td>Messages sent today, each counted once.</td></tr>
+  <tr><td>WeightedMessages</td><td>Messages after the weights above.</td></tr>
+  <tr><td>QuantityTraded</td><td>Lots filled today, both sides.</td></tr>
+  <tr><td>Efficiency</td><td>WeightedMessages ÷ QuantityTraded. Green under 75% of the benchmark, yellow, orange, red at or over it.</td></tr>
+  <tr><td>Tier1–3, Tier1–3Benchmark</td><td>Once RawMessages passes a tier's threshold, that tier's benchmark applies.</td></tr>
+</table>
+<p class="muted">CME's rules, tiers and surcharges: <a href="https://www.cmegroup.com/globex/files/2024-revised-mep.pdf">CME Globex Messaging Efficiency Program</a>; the benchmark per product group: <a href="https://www.cmegroup.com/globex/files/upcoming-mep-benchmarks.pdf">MEP benchmarks</a>.</p>
+
+<h2>7. Orders</h2>
+<p>Every working order of the trading team, algo and manual. Finished orders disappear.</p>
+<img src="images/orders.png" alt="Orders widget">
+<ul>
+  <li><b>Cancel one:</b> right-click the row &gt; <b>Cancel Order</b> (any order).</li>
+  <li><b>Amend a manual order:</b> right-click &gt; <b>Amend Order</b> (see section 8).</li>
+  <li><b>Cancel everything:</b> the red ❌ in the title bar. A Live algo places new orders straight away, so pause it in Positions first.</li>
+</ul>
+<div class="box">You can amend your manual orders, but you can only cancel an algo's order, never amend it. This keeps the algo's risk tracking correct, so <b>Amend Order</b> does not appear on an algo order's menu.</div>
+
+<h2>8. Ladders and manual orders</h2>
+<p><b>Open a ladder:</b> right-click the instrument in Positions &gt; <b>Open Ladder</b>. Columns left to right: your buys, bids, price, asks, your sells. Left-click does nothing; everything is on the right-click menu.</p>
+<img src="images/ladder.png" alt="A ladder">
+<ul>
+  <li><b>Create:</b> right-click a price &gt; <b>Create Order @ price</b>. In Send Order type the quantity (positive buy, negative sell), check the button reads e.g. <b>Create Buy 2</b>, click it.</li>
+  <li><b>Amend:</b> right-click your order on the ladder or in Orders &gt; <b>Amend Order</b>, click the <b>Amend</b> tab, change price or quantity, click <b>Amend</b>. Manual orders only: an algo's order can only be cancelled.</li>
+  <li><b>Cancel:</b> right-click your order on the ladder or in Orders &gt; <b>Cancel Order</b>.</li>
+</ul>
+<img src="images/send-order-create.png" alt="Send Order, Create tab">
+<p><b>Which limits a manual order meets:</b> the team's <b>Max Order Qty</b> and <b>Max Position Qty</b>, the rate limit, and the market being open. It ignores the fills limit, every strategy limit and the algo pause. Manual orders from the server workspace book to the team's house book (its manual account), not to any algo.</p>
+
+</main>
+</body>
+</html>

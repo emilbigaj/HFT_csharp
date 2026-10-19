@@ -142,7 +142,7 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
         contextMenu.Items.Add(WidgetMenus.NewMenuItem("Open Ladder", "🪜", () => this.AddToHost(LadderWidget.NewLadder(_context, widgetPosition.InstrumentId))));
     }
 
-    /// Sends the control that pauses or resumes the algo on this position's instrument and strategy.
+    /// Sends the control that pauses or resumes the workspace's switch on this position's instrument (the master switch from a server workspace).
     private void PerformChangeAlgoStatus(WidgetPosition widgetPosition, AlgoStatus targetAlgoStatus)
     {
         // Step 1: the server polls the control's execution channel only once the manual client holds the instrument
@@ -153,7 +153,7 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
         {
             AlgoStatus = targetAlgoStatus,
             InstrumentId = widgetPosition.InstrumentId,
-            StrategyId = widgetPosition.StrategyId,
+            StrategyId = _context.Primary.StrategyId,
             ClientId = _context.Manual.Context.ClientId
         };
         _context.Manual.OnControlAlgoStatus(controlAlgoStatus);

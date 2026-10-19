@@ -17,7 +17,7 @@
 			<DockPanel LastChildFill="False">
 				<Menu DockPanel.Dock="Left">
 					<MenuItem Header="_File">
-						<MenuItem Header="New Global Workspace" Click="OnNewGlobalWorkspaceClick"/>
+						<MenuItem Header="New Server Workspace" Click="OnNewServerWorkspaceClick"/>
 						<MenuItem Header="New Strategy Workspace..." Click="OnNewStrategyWorkspaceClick"/>
 						<Separator/>
 						<MenuItem Header="Extend Workspace" Click="OnExtendWorkspaceClick"/>

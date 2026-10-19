@@ -257,7 +257,7 @@ public partial class Workspace : Window, IWidgetHost
 
     private void OnExtendWorkspaceClick(object? sender, RoutedEventArgs e) => new Workspace(Context).Show();
 
-    private void OnNewGlobalWorkspaceClick(object? sender, RoutedEventArgs e) => new Workspace(ContextManager.ServerContext).Show();
+    private void OnNewServerWorkspaceClick(object? sender, RoutedEventArgs e) => new Workspace(ContextManager.ServerContext).Show();
 
     private async void OnNewStrategyWorkspaceClick(object? sender, RoutedEventArgs e)
     {

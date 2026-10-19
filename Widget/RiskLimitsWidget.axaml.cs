@@ -140,7 +140,7 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
         });
     }
 
-    /// Fills the grid's right-click menu: column toggles on a header; edit, the instrument's file path and the folder on a row, the folder elsewhere.
+    /// Fills the grid's right-click menu: column toggles on a header, edit on a row.
     private void OnContextMenuOpened(object? sender, RoutedEventArgs e)
     {
         if (sender is not ContextMenu contextMenu)
@@ -155,19 +155,13 @@ public sealed partial class RiskLimitsWidget : UserControl, IWidget, IDisposable
             return;
         }
 
-        // Step 2: a row names its instrument, edits its limits and copies its file path
-        Context primary = _context.Primary;
+        // Step 2: a row names its instrument and edits its limits
         if (dataGridHit.RowItem is WidgetRiskLimit widgetRiskLimit)
         {
             contextMenu.Items.Add(WidgetMenus.NewTitleMenuItem(widgetRiskLimit.ShortSymbol));
             contextMenu.Items.Add(new Separator());
             contextMenu.Items.Add(WidgetMenus.NewMenuItem("Edit RiskLimit", "✏", async () => await EditRiskLimit(widgetRiskLimit)));
-            contextMenu.Items.Add(new Separator());
-            contextMenu.Items.Add(WidgetMenus.NewCopyPathMenuItem(this, "Copy .risklimit File Path", Context.GetRiskLimitsFilePath(primary.DirectoryPath, widgetRiskLimit.Symbol)));
         }
-
-        // Step 3: the folder, from anywhere off the header
-        contextMenu.Items.Add(WidgetMenus.NewOpenFolderMenuItem("Open RiskLimits Folder", primary.RiskLimitsDirectoryPath.ToString()));
     }
 
     /// Opens the edit dialog on the instrument's current limits and sends the edit to the server as a ControlRiskLimit; logs a failure.

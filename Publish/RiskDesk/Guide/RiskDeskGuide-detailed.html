@@ -1,0 +1,934 @@
+<!doctype html>
+<!--
+OWNER CHECK 1 (manual orders and limits): you asked for "manual orders ignore all limits except the position limit".
+  The code does more. On the server a manual order is also checked against the firm's MaxOrderQuantity
+  (QuantityExceedsRiskLimit), the CoreGroup's order rate limit for creates and replaces (TooManyOrdersPerSecond),
+  the session check on creates (NotInSession) and the order-size caps (1 to 65,535 lots, at most 29 changes in flight).
+  It skips MaxFillsPerSession, every strategy limit, both algo pause switches and message efficiency.
+  Section 8 describes what the CODE does. Decide whether the code or the guide should change.
+OWNER CHECK 3 (top-bar clock): Spec.md "Remote workspaces" says the server rewrites the clock every pass and that
+  "a frozen clock with a healthy latency means the server itself has stopped". The code writes it only in
+  Server.OnMarketByPrice, with the NIC arrival time of the last book update that changed a book, and a stopped server
+  takes the link down. The guide follows the code: the clock is the latest market-data update, shown in UTC.
+  It also stops when the market is closed or halted. The box runs the C++ port; this was not checked there.
+OWNER CHECK 4 ("DC" / connection state): no "DC" text exists. Disconnection is shown only as text in the top bar,
+  and the bar's green colour never changes with the link. The guide uses the exact texts.
+OWNER CHECK 5 (Amend from a menu): "Amend Order" from the Orders or ladder menu opens Send Order with the Create tab
+  still highlighted and the order box empty (SendOrderWidget IsCreateMode setter does not signal SelectedTabIndex).
+  The guide tells staff to click the Amend tab first. Remove that step once fixed.
+OWNER CHECK 6 (folder items on a desk): the Message Efficiency folder items ("Copy Server .messageefficiency File Path",
+  "Open Server MessageEfficiency Folder") point at the desk PC's own empty folder; the real files live on the CME box.
+  The guide does not mention them.
+OWNER CHECK 7 (message efficiency, plausible, not traced): manual fills on the house book (strategy 0) may never be
+  added to QuantityTraded, because only Client.OnFill increments it and strategy 0 has no client. If so, desk trading
+  makes the Efficiency number look worse than it is. The guide does not mention this to staff.
+OWNER CHECK 8 (old .risklimit lines): Spec.md "Max fills per session" says a line without MaxFillsPerSession
+  "refuses every order". The code refuses ALGO orders only. The guide follows the code.
+OWNER CHECK 9 (screenshots): every screenshot comes from a simulated server over a real Mirror link (yellow top bar,
+  "Simulation" ticked, about 32 ms on loopback). On the desk the bar is green and Realtime is ticked; the guide says so.
+  The file dialogs show the capture PC's own sidebar folders (Emil, C:\, Data, Dump); crop them if that matters.
+OWNER CHECK 10 (allocating from the desk): the Instruments widget's "Allocate <Symbol>" makes the server open that
+  instrument's feed. The guide tells staff to allocate only when asked. Confirm that is the rule you want.
+OWNER CHECK 11 (Positions columns): the Positions widget does not save hidden or resized columns with a layout
+  (SaveStateJson returns null), unlike Risk Limits, Rate Limits, Message Efficiency and Orders.
+OWNER CHECK 12 (Orders row order, plausible, not confirmed): OrdersWidget Refresh step 3 sorts by symbol then price
+  (DataGridRows.CompareOrders), but the Orders screenshots show prices out of order within an instrument (6A: 0.70330,
+  0.70325, 0.70370...). ReconcileRows moves rows with ObservableCollection.Move and the DataGrid seems not to follow.
+  The guide says rows are grouped by instrument, highest price first, and that a row may stay out of place.
+OWNER CHECK 13 (loading a layout leaks widgets): RestoreWidgets calls DockHost.Children.Clear() without disposing the old
+  widgets, so their refresh timers keep running; only WidgetContainer.Close disposes. Not mentioned to staff.
+OWNER CHECK 14 (handout): remove this whole OWNER CHECK comment block before the guide is handed out.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Risk Desk Guide</title>
+<style>
+  :root {
+    --text: #1d2125;
+    --muted: #5b636b;
+    --background: #fbfbf9;
+    --surface: #ffffff;
+    --border: #d9dcdf;
+    --accent: #1f5f99;
+    --note-background: #eef4fa;
+    --note-border: #9dbbd8;
+    --warn-background: #fff5e6;
+    --warn-border: #e2a64b;
+    --danger-background: #fdecec;
+    --danger-border: #d77a7a;
+    --code-background: #f1f2f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --text: #e4e6e8;
+      --muted: #a3aab1;
+      --background: #17191b;
+      --surface: #1f2225;
+      --border: #3a3f44;
+      --accent: #7fb3e6;
+      --note-background: #1c2a38;
+      --note-border: #3e6080;
+      --warn-background: #33281a;
+      --warn-border: #8a6427;
+      --danger-background: #3a2020;
+      --danger-border: #8a4444;
+      --code-background: #26292c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --text: #e4e6e8;
+    --muted: #a3aab1;
+    --background: #17191b;
+    --surface: #1f2225;
+    --border: #3a3f44;
+    --accent: #7fb3e6;
+    --note-background: #1c2a38;
+    --note-border: #3e6080;
+    --warn-background: #33281a;
+    --warn-border: #8a6427;
+    --danger-background: #3a2020;
+    --danger-border: #8a4444;
+    --code-background: #26292c;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 17px;
+    line-height: 1.6;
+  }
+  main { max-width: 820px; margin: 0 auto; padding: 32px 16px 80px; }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 0 0 8px; }
+  h2 { font-size: 1.55rem; line-height: 1.25; margin: 56px 0 12px; padding-top: 16px; border-top: 1px solid var(--border); }
+  h3 { font-size: 1.2rem; margin: 36px 0 8px; }
+  h4 { font-size: 1.02rem; margin: 24px 0 6px; }
+  p, ul, ol { margin: 0 0 14px; }
+  li { margin-bottom: 4px; }
+  a { color: var(--accent); }
+  .subtitle { color: var(--muted); margin-bottom: 24px; }
+  code, kbd, .ui {
+    font-family: "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
+    font-size: 0.88em;
+    background: var(--code-background);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  .ui { font-family: inherit; font-size: 0.95em; font-weight: 600; background: none; padding: 0; }
+  pre {
+    background: var(--code-background);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.45;
+  }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 20px; font-size: 0.93rem; background: var(--surface); }
+  th, td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--code-background); font-weight: 600; }
+  td:first-child { white-space: nowrap; font-weight: 600; }
+  .table-wrap { overflow-x: auto; }
+  figure { margin: 18px 0 26px; }
+  figure img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: #ffffff;
+  }
+  figure.full img { width: 100%; }
+  figure.half img { max-width: min(100%, 420px); }
+  figcaption { color: var(--muted); font-size: 0.9rem; margin-top: 6px; }
+  .placeholder {
+    border: 2px dashed var(--warn-border);
+    background: var(--warn-background);
+    border-radius: 6px;
+    padding: 28px 16px;
+    text-align: center;
+    font-weight: 600;
+  }
+  .box { border-left: 4px solid; border-radius: 4px; padding: 10px 14px; margin: 14px 0 20px; }
+  .box p:last-child, .box ul:last-child, .box ol:last-child { margin-bottom: 0; }
+  .note { background: var(--note-background); border-color: var(--note-border); }
+  .warn { background: var(--warn-background); border-color: var(--warn-border); }
+  .danger { background: var(--danger-background); border-color: var(--danger-border); }
+  .rule {
+    font-size: 1.1rem;
+    font-weight: 600;
+    background: var(--note-background);
+    border: 1px solid var(--note-border);
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  nav.toc { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; }
+  nav.toc ol { margin: 0; padding-left: 22px; }
+  nav.toc li { margin: 2px 0; }
+  .hidden-column { color: var(--muted); font-style: italic; font-weight: 400; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Risk Desk User Guide</h1>
+<p class="subtitle">For the risk team and the second trader. How to start the desk, read the screens, set limits, pause algos and place manual orders.</p>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#what">What this is</a></li>
+    <li><a href="#starting">Starting up</a></li>
+    <li><a href="#mirror">The Mirror</a></li>
+    <li><a href="#workspace">The Workspace window</a></li>
+    <li><a href="#topbar">The top bar: latency, connection and clock</a></li>
+    <li><a href="#widgets">The risk widgets</a>
+      <ol>
+        <li><a href="#positions">Positions (and pause/play)</a></li>
+        <li><a href="#risklimits">Risk Limits (and editing a limit)</a></li>
+        <li><a href="#ratelimits">Rate Limits</a></li>
+        <li><a href="#efficiency">Message Efficiency</a></li>
+        <li><a href="#orders">Orders</a></li>
+      </ol>
+    </li>
+    <li><a href="#ladders">Ladders and manual orders</a></li>
+    <li><a href="#manual-limits">Which limits a manual order obeys</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+  </ol>
+</nav>
+
+<!-- ============================================================ -->
+<h2 id="what">1. What this is</h2>
+<p>The trading server runs on a machine at CME. The risk desk is a normal Windows PC that shows a live copy of that server's state: every position, limit and working order. From the desk you can change the firm's limits, pause the algos, and place, amend or cancel manual orders.</p>
+<p class="rule">The one rule: always use the <strong>server workspace</strong>. It shows the firm-wide (global) limits, positions and orders, across every strategy.</p>
+<p>A strategy workspace (<span class="ui">File &gt; New Strategy Workspace...</span>) shows only one strategy's orders, positions and limits, and books manual orders to that strategy. It is not used on the risk desk.</p>
+
+<figure class="full">
+  <img src="images/workspace-overview.png" alt="A server workspace with Positions, Risk Limits, Orders, Message Efficiency, Rate Limits, Send Order and a ladder">
+  <figcaption>Figure 1. A server workspace on the desk. Top row: Positions and Risk Limits. Middle: Orders and a 6E ladder. Bottom: Message Efficiency, Rate Limits and Send Order. (These screenshots were taken on a test system, so the top bar is yellow. On the real desk it is green.)</figcaption>
+</figure>
+
+<!-- ============================================================ -->
+<h2 id="starting">2. Starting up</h2>
+
+<h3>2.1 The package folder</h3>
+<p>You receive one zip file, <code>BigajRiskDesk.zip</code>. It unzips to a folder named <code>BigajRiskDesk</code>.</p>
+<ol>
+  <li>Unzip it close to the drive root, for example <code>C:\BigajRiskDesk</code>. Do not use the Desktop or Downloads. Long folder paths stop the Mirror with a message ending "move the Mirror's folder nearer the drive root".</li>
+  <li>Check the folder holds <code>Mirror.exe</code>, <code>Workspace.exe</code>, <code>Start.bat</code>, <code>MirrorConfig.json</code>, <code>WorkspaceConfig.json</code> and three <code>.dll</code> files. Nothing else needs installing.</li>
+  <li>Your IT contact must allow the CME box to connect to this PC on port 47793 (a firewall rule). This is done once.</li>
+</ol>
+
+<figure>
+  <div class="placeholder">SCREENSHOT PLACEHOLDER: the BigajRiskDesk folder in Explorer</div>
+  <figcaption>Figure 2 (placeholder). The unzipped BigajRiskDesk folder: Mirror.exe, Workspace.exe, Start.bat, the two config files and three .dll files.</figcaption>
+</figure>
+
+<h3>2.2 Starting the desk</h3>
+<ol>
+  <li>Double-click <code>Start.bat</code>.</li>
+  <li>Two black console windows open. One belongs to the <strong>Mirror</strong> (the link to the CME box). The other belongs to the <strong>Workspace</strong> (the screens). Leave both open. They print messages that help when something goes wrong.</li>
+  <li>The Workspace window appears. While it waits for the Mirror, its console repeats a line ending "failed to connect to server ... will try again". This is normal for the first few seconds.</li>
+  <li>When the Mirror console prints "RemoteMirror: copy complete, Workspaces may start", the Workspace window fills in.</li>
+  <li>Check the window's title. It reads "Server: ...\CME_NewRelease, Context [...\CME_NewRelease]", with the same path twice. That means you are in the server workspace.</li>
+</ol>
+<div class="box note">
+  <p><strong>Good to know.</strong></p>
+  <ul>
+    <li>Closing the Workspace leaves the Mirror running.</li>
+    <li>Double-clicking <code>Start.bat</code> again opens a second Workspace beside the first. It does not start a second Mirror.</li>
+    <li>Closing the Workspace cancels any manual orders you placed from it that are still working (see section 3.3).</li>
+  </ul>
+  <p><strong>To restart only the Mirror:</strong></p>
+  <ol>
+    <li>Open the package folder in Explorer.</li>
+    <li>Double-click <code>Mirror.exe</code>. Do not use <code>Start.bat</code>, which would also open another Workspace.</li>
+    <li>Wait for the Mirror console to print "RemoteMirror: copy complete, Workspaces may start". The open Workspace windows then rebuild themselves.</li>
+  </ol>
+</div>
+
+<h3>2.3 The two config files</h3>
+<p>Both are plain text files. Open them with Notepad. A backslash in a folder path must be written twice, for example <code>"C:\\Desk\\Data"</code>. You will normally only change the fields below.</p>
+
+<h4>MirrorConfig.json</h4>
+<pre>{"MirrorRole":"Remote","ServerName":"CME_NewRelease","ClockMode":"Realtime","ListenPort":47793,
+ "IPWhitelist":["10.172.13.228"],"ConnectAddresses":[],"DirectoriesRoot":"Data","IsConsoleVisible":true}</pre>
+<div class="table-wrap"><table>
+  <tr><th>Field</th><th>What it means</th></tr>
+  <tr><td>ServerName</td><td>The name of the trading server on the CME box. It must match the box exactly, and must match <code>WorkspaceConfig.json</code>.</td></tr>
+  <tr><td>DirectoriesRoot</td><td>Where the desk keeps its copy. <code>"Data"</code> means a folder named Data inside the package folder. Must match <code>WorkspaceConfig.json</code>.</td></tr>
+  <tr><td>IsConsoleVisible</td><td><code>true</code> shows the Mirror's console window. <code>false</code> hides it and writes its messages to <code>Mirror.log</code> in the folder; the Mirror must then be stopped from Task Manager.</td></tr>
+  <tr><td>ListenPort, IPWhitelist, ConnectAddresses</td><td>How the link is made. Leave them as delivered unless the owner tells you otherwise. The whitelist holds the CME box's address; any other caller is refused.</td></tr>
+  <tr><td>MirrorRole, ClockMode</td><td>Leave as <code>"Remote"</code> and <code>"Realtime"</code>.</td></tr>
+</table></div>
+
+<h4>WorkspaceConfig.json</h4>
+<pre>{
+  "ServerName": "CME_NewRelease",
+  "DirectoriesRoot": "Data",
+  "Workspaces": [
+    // if StrategyName is blank, the workspace shows the aggregate of all strategies (a server workspace)
+    { "StrategyName": "", "WorkspaceName": "RiskDesk" }
+  ]
+}</pre>
+<div class="table-wrap"><table>
+  <tr><th>Field</th><th>What it means</th></tr>
+  <tr><td>ServerName</td><td>Same as in <code>MirrorConfig.json</code>.</td></tr>
+  <tr><td>DirectoriesRoot</td><td>Same as in <code>MirrorConfig.json</code>. If the two differ, the Workspace waits forever.</td></tr>
+  <tr><td>Workspaces</td><td>One window per entry, opened in list order. The first is the main window.</td></tr>
+  <tr><td>StrategyName</td><td>Keep this <code>""</code> (empty). Empty means a server workspace, which is what the risk desk uses.</td></tr>
+  <tr><td>WorkspaceName</td><td>The name of a saved layout to open at start, without the <code>.workspace</code> ending, for example <code>"RiskDesk"</code>. Empty opens a blank window. A name that does not exist also opens a blank window, with no error. See section 4.3.</td></tr>
+</table></div>
+
+<figure>
+  <div class="placeholder">SCREENSHOT PLACEHOLDER: WorkspaceConfig.json open in Notepad, with WorkspaceName set to "RiskDesk"</div>
+  <figcaption>Figure 3 (placeholder). WorkspaceConfig.json set to open the saved layout "RiskDesk" in a server workspace at start-up.</figcaption>
+</figure>
+
+<h3>2.4 If it waits or refuses</h3>
+<div class="table-wrap"><table>
+  <tr><th>What you see</th><th>What to do</th></tr>
+  <tr><td>Workspace console keeps saying "failed to connect to server ... will try again"</td><td>
+    <ol>
+      <li>Check the Mirror's console window is open. If not, double-click <code>Mirror.exe</code>.</li>
+      <li>Check the Mirror console for "refused &lt;address&gt;, not in IPWhitelist". If you see it, the box is calling from an address not in the list. Tell the owner.</li>
+      <li>Check <code>ServerName</code> and <code>DirectoriesRoot</code> are the same in both config files.</li>
+    </ol>
+  </td></tr>
+  <tr><td>Mirror stops with a message containing "array layout" and "deploy the same build to both ends"</td><td>The box and the desk run different versions. Ask the owner for the zip that matches the box. Do not use the desk until then.</td></tr>
+  <tr><td>Mirror stops with "...the copy this desk's open Workspaces still map is ..."</td><td>Close every Workspace window, then start the Mirror again.</td></tr>
+  <tr><td>Mirror stops with "the Local end serves X; this Remote is configured for Y"</td><td>Your <code>ServerName</code> (or <code>ClockMode</code>) does not match the box. Fix it in both config files.</td></tr>
+  <tr><td>A config error naming the file, for example "ServerName is empty; fill in ..."</td><td>The file was missing or empty, and was written with defaults. Fill in the field it names.</td></tr>
+</table></div>
+<div class="box note">
+  <p>The Mirror's console may close straight away when it stops, before you can read the message. <strong>To read it:</strong></p>
+  <ol>
+    <li>Open the package folder in Explorer.</li>
+    <li>Click the address bar, type <code>cmd</code> and press Enter. A command window opens in that folder.</li>
+    <li>Type <code>Mirror.exe</code> and press Enter.</li>
+    <li>Read the message. It stays in that window after the Mirror stops.</li>
+  </ol>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="mirror">3. The Mirror</h2>
+
+<h3>3.1 What it is and why it is needed</h3>
+<p>The trading server keeps all its live state in the CME box's memory: orders, positions, limits, order books, rate limits. The desk PC cannot read that memory over the internet.</p>
+<p>The Mirror solves this. It keeps a live copy of the server's memory on the desk PC, received over one network link. The Workspace reads that copy. Updates arrive at least every 100 ms, and at once when one of your orders changes.</p>
+<p>The link also carries your actions up to the box: new orders, amends, cancels, limit edits, pause and play. On the box, each of your Workspace windows has a stand-in that replays your clicks. The normal risk checks run there, on the box.</p>
+<p>This has two consequences:</p>
+<ul>
+  <li>Your own order appears on screen only after it has gone to the box and come back: about one round trip (the latency in the top bar), plus up to 100 ms.</li>
+  <li>The desk has no refusal pop-ups and no Audit Trail. The Audit Trail widget is empty on a desk. Refused orders are alerted on the box and sent to Telegram.</li>
+</ul>
+<p>One Mirror serves every Workspace window on the PC. Every window shows the same latency.</p>
+
+<h3>3.2 When the link drops</h3>
+<ul>
+  <li>Both ends send something at least once a second. If nothing arrives for 10 seconds, the link is declared dead.</li>
+  <li>The top bar then reads "Connection broken – reconnecting…" (see section 5).</li>
+  <li>When the box declares the link dead, <strong>it cancels every working order placed from this desk</strong>. Algo orders are not affected.</li>
+  <li>While the link is down, your clicks are dropped. No message tells you. The top bar is your signal.</li>
+  <li>An order that reached the exchange just as the link died keeps working, unseen, for up to 10 seconds before it is cancelled.</li>
+</ul>
+<div class="box danger">
+  <p><strong>If the latency is climbing, do not click.</strong> Clicks are not thrown away during a short stall. A click made during a stall shorter than 10 seconds is carried out when the stall ends, at the market as it is then. Example: you click Buy one second into a nine-second stall. The order reaches the exchange about eight seconds later, at whatever the price is by then.</p>
+</div>
+<p>When the link returns, the Mirror receives a full fresh copy and your windows carry on as before. A click in the first moment after reconnecting may be dropped; check that it appeared.</p>
+
+<h3>3.3 Restarts</h3>
+<div class="table-wrap"><table>
+  <tr><th>What restarts</th><th>What you see</th><th>What happens to orders</th></tr>
+  <tr><td>The trading server on the box</td><td>"Connection broken – reconnecting…" at once. When the server is back, every Workspace window rebuilds itself in place: same size, position and widgets. A window that cannot reconnect closes and says why in its console.</td><td>A restarted server cancels every working order. After a restart the algos are paused until the trader resumes them.</td></tr>
+  <tr><td>The Mirror on the box</td><td>Treated as a link drop. The windows carry on after it reconnects.</td><td>This desk's working manual orders are cancelled.</td></tr>
+  <tr><td>The Mirror on the desk</td><td>"Remote Mirror offline" until you restart <code>Mirror.exe</code>. Then the open windows rebuild themselves.</td><td>After 10 s with no link, this desk's working manual orders are cancelled.</td></tr>
+  <tr><td>You close the Workspace</td><td>The window closes. The Mirror keeps running.</td><td><strong>Manual orders placed from that window that are still working are cancelled.</strong></td></tr>
+</table></div>
+<div class="box note"><p>After a server restart, a ladder reopens on the same instrument number. If the server numbered its instruments differently, the ladder can show a different instrument. Check the ladder's title.</p></div>
+
+<!-- ============================================================ -->
+<h2 id="workspace">4. The Workspace window</h2>
+<p>The window has a top bar with the menus on the left and the status text on the right. Below it is a grey area where widgets float.</p>
+
+<figure class="full">
+  <img src="images/topbar.png" alt="The whole top bar: menus on the left, latency and clock on the right">
+  <figcaption>Figure 4. The top bar. Menus on the left; latency and clock on the right (section 5).</figcaption>
+</figure>
+
+<h3>4.1 The menus</h3>
+<figure class="half">
+  <img src="images/menubar.png" alt="The three menus: File, Mode, Widgets">
+  <figcaption>Figure 5. The three menus at the left of the top bar: File, Mode and Widgets.</figcaption>
+</figure>
+<figure class="half">
+  <img src="images/menu-file.png" alt="File menu">
+  <figcaption>Figure 6. The File menu.</figcaption>
+</figure>
+<div class="table-wrap"><table>
+  <tr><th>File menu item</th><th>What it does</th></tr>
+  <tr><td>New Server Workspace</td><td>Opens another blank server workspace window. In a server workspace this does the same as Extend Workspace.</td></tr>
+  <tr><td>New Strategy Workspace...</td><td>Opens one strategy's workspace. Not used on the risk desk.</td></tr>
+  <tr><td>Extend Workspace</td><td>Opens another blank server window, for example for a second monitor. Saving a layout from any server window also saves every other open server window as an extra window (section 4.3).</td></tr>
+  <tr><td>Open Workspace...</td><td>Loads a saved layout into this window (section 4.3).</td></tr>
+  <tr><td>Save Workspace</td><td>Saves to the layout file this window was last opened from or saved to. If there is none, it asks for a name.</td></tr>
+  <tr><td>Save Workspace As...</td><td>Saves the layout under a new name.</td></tr>
+  <tr><td>Save Screenshot...</td><td>Saves a picture (PNG) of this window.</td></tr>
+  <tr><td>Open Server Directory</td><td>Opens the server's folder in Explorer.</td></tr>
+  <tr><td>Exit</td><td>Closes every window of this Workspace program. The Mirror keeps running. A second Workspace started by running <code>Start.bat</code> again stays open. Closing the last window of this program does the same as Exit.</td></tr>
+</table></div>
+
+<figure class="half">
+  <img src="images/menu-mode.png" alt="Mode menu, both items greyed out">
+  <figcaption>Figure 7. The Mode menu is information only. On the desk, "Realtime" is ticked. (This test screenshot shows Simulation.)</figcaption>
+</figure>
+
+<figure class="half">
+  <img src="images/menu-widgets.png" alt="Widgets menu">
+  <figcaption>Figure 8. The Widgets menu. The risk desk uses Positions, Orders, Send Order, Risk Limits, Message Efficiency and Rate Limits. "Instruments" opens a list of instruments. Audit Trail is empty on a desk. There is no Ladder item: open a ladder from Positions (section 7).</figcaption>
+</figure>
+
+<h3>4.2 Arranging widgets</h3>
+<ol>
+  <li><strong>Add</strong> a widget from the <span class="ui">Widgets</span> menu. It opens in the middle of the window at its normal size.</li>
+  <li><strong>Move</strong> it by dragging its grey title bar.</li>
+  <li><strong>Resize</strong> it by dragging any edge or corner.</li>
+  <li><strong>Bring it to the front</strong> by clicking anywhere on it.</li>
+  <li><strong>Minimise</strong> it to its title bar with the <span class="ui">—</span> button. Click <span class="ui">—</span> again to open it. It reopens at a standard height, not its old size; drag it back to size.</li>
+  <li><strong>Close</strong> it with the <span class="ui">✕</span> button.</li>
+</ol>
+
+<h4>Columns</h4>
+<ol>
+  <li>Right-click any column header. A tick list of every column appears.</li>
+  <li>Click a column name to show or hide it. Some useful columns are hidden by default; this guide marks them <span class="hidden-column">(hidden)</span>.</li>
+  <li>Drag the edge of a header to make a column wider or narrower.</li>
+  <li>Drag a header sideways to move the column.</li>
+  <li>Click a header to sort by that column.</li>
+</ol>
+<figure class="half">
+  <img src="images/column-menu.png" alt="Column tick list from a right-click on a Risk Limits header">
+  <figcaption>Figure 9. Right-click a column header to show or hide columns. This is the Risk Limits list; unticked columns are hidden.</figcaption>
+</figure>
+<div class="box note"><p>Column choices are saved with a layout for Risk Limits, Orders, Message Efficiency and Rate Limits. They are <strong>not</strong> saved for Positions: hidden or resized Positions columns come back as default when a layout is loaded.</p></div>
+
+<h3>4.3 Saving and loading a layout</h3>
+<p>A layout (a <code>.workspace</code> file) remembers the window's size and position, every widget with its position and size, and every other server window open at the time (opened with <span class="ui">Extend Workspace</span> or <span class="ui">New Server Workspace</span>; in a server workspace the two do the same thing). Close any extra windows you do not want before saving. Layouts are stored in <code>BigajRiskDesk\Data\Servers\Realtime\CME_NewRelease\Workspaces</code>. Every server workspace window on this desk can use them.</p>
+
+<h4>To save a layout</h4>
+<ol>
+  <li>Arrange the widgets as you want them. Open any minimised widgets first: a widget saved while minimised reopens as a thin strip, and needs two clicks on <span class="ui">—</span> to open.</li>
+  <li>Close any extra server windows you do not want saved with this layout.</li>
+  <li>Choose <span class="ui">File &gt; Save Workspace As...</span></li>
+  <li>The "Save Workspace As" dialog opens in the Workspaces folder and suggests <code>default.workspace</code>.</li>
+  <li>Type a name, for example <code>RiskDesk</code>, and click <strong>OK</strong>.</li>
+  <li>Later changes: use <span class="ui">File &gt; Save Workspace</span> to save over the same file.</li>
+</ol>
+<figure class="full">
+  <img src="images/save-workspace-dialog.png" alt="Save Workspace As dialog">
+  <figcaption>Figure 10. The "Save Workspace As" dialog. On the desk it opens in <code>...\Data\Servers\Realtime\CME_NewRelease\Workspaces</code>.</figcaption>
+</figure>
+
+<h4>To load a layout</h4>
+<ol>
+  <li>Choose <span class="ui">File &gt; Open Workspace...</span></li>
+  <li>Pick the <code>.workspace</code> file and click <strong>OK</strong> (or double-click it).</li>
+  <li>The window takes the saved size and position, its widgets are replaced by the saved ones, and any saved extra windows open too.</li>
+</ol>
+<figure class="full">
+  <img src="images/open-workspace-dialog.png" alt="Open Workspace dialog listing RiskDesk.workspace">
+  <figcaption>Figure 11. The "Open Workspace" dialog, listing a saved layout named RiskDesk.workspace.</figcaption>
+</figure>
+<div class="box note">
+  <ul>
+    <li>Loading a layout into a window that already has extra windows open does not close them. Close them first.</li>
+    <li>If a save or load fails, the only message is in the Workspace's console window. Nothing pops up.</li>
+  </ul>
+</div>
+
+<h4>To open a layout automatically at start-up</h4>
+<ol>
+  <li>Save the layout, for example as <code>RiskDesk.workspace</code>.</li>
+  <li>Close the Workspace.</li>
+  <li>Open <code>WorkspaceConfig.json</code> in Notepad.</li>
+  <li>Set <code>"WorkspaceName":"RiskDesk"</code> (no <code>.workspace</code> ending). Keep <code>"StrategyName":""</code>.</li>
+  <li>Save the file and double-click <code>Start.bat</code>.</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2 id="topbar">5. The top bar: latency, connection and clock</h2>
+<p>At the right of the top bar is one line of text, refreshed every 100 ms. On the desk it shows the <strong>latency</strong>, then the <strong>clock</strong>.</p>
+<figure class="half">
+  <img src="images/topbar-status-connected.png" alt="32.044 ms  2026-02-03 08:00:16.923">
+  <figcaption>Figure 12. Healthy: the latency in milliseconds, then the clock. (This test link was local, so 32 ms. Over the internet it will be higher.)</figcaption>
+</figure>
+
+<h3>5.1 The latency</h3>
+<ul>
+  <li>It is the full round trip from the desk to the CME box and back, including the time the box takes to answer.</li>
+  <li>It is the worst of roughly the last second. During a stall it climbs, second by second.</li>
+  <li>It is shown to the microsecond, so a healthy link visibly flickers.</li>
+  <li>It reads a little above the real click delay.</li>
+</ul>
+
+<h3>5.2 The connection states</h3>
+<div class="table-wrap"><table>
+  <tr><th>Text shown</th><th>Meaning</th><th>What to do</th></tr>
+  <tr><td>"264.764 ms" (a number)</td><td>The link is healthy.</td><td>Nothing. Watch for it climbing.</td></tr>
+  <tr><td>"Connection broken – reconnecting…"</td><td>The link to the box is down: a clean close, or 10 s with no answer. The box Mirror or the box server may have stopped.</td><td>Do not click. Your working manual orders will be cancelled. Wait for it to come back; if it does not within a minute or two, call the trader or owner.</td></tr>
+  <tr><td>"Remote Mirror offline"</td><td>The Mirror on this PC has stopped (closed, crashed, or refused a build mismatch).</td><td>Read its console if it is still open, then double-click <code>Mirror.exe</code>. The Workspace rebuilds itself.</td></tr>
+  <tr><td>"Remote Mirror not responding"</td><td>The Mirror on this PC is running but stuck for 10 s or more.</td><td>Close it from Task Manager and double-click <code>Mirror.exe</code>.</td></tr>
+</table></div>
+<figure>
+  <img src="images/topbar-status-connection-broken.png" alt="Connection broken – reconnecting…  2026-02-03 08:01:16.339">
+  <figcaption>Figure 13. The link to the box is down. The clock has stopped at its last value.</figcaption>
+</figure>
+<figure>
+  <img src="images/topbar-status-mirror-offline.png" alt="Remote Mirror offline  2026-02-03 08:01:16.339">
+  <figcaption>Figure 14. The Mirror on this PC has stopped.</figcaption>
+</figure>
+<div class="box warn"><p><strong>The colour of the bar does not show the connection.</strong> The bar is green whenever the desk runs live (yellow only in a test system), connected or not. Always read the text.</p></div>
+
+<h3>5.3 The clock</h3>
+<p>The clock is the time of the <strong>latest market-data update the server received</strong> that changed one of its order books. It is the moment that update arrived at the CME box.</p>
+<ul>
+  <li>It is shown in <strong>UTC</strong>, not your local time. In UK summer time it reads one hour behind London clocks; in winter it matches them.</li>
+  <li>During trading hours it should tick along constantly. <strong>If it stops while the market is active, something is wrong:</strong> the server is not getting market data. The feed is down, or the server is stuck. Call the trader or owner.</li>
+  <li>It also stops, quite normally, when the market is closed or halted (for example the daily CME maintenance break and weekends), or when the server has no instruments open.</li>
+</ul>
+
+<h3>5.4 Reading the two together</h3>
+<div class="table-wrap"><table>
+  <tr><th>Clock</th><th>Latency</th><th>Meaning</th></tr>
+  <tr><td>Ticking</td><td>Steady number</td><td>All well.</td></tr>
+  <tr><td>Frozen</td><td>"Connection broken – reconnecting…" or climbing</td><td>The link, the box Mirror or the box server is down. Do not click. Your orders are cancelled after 10 s of silence.</td></tr>
+  <tr><td>Frozen</td><td>Healthy number</td><td>The box is reachable but no market data is changing the books. Normal if the market is closed or halted. During trading hours it is a feed problem: call the trader or owner.</td></tr>
+  <tr><td>Any</td><td>"Remote Mirror offline" or "not responding"</td><td>A problem on this PC. Restart <code>Mirror.exe</code>.</td></tr>
+</table></div>
+
+<!-- ============================================================ -->
+<h2 id="widgets">6. The risk widgets</h2>
+<p>Open each from the <span class="ui">Widgets</span> menu. In the server workspace every widget shows the firm-wide picture: every instrument the server trades, every order from every algo and every desk, and the firm's limits. Grids cannot be typed into; changes are made through right-click menus.</p>
+<p>A column marked <span class="hidden-column">(hidden)</span> is hidden by default. Right-click a column header to show it.</p>
+
+<!-- ------------------------------------------------------------ -->
+<h3 id="positions">6.1 Positions</h3>
+<p>One row per instrument the server trades. Each row is the <strong>firm's</strong> position: every strategy's fills plus every manual fill. This is also where you pause and resume the algos.</p>
+<figure class="full">
+  <img src="images/positions.png" alt="Positions widget with four instruments, 6J paused">
+  <figcaption>Figure 15. Positions. The ▶ and ⏸ buttons in the title bar resume and pause the algos on every instrument. Here 6J is paused. Row colour shows long, short or flat; profit cells are green when positive and red when negative.</figcaption>
+</figure>
+
+<div class="table-wrap"><table>
+  <tr><th>Column</th><th>What it shows</th></tr>
+  <tr><td>StrategyId <span class="hidden-column">(hidden)</span></td><td>The strategy of the most recent fill on this instrument (0 after each server start until the first fill). It is not who owns the row: the row is always the firm's.</td></tr>
+  <tr><td>ShortSymbol</td><td>The instrument's short name, for example "6E Mar26".</td></tr>
+  <tr><td>Symbol <span class="hidden-column">(hidden)</span></td><td>The full exchange symbol.</td></tr>
+  <tr><td>AlgoStatus</td><td>The firm's master algo switch for this instrument: "Live" or "Paused".</td></tr>
+  <tr><td>InstrumentId <span class="hidden-column">(hidden)</span></td><td>The server's internal number for the instrument.</td></tr>
+  <tr><td>Quantity</td><td>The firm's net position in lots. Positive is long, negative is short, 0 is flat.</td></tr>
+  <tr><td>AvgPrice</td><td>The average entry price of the open position. Adding to a position averages it; a partial close keeps it; flipping from long to short (or back) resets it to the fill price. "NaN" when flat.</td></tr>
+  <tr><td>Profit</td><td>Total profit or loss in the contract's currency (US dollars on CME): Realized plus Floating. "NaN" when there is no market price to mark against (see below).</td></tr>
+  <tr><td>Realized</td><td>Profit or loss already locked in on lots that have been closed.</td></tr>
+  <tr><td>Floating</td><td>Profit or loss on the open position if it were valued at the current mid price. 0 when flat, "NaN" when there is no mark.</td></tr>
+  <tr><td>QuantityTraded</td><td>Total lots filled on this instrument, buys and sells both counted as positive, manual fills included. It is kept across sessions, not reset daily.</td></tr>
+  <tr><td>ProfitPerSide</td><td>Profit divided by QuantityTraded: profit per lot traded. 0 when nothing has traded.</td></tr>
+</table></div>
+<p><strong>How profit is marked.</strong> The mark is the mid price, halfway between the server's best bid and best ask. Profit and Floating show "NaN" when the book has no bid or no ask, or when the instrument is not in its trading session. A single "NaN" that clears on the next refresh is harmless.</p>
+
+<h4>The right-click menus</h4>
+<figure class="half">
+  <img src="images/positions-row-menu.png" alt="Positions row menu for 6E: Pause Algo, Create Order, Create Close Order, Open Ladder">
+  <figcaption>Figure 16. Right-click a row: Pause Algo (or Resume Algo), Create Order, Create Close Order, Open Ladder.</figcaption>
+</figure>
+<figure class="half">
+  <img src="images/positions-row-menu-paused.png" alt="Positions row menu for paused 6J with Resume Algo">
+  <figcaption>Figure 17. On a paused row the first item reads "Resume Algo".</figcaption>
+</figure>
+<figure class="half">
+  <img src="images/positions-header-menu.png" alt="Positions header menu with Pause All Algos, Resume All Algos and column list">
+  <figcaption>Figure 18. Right-click a column header: Pause All Algos, Resume All Algos, then the column list. Right-clicking empty space gives the two "All" items only.</figcaption>
+</figure>
+
+<h4>Pausing and resuming the algos</h4>
+<p>Each instrument has a firm-wide <strong>master switch</strong>. An algo may trade an instrument only while its own switch and the master switch are both Live.</p>
+<p><strong>To pause one instrument:</strong></p>
+<ol>
+  <li>Right-click the instrument's row in Positions.</li>
+  <li>Click <span class="ui">Pause Algo</span>.</li>
+  <li>Check that AlgoStatus on that row now reads "Paused" (within about a second on the desk).</li>
+</ol>
+<p><strong>To pause every instrument:</strong></p>
+<ol>
+  <li>Click <span class="ui">⏸</span> in the Positions title bar, or right-click a column header or empty space and choose <span class="ui">Pause All Algos</span>.</li>
+  <li>Check that every row's AlgoStatus reads "Paused".</li>
+</ol>
+<p><strong>To resume</strong> (only when the trader asks):</p>
+<ol>
+  <li>For one instrument, right-click its row and click <span class="ui">Resume Algo</span>. For every instrument, click <span class="ui">▶</span> in the title bar, or right-click a header or empty space and choose <span class="ui">Resume All Algos</span>.</li>
+  <li>Check that the rows' AlgoStatus reads "Live".</li>
+</ol>
+
+
+<p><strong>What pausing does:</strong></p>
+<ul>
+  <li>Every algo on that instrument cancels its own working orders the next time it runs, and sends no new ones.</li>
+  <li>The server refuses any new algo order that crosses with the pause.</li>
+</ul>
+<p><strong>What pausing does not do:</strong></p>
+<ul>
+  <li>It does not cancel or block manual orders.</li>
+  <li>It does not change any strategy's own switch.</li>
+  <li>It does not survive a server restart: after a restart the master switch is Live again. (In live trading every strategy starts paused after a restart anyway, until the trader resumes it.)</li>
+</ul>
+
+<p><strong>Create Order</strong> and <strong>Create Close Order</strong> open the Send Order widget for this instrument (section 7). <strong>Create Close Order</strong> fills in the quantity that would flatten the <em>firm's</em> whole position on that instrument.</p>
+
+<!-- ------------------------------------------------------------ -->
+<h3 id="risklimits">6.2 Risk Limits</h3>
+<p>One row per instrument. It shows the <strong>firm's</strong> three limits, and the firm's live exposure from every order on the instrument, algo and manual. Rows refresh every quarter of a second.</p>
+<figure class="full">
+  <img src="images/risk-limits.png" alt="Risk Limits widget with default columns">
+  <figcaption>Figure 19. Risk Limits with its default columns.</figcaption>
+</figure>
+<figure class="full">
+  <img src="images/risk-limits-all-columns.png" alt="Risk Limits with every column shown">
+  <figcaption>Figure 20. Risk Limits with every column turned on, including the hidden worst-case quantities and the file name. This picture was taken after the edit shown below, so 6E reads MaxPositionQuantity 30 with a newer Timestamp, and the positions have moved on.</figcaption>
+</figure>
+
+<h4>The three limits</h4>
+<ul>
+  <li><strong>MaxOrderQuantity</strong>: the biggest single order. Applies to manual and algo orders.</li>
+  <li><strong>MaxPositionQuantity</strong>: the biggest firm position, long or short, assuming every working order on that side fills. Applies to manual and algo orders.</li>
+  <li><strong>MaxFillsPerSession</strong>: the most lots the algos may fill in one session. Applies to algo orders only.</li>
+</ul>
+
+<h4>Every column</h4>
+<div class="table-wrap"><table>
+  <tr><th>Column</th><th>What it shows</th></tr>
+  <tr><td>ShortSymbol</td><td>The instrument's short name.</td></tr>
+  <tr><td>Symbol <span class="hidden-column">(hidden)</span></td><td>The full exchange symbol.</td></tr>
+  <tr><td>InstrumentId <span class="hidden-column">(hidden)</span></td><td>The server's internal number for the instrument.</td></tr>
+  <tr><td>MaxOrderQuantity</td><td>The largest single order allowed, in lots. An order whose unfilled quantity is bigger is refused. For an amend it is the new unfilled quantity that counts. <strong>0 means no order at all is allowed</strong>, not even a closing one. Existing orders can still be cancelled.</td></tr>
+  <tr><td>MaxPositionQuantity</td><td>The largest firm position allowed, long or short, in lots, counting every working order on that side as if it filled.</td></tr>
+  <tr><td>MaxFillsPerSession</td><td>The most lots the algos may fill on this instrument in one session, buys and sells both counted, assuming every working algo lot fills. Manual orders ignore it. 0 stops the algos only.</td></tr>
+  <tr><td>Position</td><td>The firm's net position in lots: positive long, negative short.</td></tr>
+  <tr><td>FillsThisSession</td><td>Lots filled by algo orders this session, both sides counted as positive. Manual fills never count. Goes back to 0 when the session closes. A server restart mid-session also starts it at 0.</td></tr>
+  <tr><td>WorstWorkingLongQuantity <span class="hidden-column">(hidden)</span></td><td>Lots that all working buy orders (manual and algo) could still fill. Always 0 or more.</td></tr>
+  <tr><td>WorstWorkingLongPosition</td><td>Position plus WorstWorkingLongQuantity: the firm's position if every working buy filled. Compare it with MaxPositionQuantity.</td></tr>
+  <tr><td>WorstWorkingShortQuantity <span class="hidden-column">(hidden)</span></td><td>Lots that all working sell orders could still fill, written as a negative number. Always 0 or less.</td></tr>
+  <tr><td>WorstWorkingShortPosition</td><td>Position plus WorstWorkingShortQuantity: the firm's position if every working sell filled. Compare it with minus MaxPositionQuantity.</td></tr>
+  <tr><td>WorstWorkingFills <span class="hidden-column">(hidden)</span></td><td>Lots that all working algo orders, both sides, could still fill. Manual orders are not included.</td></tr>
+  <tr><td>WorstWorkingFillsThisSession</td><td>FillsThisSession plus WorstWorkingFills: the session's algo fills if every working algo lot filled. Compare it with MaxFillsPerSession.</td></tr>
+  <tr><td>Timestamp</td><td>When the server applied the last limit change, in UTC. If no limit file existed, the time the default was loaded. "—" if unknown.</td></tr>
+  <tr><td>File <span class="hidden-column">(hidden)</span></td><td>The name of the limit file on the CME box, for example "Future XCME 6E 2026-03-16.risklimit".</td></tr>
+</table></div>
+
+<div class="box note">
+  <p><strong>"Worst working" is a deliberate worst case.</strong> Each working order counts at the largest quantity it could still fill, including amends the exchange has not yet confirmed.</p>
+  <p><strong>Worked example.</strong> MaxPositionQuantity is 10. The firm is long 6 and has buy orders working for 3 more. WorstWorkingLongPosition is 6 + 3 = 9.</p>
+  <ul>
+    <li>A new buy of 2 is refused: 6 + 3 + 2 = 11, which is more than 10.</li>
+    <li>A new buy of 1 is allowed: 6 + 3 + 1 = 10.</li>
+    <li>A sell of up to 16 is allowed: the worst case lands at 6 − 16 = −10.</li>
+  </ul>
+</div>
+
+<h4>Editing a limit</h4>
+<figure class="half">
+  <img src="images/risk-limits-row-menu.png" alt="Risk Limits row menu: Edit RiskLimit">
+  <figcaption>Figure 21. Right-click a row to get "Edit RiskLimit".</figcaption>
+</figure>
+<ol>
+  <li>Right-click the instrument's row in Risk Limits.</li>
+  <li>Click <span class="ui">✏ Edit RiskLimit</span>.</li>
+  <li>The "Edit Risk Limit" dialog opens, with the instrument in bold. The three boxes hold the current limits, read fresh from the server.</li>
+  <li>Type the new values in <span class="ui">Max Order Qty</span>, <span class="ui">Max Position Qty</span> and <span class="ui">Max Fills / Session</span>. Each must be a whole number, 0 or more. "1,000" is accepted.</li>
+  <li>Click <span class="ui">Confirm</span> to send it, or <span class="ui">Cancel</span> to close without changing anything.</li>
+  <li>Check the row: within a second or so it shows the new values and a new Timestamp.</li>
+</ol>
+<figure class="full">
+  <img src="images/risk-limit-edit-dialog-over-workspace.png" alt="Edit Risk Limit dialog for 6E Mar26 open in the middle of the window, below the Risk Limits widget">
+  <figcaption>Figure 22. The dialog opens in the middle of the Workspace window, over the widgets.</figcaption>
+</figure>
+<figure class="half">
+  <img src="images/risk-limit-edit-dialog.png" alt="Edit Risk Limit dialog for 6E Mar26 showing 10, 25, 200">
+  <figcaption>Figure 23. The dialog as it opens, showing 6E's current limits.</figcaption>
+</figure>
+<figure class="half">
+  <img src="images/risk-limit-edit-dialog-edited.png" alt="Edit Risk Limit dialog with Max Position Qty changed to 30">
+  <figcaption>Figure 24. Max Position Qty changed from 25 to 30, ready to Confirm.</figcaption>
+</figure>
+<figure class="full">
+  <img src="images/risk-limits-after-edit.png" alt="Risk Limits after the edit, 6E shows 30">
+  <figcaption>Figure 25. After Confirm: 6E shows MaxPositionQuantity 30 and a new Timestamp.</figcaption>
+</figure>
+<p>If a box holds something that is not a whole number of 0 or more, a red message appears, for example "Max Position Qty must be a whole number &gt;= 0.", and nothing is sent.</p>
+<div class="box warn">
+  <ul>
+    <li><strong>The change applies to the very next order.</strong> It is saved on the CME box and loads again after a restart.</li>
+    <li><strong>Lowering a limit does not cancel working orders.</strong> If you lower Max Position Qty, an order already past it may stay or shrink, but cannot grow. If you lower Max Order Qty below an order's unfilled size, that order can no longer be amended at all, not even made smaller, unless the amend brings it down to the new limit or below. It can still be cancelled. Cancel orders yourself if you need exposure off now.</li>
+    <li><strong>Lowering a firm limit can pause an algo.</strong> If the new limit is below what an algo is working, the algo's next order can be refused, and any refused algo order pauses that algo's own switch. The desk cannot see this: AlgoStatus shows only the master switch. Tell the trader, who resumes the strategy from its own workspace.</li>
+    <li><strong>If nothing changes after Confirm,</strong> the edit did not arrive. Nothing pops up. Check the top bar is connected and try again.</li>
+    <li>An instrument with no saved limits starts with all three at 0 in live trading. Every order is then refused, manual included, until you set them.</li>
+  </ul>
+</div>
+
+<!-- ------------------------------------------------------------ -->
+<h3 id="ratelimits">6.3 Rate Limits</h3>
+<p>The exchange limits how many order messages the firm may send. The server enforces its own limit first. There is one row per order channel (a "CoreGroup"; on CME, one exchange session). On the live box there may be several rows; the test system has one.</p>
+<figure class="half">
+  <img src="images/rate-limits.png" alt="Rate Limits widget: Simulation, 1 s, 400, 1">
+  <figcaption>Figure 26. Rate Limits. This test system has one group named "Simulation" allowing 400 messages per second.</figcaption>
+</figure>
+<div class="table-wrap"><table>
+  <tr><th>Column</th><th>What it shows</th></tr>
+  <tr><td>CoreGroup</td><td>The order channel's name as the server publishes it, for example "SandP500".</td></tr>
+  <tr><td>Duration</td><td>The length of the rolling window, for example "3 s".</td></tr>
+  <tr><td>Limit</td><td>The most order messages allowed in any window of that length. 0 means every new order and every amend is refused, except an amend that only makes an order smaller at the same price. Cancels always go through.</td></tr>
+  <tr><td>Count</td><td>Messages counted in the window right now. It falls between sends as old messages leave the window. On the box it may read slightly high, never low. On the desk it is worked out from the copy, which can be a fraction of a second old, using this PC's clock. It can therefore read low. If this PC's clock is badly wrong it can show 0 or the full count. Keep the PC's clock synchronised.</td></tr>
+</table></div>
+<p><strong>What it refuses.</strong> When the window is full, the server refuses new orders and amends, manual and algo alike. It also refuses a sudden burst of more than 255 messages in a small slice of the window. Cancels, and amends that only reduce the quantity at the same price, are counted but <strong>never refused</strong>, so you can always cancel. A rate-limit refusal is silent: the order just does not appear or change. There are no row actions in this widget.</p>
+
+<!-- ------------------------------------------------------------ -->
+<h3 id="efficiency">6.4 Message Efficiency</h3>
+<p>CME compares the number of order messages a firm sends with the volume it trades, per product group and per trading day. If the ratio goes over CME's published benchmark, CME charges a surcharge. This widget shows where the firm stands. <strong>It only displays the numbers; it never refuses an order.</strong></p>
+<p>Messages are weighted: a new order counts 0, an amend 1, a cancel 3. Outside 07:00 to 16:00 CME time each weight is multiplied by 0.1. Efficiency is the weighted total divided by lots traded.</p>
+<figure class="full">
+  <img src="images/message-efficiency.png" alt="Message Efficiency widget with four product groups, all green">
+  <figcaption>Figure 27. Message Efficiency, one row per product group. Green here because RawMessages is still below the Tier3 threshold, so no benchmark applies yet.</figcaption>
+</figure>
+<div class="table-wrap"><table>
+  <tr><th>Column</th><th>What it shows</th></tr>
+  <tr><td>ProductGroupRoot</td><td>CME's product group code, for example "6E".</td></tr>
+  <tr><td>TradeDate</td><td>The trading day these counts belong to.</td></tr>
+  <tr><td>TradeTime <span class="hidden-column">(hidden)</span></td><td>The time of day (CME time) when that trading day ends.</td></tr>
+  <tr><td>RawMessages</td><td>Order messages sent today in the group, unweighted: every new order, amend and cancel counts 1.</td></tr>
+  <tr><td>WeightedMessages</td><td>The weighted message total (see weights above).</td></tr>
+  <tr><td>QuantityTraded</td><td>Lots filled today in the group, buys and sells both counted as positive.</td></tr>
+  <tr><td>Efficiency</td><td>WeightedMessages divided by QuantityTraded (equal to WeightedMessages if nothing has traded). The colour compares it with the benchmark that currently applies: <strong>green</strong> under 75%, <strong>yellow</strong> 75% to 90%, <strong>orange</strong> 90% to 100%, <strong>red</strong> at or over the benchmark. Green also while RawMessages is below the lowest tier threshold (Tier3).</td></tr>
+  <tr><td>Tier3, Tier2, Tier1</td><td>Daily raw-message thresholds. Once RawMessages passes a tier's threshold, that tier's benchmark applies. Tier1 has the highest threshold.</td></tr>
+  <tr><td>Tier3Benchmark, Tier2Benchmark, Tier1Benchmark</td><td>The highest Efficiency allowed once that tier applies.</td></tr>
+  <tr><td>Tier0, Tier0Benchmark</td><td>Shown for reference only; not used in the colour.</td></tr>
+</table></div>
+<p>The counts go back to 0 and TradeDate moves on when the instrument's session closes. If a row is red with every tier showing 0, the tier figures have not been set up for that group; tell the owner. Do not use the right-click folder items on the desk: they point at an empty folder on this PC.</p>
+
+<!-- ------------------------------------------------------------ -->
+<h3 id="orders">6.5 Orders</h3>
+<p>Every working order in the firm: every algo's and every desk's, on every instrument. Rows are blue for buys and purple for sells, grouped by instrument, highest price first. A row whose price has just changed may stay out of place. Click the StatePrice header to sort by price. Finished orders (filled, cancelled or refused) disappear from the list.</p>
+<figure class="full">
+  <img src="images/orders.png" alt="Orders widget listing algo orders">
+  <figcaption>Figure 28. Orders. The red ❌ in the title bar cancels every order in the list.</figcaption>
+</figure>
+<figure class="full">
+  <img src="images/orders-row-menu.png" alt="Orders row menu on a manual order: Cancel Order and Amend Order">
+  <figcaption>Figure 29. Right-click a manual order: Cancel Order and Amend Order.</figcaption>
+</figure>
+<figure class="full">
+  <img src="images/orders-row-menu-algo.png" alt="Orders row menu on an algo order: Cancel Order only">
+  <figcaption>Figure 30. Right-click an algo's order: Cancel Order only. Algo orders cannot be amended from the desk.</figcaption>
+</figure>
+<p><strong>Actions:</strong></p>
+<ul>
+  <li><strong>Cancel one order:</strong> right-click its row, then <span class="ui">❌ Cancel Order</span>. Works on any order, algo or manual. If you cancel one algo order while that algo is Live, it will usually place a new one at once.</li>
+  <li><strong>Amend one manual order:</strong> right-click its row, then <span class="ui">📝 Amend Order</span>. See section 7.3.</li>
+  <li><strong>Cancel everything:</strong> the ❌ button in the title bar (tooltip "Cancel All Orders").</li>
+</ul>
+<div class="box danger">
+  <p><strong>"Cancel All Orders" cancels every order in the firm</strong>, every algo's and every desk's. An algo that is still Live will simply place new orders straight away. To stop the algos, pause them in Positions first; pausing also cancels their orders.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="ladders">7. Ladders and manual orders</h2>
+<p>Manual orders from the server workspace are booked to the firm's house book: the firm's own account for manual trades (strategy 0), separate from every algo. No algo's position changes when they fill.</p>
+
+<h3>7.1 Opening a ladder</h3>
+<p><strong>From Positions:</strong></p>
+<ol>
+  <li>Right-click the instrument's row in <strong>Positions</strong>.</li>
+  <li>Click <span class="ui">Open Ladder</span>.</li>
+</ol>
+<p><strong>From the Instruments widget instead:</strong></p>
+<ol>
+  <li>Open <span class="ui">Widgets &gt; Instruments</span>.</li>
+  <li>Right-click the instrument's row.</li>
+  <li>Click <span class="ui">🪜 Open Ladder</span>. The item is greyed out until the instrument is allocated. "Allocate &lt;Symbol&gt;" makes the server open that instrument's market data. Only allocate an instrument if the trader or owner has asked you to.</li>
+</ol>
+<p>The ladder is saved with your layout and reopens on the same instrument.</p>
+
+<figure class="half">
+  <img src="images/ladder.png" alt="6E Mar26 ladder with Pos 4 and PnL 387.50">
+  <figcaption>Figure 31. A 6E ladder. Columns from left to right: My Buys, Bids, Price, Asks, My Sells. "5 &gt; 71" is a buy of 5 lots with 71 lots ahead of it in the queue.</figcaption>
+</figure>
+
+<h4>Reading the ladder</h4>
+<ul>
+  <li>The title is the instrument. The header shows <strong>Pos:</strong> (the firm's position: blue long, purple short) and <strong>PnL:</strong> (the firm's profit: green or red).</li>
+  <li>There are no column headings. From left to right the five columns are: <strong>My Buys</strong>, <strong>Bids</strong>, <strong>Price</strong>, <strong>Asks</strong>, <strong>My Sells</strong>.</li>
+  <li><strong>Bids</strong> (blue) and <strong>Asks</strong> (purple) show the market quantity at each price.</li>
+  <li><strong>My Buys</strong> shows a buy as "quantity &gt; ahead"; <strong>My Sells</strong> shows a sell as "ahead &lt; quantity". "Ahead" is the market quantity queued in front of the order.</li>
+  <li>In the server workspace, My Buys and My Sells show <strong>every</strong> order on the instrument, the algos' included, not only yours.</li>
+  <li>Scroll with the mouse wheel. The ladder centres itself once when it opens. The <span class="ui">➖</span> button at the top right ("Lock Ladder Center") keeps it centred while pressed in.</li>
+  <li>Right-click the header bar to untick "Show My Orders" and hide the two order columns.</li>
+  <li>There is no click-to-trade. A left-click does nothing. All orders go through right-click menus and the Send Order widget.</li>
+</ul>
+
+<h3>7.2 Creating an order</h3>
+<p><strong>From the ladder:</strong></p>
+<ol>
+  <li>Right-click the price you want.</li>
+  <li>Click <span class="ui">📝 Create Order @ &lt;price&gt;</span>. The Send Order widget opens on the Create tab with that price and quantity 0.</li>
+  <li>Type the quantity: <strong>positive to buy, negative to sell</strong>. Or use ▲ and ▼ (one lot per click).</li>
+  <li>Check the button. It reads "Create Buy N" in blue, or "Create Sell N" in purple.</li>
+  <li>Click it.</li>
+  <li>Check the order appears in the ladder and in Orders, about one round trip later.</li>
+</ol>
+<figure class="half">
+  <img src="images/ladder-menu-price.png" alt="Ladder right-click on a price: Create Order @ 1.18370">
+  <figcaption>Figure 32. Right-click a price on the ladder.</figcaption>
+</figure>
+
+<p><strong>From the Send Order widget</strong> (<span class="ui">Widgets &gt; Send Order</span>, or <span class="ui">Create Order</span> on a Positions row):</p>
+<ol>
+  <li>On the <span class="ui">Create</span> tab, pick the instrument from the drop-down. The price is set to the middle of the market and the quantity to 0.</li>
+  <li>Set the price: type it, use ▲ ▼ (one tick per click), or left-click a price on the small ladder on the right. A typed price is rounded to the nearest tick.</li>
+  <li>Set the quantity: positive to buy, negative to sell. Typing "-" first starts a sell.</li>
+  <li>Check the button text and colour, then click it.</li>
+</ol>
+<figure class="full">
+  <img src="images/send-order-create.png" alt="Send Order Create tab, 6E, price 1.18380, quantity 2, Create Buy 2">
+  <figcaption>Figure 33. Create tab ready to buy 2 lots at 1.18380.</figcaption>
+</figure>
+<figure class="full">
+  <img src="images/send-order-create-sell.png" alt="Send Order with quantity -2, Create Sell 2 in purple">
+  <figcaption>Figure 34. A negative quantity makes a sell: the button turns purple and reads "Create Sell 2".</figcaption>
+</figure>
+<p><strong>Create Close Order</strong> (right-click a Positions row) opens Send Order with the quantity that would flatten the <em>whole firm's</em> position on that instrument, at the mid price. Check the price and quantity before you click.</p>
+<p>All manual orders are limit orders that last for the day. Clicking with quantity 0 or no price does nothing. There are no keyboard shortcuts.</p>
+
+<h3>7.3 Amending an order</h3>
+<p>Only manual orders can be amended. Algo orders can only be cancelled from the desk.</p>
+<ol>
+  <li>Right-click the order: in the ladder, right-click its cell in My Buys or My Sells; or in Orders, right-click its row.</li>
+  <li>Click <span class="ui">📝 Amend Order</span>. The Send Order widget opens.</li>
+  <li><strong>Click the <span class="ui">Amend</span> tab.</strong> (The widget currently opens with the Create tab still highlighted and the order box empty. This is a known issue.)</li>
+  <li>Check the order box shows the right order, for example "6E Mar26 | Px: 1.18355 Qty: 5".</li>
+  <li>Change the price and/or the quantity. The quantity is the <strong>unfilled</strong> part of the order; a sell shows as negative. You cannot change a buy into a sell or back.</li>
+  <li>Click <span class="ui">Amend</span>.</li>
+  <li>Check the order moves on the ladder or in Orders.</li>
+</ol>
+<figure class="half">
+  <img src="images/ladder-menu-own-order.png" alt="Ladder right-click on own order: Create Order @, Order | Px: 1.18355 Qty: 5, Cancel Order, Amend Order">
+  <figcaption>Figure 35. Right-click your order's cell on the ladder: Cancel Order and Amend Order appear under the order's price and quantity.</figcaption>
+</figure>
+<figure class="full">
+  <img src="images/send-order-amend-as-opened.png" alt="Send Order as it opens from Amend Order: Create tab highlighted, order box empty">
+  <figcaption>Figure 36. How Send Order opens from "Amend Order" today: the Create tab is still highlighted and the order box is empty. Click the Amend tab.</figcaption>
+</figure>
+<figure class="full">
+  <img src="images/send-order-amend.png" alt="Send Order Amend tab with the 6E order selected, Amend and Cancel buttons">
+  <figcaption>Figure 37. The Amend tab with the order selected. Amend (blue for a buy, purple for a sell) and Cancel (red).</figcaption>
+</figure>
+<p><strong>From the Send Order widget directly:</strong></p>
+<ol>
+  <li>Open <span class="ui">Widgets &gt; Send Order</span>.</li>
+  <li>Click the <span class="ui">Amend</span> tab.</li>
+  <li>Pick the order from the drop-down.</li>
+  <li>Change the price and/or the quantity, then click <span class="ui">Amend</span>.</li>
+</ol>
+<p>The drop-down also lists algo orders. Picking one and clicking Amend does nothing; Cancel works.</p>
+<div class="box note">
+  <p><strong>Keep your place in the queue.</strong> If you keep the same price and only make the order smaller, it is sent as a reduction: it keeps its place in the queue and is never refused by the rate limit. Any other change (a new price, or a bigger size) loses the queue place. To take an order off, use Cancel, not a quantity of 0.</p>
+</div>
+
+<h3>7.4 Cancelling an order</h3>
+<p>Any one of these works, for manual and algo orders alike. Cancels are never refused by the rate limit.</p>
+<p><strong>From the ladder:</strong></p>
+<ol>
+  <li>Right-click the order's cell in My Buys or My Sells.</li>
+  <li>Click <span class="ui">❌ Cancel Order</span>.</li>
+</ol>
+<p><strong>From Orders:</strong></p>
+<ol>
+  <li>Right-click the order's row.</li>
+  <li>Click <span class="ui">❌ Cancel Order</span>.</li>
+</ol>
+<p><strong>From Send Order:</strong></p>
+<ol>
+  <li>Click the <span class="ui">Amend</span> tab.</li>
+  <li>Pick the order from the drop-down.</li>
+  <li>Click the red <span class="ui">Cancel</span>.</li>
+</ol>
+<p><strong>Everything at once:</strong></p>
+<ol>
+  <li>Click the ❌ in the Orders title bar. This cancels every order in the firm (see section 6.5).</li>
+</ol>
+<p>After any route, check the order has gone from the ladder and from Orders. If you cancel one algo order while that algo is Live, it will usually place a new one at once; pause it in Positions to stop it.</p>
+
+<h3>7.5 When an order is refused</h3>
+<p>The desk shows no pop-up for a refusal. What you see:</p>
+<ul>
+  <li>A refused new order never appears, or appears for a moment and vanishes.</li>
+  <li>A refused amend leaves the order at its old price and size.</li>
+</ul>
+<p>Refusals are alerted on the CME box and sent to Telegram, except the "silent" ones marked below.</p>
+<div class="table-wrap"><table>
+  <tr><th>Reason</th><th>What it means</th><th>What to do</th></tr>
+  <tr><td>QuantityExceedsRiskLimit</td><td>The order's unfilled quantity is above the firm's MaxOrderQuantity (or MaxOrderQuantity is 0).</td><td>Send a smaller order, or raise the limit in Risk Limits.</td></tr>
+  <tr><td>PositionExceedsRiskLimit</td><td>The order could take the firm past MaxPositionQuantity, counting every working order on that side, algo ones included.</td><td>Check WorstWorkingLongPosition / WorstWorkingShortPosition in Risk Limits. Send less, cancel other orders on that side, or raise the limit. Making an order smaller is never refused for position. It is still refused (QuantityExceedsRiskLimit) if the smaller size is above MaxOrderQuantity.</td></tr>
+  <tr><td>NotInSession</td><td>A new order while the instrument's market is not open.</td><td>Wait for the session to open.</td></tr>
+  <tr><td>TooManyOrdersPerSecond <em>(silent)</em></td><td>The order channel's rate limit is full.</td><td>Check Rate Limits. Wait a moment and try again. Cancels still work.</td></tr>
+  <tr><td>CantAllocateClientOrderId</td><td>This window already has 64 working orders.</td><td>Cancel some, or use another window.</td></tr>
+  <tr><td>QuantityNotValid</td><td>Quantity outside 1 to 65,535 lots.</td><td>Fix the quantity.</td></tr>
+  <tr><td>TooManyActiveTargets <em>(silent)</em></td><td>Too many changes in flight on one order.</td><td>Wait for earlier amends to be confirmed, then try again.</td></tr>
+</table></div>
+<p>A manual order's refusal never pauses an algo.</p>
+
+<!-- ============================================================ -->
+<h2 id="manual-limits">8. Which limits a manual order obeys</h2>
+<p>A manual order is any order placed from a Workspace or a desk. It is checked on the CME box like this:</p>
+<div class="table-wrap"><table>
+  <tr><th>Check</th><th>Manual order?</th><th>Notes</th></tr>
+  <tr><td>Firm MaxPositionQuantity</td><td><strong>Applies</strong></td><td>Counts every working order on that side, algo ones included, not just the current position. Example: limit 10, firm long 6, algos bidding for 3: a manual buy of 2 is refused.</td></tr>
+  <tr><td>Firm MaxOrderQuantity</td><td><strong>Applies</strong></td><td>A manual order larger than this is refused. If it is 0, even a closing order is refused.</td></tr>
+  <tr><td>Order rate limit</td><td><strong>Applies</strong> to new orders and amends</td><td>Cancels and same-price reductions are never refused.</td></tr>
+  <tr><td>Market open</td><td><strong>Applies</strong> to new orders</td><td>A new order is refused while the instrument's session is not open.</td></tr>
+  <tr><td>Order size 1 to 65,535 lots</td><td><strong>Applies</strong></td><td>Applies to every order.</td></tr>
+  <tr><td>MaxFillsPerSession</td><td>Ignored</td><td>Manual fills also never add to FillsThisSession.</td></tr>
+  <tr><td>Strategy limits</td><td>Ignored</td><td>Only the firm's limits are checked.</td></tr>
+  <tr><td>Algo pause (master or strategy)</td><td>Ignored</td><td>You can trade manually while the algos are paused.</td></tr>
+  <tr><td>Message efficiency</td><td>Ignored</td><td>It never refuses anything, for anyone.</td></tr>
+</table></div>
+<div class="box warn"><p><strong>In short:</strong> manual orders ignore the fills limit, strategy limits and the algo pause. They still obey the firm's max position, the firm's max order size and the order rate limit, and a new order must be sent while the market is open.</p></div>
+
+<!-- ============================================================ -->
+<h2 id="troubleshooting">9. Troubleshooting</h2>
+<div class="table-wrap"><table>
+  <tr><th>Symptom</th><th>Likely cause</th><th>What to do</th></tr>
+  <tr><td>Workspace stays blank; its console repeats "failed to connect to server ... will try again"</td><td>Mirror not running, the box has not connected, or the config files disagree.</td><td>Follow section 2.4.</td></tr>
+  <tr><td>Mirror stops with a message containing "array layout" and "deploy the same build to both ends"</td><td>The desk and the box run different versions.</td><td>Ask the owner for the matching zip.</td></tr>
+  <tr><td>Mirror stops with "...move the Mirror's folder nearer the drive root"</td><td>The folder path is too long.</td><td>Move the folder to, for example, <code>C:\BigajRiskDesk</code>.</td></tr>
+  <tr><td>Mirror console shows "refused &lt;address&gt;, not in IPWhitelist"</td><td>Something other than the CME box (or the box from a new address) tried to connect.</td><td>Tell the owner. Do not add addresses yourself.</td></tr>
+  <tr><td>"Connection broken – reconnecting…"</td><td>Link, box Mirror or box server down.</td><td>Do not click. Your manual orders are being cancelled. Call if it lasts.</td></tr>
+  <tr><td>"Remote Mirror offline"</td><td>The Mirror on this PC stopped.</td><td>Double-click <code>Mirror.exe</code> (not Start.bat).</td></tr>
+  <tr><td>"Remote Mirror not responding"</td><td>The Mirror on this PC is stuck.</td><td>End it in Task Manager, then double-click <code>Mirror.exe</code>.</td></tr>
+  <tr><td>Latency number keeps climbing</td><td>The link is stalling.</td><td>Do not click: clicks are carried out late, at a different market.</td></tr>
+  <tr><td>Clock frozen, latency healthy, market open</td><td>The server is not getting market data.</td><td>Call the trader or owner.</td></tr>
+  <tr><td>Clock an hour off your wall clock</td><td>The clock is in UTC.</td><td>Nothing; this is normal.</td></tr>
+  <tr><td>AlgoStatus still "Live" after Pause</td><td>The link is down.</td><td>Check the top bar; phone the trader to pause the strategy directly.</td></tr>
+  <tr><td>Every order on an instrument refused, manual included</td><td>MaxOrderQuantity is 0 (often: no limits saved yet), or the market is closed.</td><td>Set the limits in Risk Limits; check the session.</td></tr>
+  <tr><td>Algo orders refused for too many fills (TooManyFillsPerSession)</td><td>FillsThisSession reached MaxFillsPerSession, or MaxFillsPerSession is 0.</td><td>Raise MaxFillsPerSession if that is intended, then ask the trader to resume that strategy. Any refused algo order (fills, position or size limit) pauses that strategy's own switch. The desk cannot see this: AlgoStatus shows only the master switch.</td></tr>
+  <tr><td>My order never appears, no alert</td><td>Rate limit full (silent refusal), or the link was down when you clicked.</td><td>Check Rate Limits and the top bar, then try again.</td></tr>
+  <tr><td>Amend Order opens with an empty order box</td><td>Known issue (section 7.3).</td><td>Click the Amend tab.</td></tr>
+  <tr><td>Profit shows "NaN"</td><td>No bid or no ask in the book, or the session is closed.</td><td>Nothing, unless it lasts during trading hours.</td></tr>
+  <tr><td>Positions columns reset after loading a layout</td><td>Positions does not save column choices.</td><td>Set them again after loading.</td></tr>
+  <tr><td>A ladder shows a different instrument after a server restart</td><td>The server numbered its instruments differently.</td><td>Close it and open a new ladder from Positions.</td></tr>
+  <tr><td>A second Workspace window appeared</td><td>Start.bat was run again.</td><td>Close the extra window. Restart only the Mirror with <code>Mirror.exe</code>.</td></tr>
+</table></div>
+
+</main>
+</body>
+</html>

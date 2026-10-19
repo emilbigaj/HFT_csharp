@@ -2,6 +2,7 @@
   "ServerName": "CME_NewRelease",
   "DirectoriesRoot": "Data",
   "Workspaces": [
-    { "StrategyName": "", "WorkspaceName": "" }
+    // if StrategyName is blank, the workspace shows the aggregate of all strategies (a server workspace)
+    { "StrategyName": "", "WorkspaceName": "RiskDesk" }
   ]
 }

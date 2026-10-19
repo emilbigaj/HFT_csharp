@@ -5,7 +5,7 @@ do not need the C# conversation, `patch_log.md` or `Spec.md` to act on it. C# is
 checked against the C# working tree on 2026-10-13.
 
 - **Baseline:** C# commit `9d6f3ab` ("Align with C++ (csharp_alignment_report_2026-10-05)"), which the C++ branch
-  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-14 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14).
+  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17).
 - **Supersedes** `cpp_alignment_report_2026-10-07.md`, which was written piecemeal from 2026-10-07 to 2026-10-12 and never
   handed over. Everything in it that still holds is folded in here; what later work made stale is listed in §9. Read this
   report, not that one. Earlier reports (`2026-10-04` and before) stay valid for their own items, except where §9 says
@@ -1142,6 +1142,14 @@ listed.
   field of `Instrument`, written by the feed thread with no sequence bumps; a strategy marks its P&L to it, a GUI to the server's book.
   `<server>/MarketsByPrice` (the server's book, which the C++ server writes) is unchanged: same name, same rows, same
   sequence bumps. A C++ strategy, if there is one, may keep its replica wherever it likes.
+- **C19. 2026-10-17, Workspace, widgets and the risk-desk package** (C# processes only, nothing to port, one thing to
+  check): Positions' Pause/Resume now sends `ControlAlgoStatus.StrategyId` = the Workspace's own strategy id, as Edit
+  RiskLimit already did, instead of the strategy id in the row's `PositionHeader.OrderHeader` (which `OnFill` overwrites
+  with the last fill's, so after an algo fill a server desk's Pause reached that algo's own switch, not the master). A
+  server workspace therefore always sends `ServerStrategyId` (0). **Check:** the C++ server's `OnControlAlgoStatus` turns
+  the master row for strategy id 0 (P25); no wire or layout change. Also C#-only: the Risk Limits menu lost "Copy
+  .risklimit File Path" and "Open RiskLimits Folder"; File > "New Global Workspace" is "New Server Workspace"; the desk's
+  `MirrorConfig.json` and `WorkspaceConfig.json` carry `//` comments (the C# reader skips them; neither file is read by C++).
 
 ---
 

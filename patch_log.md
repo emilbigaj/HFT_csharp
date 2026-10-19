@@ -4,6 +4,34 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-17 — File menu: New Server Workspace
+
+- `Workspace/Workspace.axaml(.cs)` — "New Global Workspace" is "New Server Workspace" (handler
+  `OnNewServerWorkspaceClick`): it opens a workspace on the server context, which the rest of the GUI calls a server
+  workspace. "New Strategy Workspace..." keeps its ellipsis (it opens a picker first). C++: nothing to port (GUI only).
+
+---
+
+## 2026-10-17 — Positions pause/resume sends the workspace's strategy id
+
+- `Widget/PositionsWidget.axaml.cs` — `ControlAlgoStatus.StrategyId` is `_context.Primary.StrategyId` (as Edit RiskLimit
+  sends), not the row's `OrderHeader.OrderId.StrategyId`. Why: `PositionHeader.OnFill` copies the last fill's header,
+  so after an algo fill a server workspace's Pause turned that algo's own switch instead of the master switch, the row
+  stayed Live and the other algos kept trading; Resume could switch on an algo paused in its own workspace. Now a
+  server workspace always turns the master switch and a strategy workspace its own. The hidden StrategyId column still
+  shows the row's last-fill strategy. C++: nothing to port (GUI only).
+
+---
+
+## 2026-10-17 — Risk Limits menu: no file path or folder items
+
+- `Widget/RiskLimitsWidget.axaml.cs` — the row menu lost "Copy .risklimit File Path" and the menu lost "Open RiskLimits
+  Folder"; a row shows its instrument and Edit RiskLimit, empty space shows nothing (as Rate Limits). Why: they date
+  from editing `.risklimit` files by hand, which ControlRiskLimit replaced, and on a desk they point at an empty local
+  folder. `Context.RiskLimitsDirectoryPath` stays. C++: nothing to port (GUI only).
+
+---
+
 ## 2026-10-16 — a strategy's own book is a field of its Instrument; a GUI's P&L marks to the server's book
 
 - `Provider/Position.cs`, `Provider/Context.cs` — `Profit` marks to the new `Context.TryGetQuote`, which picks the book:
