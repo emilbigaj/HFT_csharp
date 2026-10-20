@@ -4,6 +4,30 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-20 — Message efficiency checks CME's EMT (TierEMT); CME files rebuilt from the Q3 2026 benchmarks
+
+- `Execution/RateLimit.cs` — `Tier0` renamed `TierEMT` and now checked: CME's iLink session Excessive Messaging Threshold
+  (over 1,000,000 raw messages and over 500 per lot, $10,000 and port closure), on a new `EMTWeightedMessages` (the MEP's
+  weights without the overnight ×0.1; row 84 → 92 bytes, `Reset` zeroes it). Within = within the EMT and the MEP tier the
+  day is in; a cancel always is. A tier of 0 never applies (`MessageEfficiencyTier.IsApplied`), so a group outside CME's
+  MEP list is held to the EMT only. Realtime with no file: the EMT and no MEP tiers (`GetMinLimits`; was all zeros,
+  breached by every message). The weighter returns both weights from one call. Why: `Tier0` was never checked, and the
+  MEP score understates the EMT ratio up to 10× overnight.
+- `Widget/MessageEfficiencyWidget.axaml(.cs)` — columns TierEMT, EMTBenchmark, EMTWeightedMessages, EMTEfficiency; the
+  Efficiency colour is the nearer of the EMT and the MEP tier, through the same helpers (its copy of the tier choice is gone).
+- `S:\CME\MessageEfficiency` rebuilt: the 75 groups of CME's Q3 2026 benchmark list with their tiers, and every other
+  group in the instrument details (169) with `TierEMT` only; EMD and the other root-named files are gone. Backups
+  `MessageEfficiency_backup_2026-10-20_beforeRebuild` (the old 95) and `_Tier0` (the rebuild before the rename). GC and SI
+  are the only tiers that changed (raised by CME).
+- Verified: scratch checks (scratchpad\emtcheck) load BF and 6E from the new files; the BF example (1,050,000 raw, EMT
+  1,000/lot) refuses an amend and allows a cancel; the no-file default; for 6E below 1,000,000 raw messages the new
+  decision equals the old one in 2,000,000 random states. BenchmarkDotNet `Send`: 1.40 → 2.90 ns, no allocation (5.51 ns
+  with a second weighter call, which is why it is one call).
+- Spec.md "Two CME limits on one row", both guides. C++: P32 MUST PORT with P24, lockstep L13 (the box needs the rebuilt
+  files first: a file still saying `Tier0` leaves the EMT off).
+
+---
+
 ## 2026-10-20 — A user's Pause cancels the algo orders it stops, at the server
 
 - `Provider/Server.cs` — the `ControlType.AlgoStatus` case calls the new `CancelAlgoOrders` after `OnControlAlgoStatus`

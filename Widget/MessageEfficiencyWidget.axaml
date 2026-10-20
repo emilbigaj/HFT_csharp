@@ -49,15 +49,17 @@
 					</DataTemplate>
 				</DataGridTemplateColumn.CellTemplate>
 			</DataGridTemplateColumn>
+			<DataGridTextColumn Header="EMTWeightedMessages" Binding="{Binding EMTWeightedMessages}" Width="Auto"/>
+			<DataGridTextColumn Header="EMTEfficiency"    Binding="{Binding EMTEfficiency}"          Width="Auto"/>
 
-			<DataGridTextColumn Header="Tier3"            Binding="{Binding Tier3}"                     Width="Auto"/>
+			<DataGridTextColumn Header="Tier3"           Binding="{Binding Tier3}"                     Width="Auto"/>
 			<DataGridTextColumn Header="Tier3Benchmark"   Binding="{Binding Tier3Benchmark}"           Width="Auto"/>
 			<DataGridTextColumn Header="Tier2"            Binding="{Binding Tier2}"                     Width="Auto"/>
 			<DataGridTextColumn Header="Tier2Benchmark"   Binding="{Binding Tier2Benchmark}"           Width="Auto"/>
 			<DataGridTextColumn Header="Tier1"		      Binding="{Binding Tier1}"                     Width="Auto"/>
 			<DataGridTextColumn Header="Tier1Benchmark"   Binding="{Binding Tier1Benchmark}"           Width="Auto"/>
-			<DataGridTextColumn Header="Tier0"		      Binding="{Binding Tier0}"                     Width="Auto"/>
-			<DataGridTextColumn Header="Tier0Benchmark"   Binding="{Binding Tier0Benchmark}"           Width="Auto"/>
+			<DataGridTextColumn Header="TierEMT"		  Binding="{Binding TierEMT}"                   Width="Auto"/>
+			<DataGridTextColumn Header="EMTBenchmark"     Binding="{Binding EMTBenchmark}"             Width="Auto"/>
 		</DataGrid.Columns>
 	</DataGrid>
 </UserControl>

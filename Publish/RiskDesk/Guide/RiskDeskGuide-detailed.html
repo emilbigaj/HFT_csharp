@@ -697,6 +697,7 @@ OWNER CHECK 14 (handout): remove this whole OWNER CHECK comment block before the
 <h3 id="efficiency">6.4 Message Efficiency</h3>
 <p>CME compares the number of order messages a firm sends with the volume it trades, per product group and per trading day. If the ratio goes over CME's published benchmark, CME charges a surcharge. This widget shows where the firm stands. <strong>It only displays the numbers; it never refuses an order.</strong></p>
 <p>Messages are weighted: a new order counts 0, an amend 1, a cancel 3. Outside 07:00 to 16:00 CME time each weight is multiplied by 0.1. Efficiency is the weighted total divided by lots traded.</p>
+<p>CME has a second, harsher limit for every product group, the <strong>Excessive Messaging Threshold (EMT)</strong>: more than 1,000,000 messages in a day and more than 500 weighted messages per lot, with no 0.1 discount at night. Breaking it costs $10,000 and CME closes the order connection, which stops every product on it. The EMT columns show it.</p>
 <figure class="full">
   <img src="images/message-efficiency.png" alt="Message Efficiency widget with four product groups, all green">
   <figcaption>Figure 27. Message Efficiency, one row per product group. Green here because RawMessages is still below the Tier3 threshold, so no benchmark applies yet.</figcaption>
@@ -709,12 +710,14 @@ OWNER CHECK 14 (handout): remove this whole OWNER CHECK comment block before the
   <tr><td>RawMessages</td><td>Order messages sent today in the group, unweighted: every new order, amend and cancel counts 1.</td></tr>
   <tr><td>WeightedMessages</td><td>The weighted message total (see weights above).</td></tr>
   <tr><td>QuantityTraded</td><td>Lots filled today in the group, buys and sells both counted as positive.</td></tr>
-  <tr><td>Efficiency</td><td>WeightedMessages divided by QuantityTraded (equal to WeightedMessages if nothing has traded). The colour compares it with the benchmark that currently applies: <strong>green</strong> under 75%, <strong>yellow</strong> 75% to 90%, <strong>orange</strong> 90% to 100%, <strong>red</strong> at or over the benchmark. Green also while RawMessages is below the lowest tier threshold (Tier3).</td></tr>
-  <tr><td>Tier3, Tier2, Tier1</td><td>Daily raw-message thresholds. Once RawMessages passes a tier's threshold, that tier's benchmark applies. Tier1 has the highest threshold.</td></tr>
+  <tr><td>Efficiency</td><td>WeightedMessages divided by QuantityTraded (equal to WeightedMessages if nothing has traded). The colour shows whichever limit is nearer, the tier that currently applies or the EMT: <strong>green</strong> under 75%, <strong>yellow</strong> 75% to 90%, <strong>orange</strong> 90% to 100%, <strong>red</strong> at or over. Green also while RawMessages is below every threshold.</td></tr>
+  <tr><td>EMTWeightedMessages</td><td>The weighted total for the EMT: the same weights, without the 0.1 at night.</td></tr>
+  <tr><td>EMTEfficiency</td><td>EMTWeightedMessages divided by QuantityTraded.</td></tr>
+  <tr><td>Tier3, Tier2, Tier1</td><td>Daily raw-message thresholds. Once RawMessages passes a tier's threshold, that tier's benchmark applies. Tier1 has the highest threshold. 0 means the group is not in CME's program and has no such tier.</td></tr>
   <tr><td>Tier3Benchmark, Tier2Benchmark, Tier1Benchmark</td><td>The highest Efficiency allowed once that tier applies.</td></tr>
-  <tr><td>Tier0, Tier0Benchmark</td><td>Shown for reference only; not used in the colour.</td></tr>
+  <tr><td>TierEMT, EMTBenchmark</td><td>The EMT: once RawMessages passes TierEMT (1,000,000), EMTEfficiency must stay at or below EMTBenchmark (500).</td></tr>
 </table></div>
-<p>The counts go back to 0 and TradeDate moves on when the instrument's session closes. If a row is red with every tier showing 0, the tier figures have not been set up for that group; tell the owner. Do not use the right-click folder items on the desk: they point at an empty folder on this PC.</p>
+<p>The counts go back to 0 and TradeDate moves on when the instrument's session closes. Do not use the right-click folder items on the desk: they point at an empty folder on this PC.</p>
 
 <!-- ------------------------------------------------------------ -->
 <h3 id="orders">6.5 Orders</h3>

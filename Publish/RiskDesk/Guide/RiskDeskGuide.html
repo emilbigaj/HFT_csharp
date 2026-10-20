@@ -140,7 +140,7 @@ The detailed version (every column, every dialog, troubleshooting) is RiskDeskGu
 <p class="muted">The server's limit sits below CME's own per-session throttle, which rejects and then logs out a session that sends too fast: <a href="https://www.cmegroup.com/confluence/display/EPICSANDBOX/Messaging+Controls">CME Globex Messaging Controls</a>.</p>
 
 <h2>6. Message Efficiency</h2>
-<p>CME compares the team's order messages with the lots it trades, per product group and day, and charges if the ratio passes its benchmark. This widget only displays the numbers; it never refuses an order. Weights: new order 0, amend 1, cancel 3 (×0.1 outside 07:00–16:00 CME time).</p>
+<p>CME compares the team's order messages with the lots it trades, per product group and day, and charges if the ratio passes its benchmark. This widget only displays the numbers; it never refuses an order. Weights: new order 0, amend 1, cancel 3 (×0.1 outside 07:00–16:00 CME time). The EMT columns show CME's harsher limit for every group: over 1,000,000 messages a day and over 500 per lot, without the 0.1 at night, costs $10,000 and closes the order connection.</p>
 <img src="images/message-efficiency.png" alt="Message Efficiency widget">
 <table>
   <tr><th>Column</th><th>Meaning</th></tr>

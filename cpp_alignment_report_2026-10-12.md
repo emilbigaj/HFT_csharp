@@ -5,7 +5,7 @@ do not need the C# conversation, `patch_log.md` or `Spec.md` to act on it. C# is
 checked against the C# working tree on 2026-10-13.
 
 - **Baseline:** C# commit `9d6f3ab` ("Align with C++ (csharp_alignment_report_2026-10-05)"), which the C++ branch
-  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17, P30, P31 and C20 on 2026-10-20).
+  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17, P30, P31, P32 and C20 on 2026-10-20).
 - **Supersedes** `cpp_alignment_report_2026-10-07.md`, which was written piecemeal from 2026-10-07 to 2026-10-12 and never
   handed over. Everything in it that still holds is folded in here; what later work made stale is listed in §9. Read this
   report, not that one. Earlier reports (`2026-10-04` and before) stay valid for their own items, except where §9 says
@@ -61,6 +61,7 @@ Words used throughout:
 | P29 | `OrderRisk` rows | PORT-IF (optional) | no | C# keeps them as a plain array inside the RiskLayer instead of a shared region per context; no other process ever read them |
 | P30 | Names | **MUST PORT** | **yes** (L12) | `SocketHeader.ServerName/ClientName`, `ServerHeader.ServerName`, `AllocateClient.ClientName` are 256 bytes; `ServerHeader` is 305 |
 | P31 | `Server` | PORT | no | A user's Pause control cancels the covered working algo orders at once, server-side; manual orders never |
+| P32 | Message efficiency | **MUST PORT** (with P24) | **yes** (L13) | `Tier0` → `TierEMT`, checked on a new full-weight `EMTWeightedMessages` (row 84 → 92); a tier of 0 never applies; no-file default is the EMT only |
 | C1-C20 | Mirror, Workspace, widgets, harness, Logging, simulator, a strategy's own book | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
@@ -802,45 +803,54 @@ on them today, in C# or C++.) The port has five parts:
 Counting stays in the clients: a strategy calls `Send` on every order action and `OnFill` on every fill, on the row
 `header.ProductGroupId` names. A C++ strategy, if there is one, does the same; the server never counts.
 
-**The row, 84 bytes, `Pack = 1`** (C# `Execution/RateLimit.cs`; offsets measured):
+**The row, 92 bytes since P32 (84 before), `Pack = 1`** (C# `Execution/RateLimit.cs`; offsets measured):
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
 | 0 | `Header<OrderType>` (4) | `Header` | `Type = 18`; the other 3 bytes zero |
 | 4 | .NET `DateTime` (8) | `TradeDate` | uint64: ticks of 100 ns since 0001-01-01 in the low 62 bits, `Kind` in the top 2 (0 here: local, unspecified) |
 | 12 | .NET `TimeSpan` (8) | `TradeTime` | int64 ticks of 100 ns |
-| 20, 28, 36, 44 | `{ int32 DailyRawMessages; int32 Benchmark; }` (8 each) | `Tier0` … `Tier3` | |
+| 20, 28, 36, 44 | `{ int32 DailyRawMessages; int32 Benchmark; }` (8 each) | `TierEMT`, `Tier1` … `Tier3` | `TierEMT` was `Tier0` (P32) |
 | 52 | `char[4]` | `ProductGroupRoot` | zero-padded |
 | 56 | int32 | `ProductGroupId` | |
 | 60 | int32 | `RawMessages` | |
 | 64 | double | `WeightedMessages` | |
 | 72 | double | `InverseQuantityTraded` | `1 / QuantityTraded`, 1 when nothing traded |
 | 80 | int32 | `QuantityTraded` | |
+| 84 | double | `EMTWeightedMessages` | P32: the EMT score, as `WeightedMessages` without the overnight ×0.1 |
 
-The JSON line, as `GetMinLimits("NQ")` writes it (one line per record; `Efficiency` is computed, written, never read):
+The JSON line, as a group's file holds it (one line per record; `Efficiency` and `EMTEfficiency` are computed, written,
+never read):
 
 ```
-{"Efficiency":0,"Header":{"Type":"MessageEfficiency"},"TradeDate":"0001-01-01T00:00:00","TradeTime":"00:00:00","Tier0":{"DailyRawMessages":0,"Benchmark":0},"Tier1":{"DailyRawMessages":0,"Benchmark":0},"Tier2":{"DailyRawMessages":0,"Benchmark":0},"Tier3":{"DailyRawMessages":0,"Benchmark":0},"ProductGroupRoot":"NQ","ProductGroupId":-1,"RawMessages":0,"WeightedMessages":0,"InverseQuantityTraded":1,"QuantityTraded":0}
+{"Efficiency":0,"EMTEfficiency":0,"Header":{"Type":"MessageEfficiency"},"TradeDate":"0001-01-01T00:00:00","TradeTime":"16:00:00","TierEMT":{"DailyRawMessages":1000000,"Benchmark":500},"Tier1":{"DailyRawMessages":150000,"Benchmark":40},"Tier2":{"DailyRawMessages":100000,"Benchmark":80},"Tier3":{"DailyRawMessages":50000,"Benchmark":120},"ProductGroupRoot":"6E","ProductGroupId":-1,"RawMessages":0,"WeightedMessages":0,"InverseQuantityTraded":1,"QuantityTraded":0,"EMTWeightedMessages":0}
 ```
 
 A loaded line missing `Header` (written before 2026-10-13) still loads as type 18; a line's `ProductGroupRoot` and
 `ProductGroupId` are overwritten by the server after loading. `GetMaxLimits` sets every tier to `int.MaxValue`;
-`GetMinLimits` sets every tier to 0.
+`GetMinLimits` sets `TierEMT` to 1,000,000 / 500 and the other tiers to 0 (P32).
 
 ```
 Reset(local):                          // local = CME local time ("Central Standard Time", DST observed)
   if local >= TradeDate + TradeTime:
-    TradeDate = local.Date + 1 day; RawMessages = 0; WeightedMessages = 0; QuantityTraded = 0; InverseQuantityTraded = 1
+    TradeDate = local.Date + 1 day; RawMessages = 0; WeightedMessages = 0; EMTWeightedMessages = 0
+    QuantityTraded = 0; InverseQuantityTraded = 1
     return true
   return false
 
-CanSend(action, weighter, out raw, out weighted):
-  raw = RawMessages + 1; weighted = WeightedMessages + weighter.Weight(action)
-  for tier in Tier1, Tier2, Tier3 (first whose DailyRawMessages < raw):
-    return weighted * InverseQuantityTraded < tier.Benchmark or action == Cancel
-  return true
-Send(action, weighter):    canSend = CanSend(...); RawMessages = raw; WeightedMessages = weighted; return canSend   // always counts
-TrySend(action, weighter): counts only when CanSend is true
+IsApplied(tier, raw):  tier.DailyRawMessages > 0 and raw > tier.DailyRawMessages      // a tier of 0 is one the group lacks
+IsWithin(tier, raw, efficiency): not IsApplied(tier, raw) or efficiency < tier.Benchmark
+GetMEPTier(raw): raw > Tier1.DailyRawMessages ? Tier1 : raw > Tier2.DailyRawMessages ? Tier2 : Tier3
+
+CanSend(action, weighter, out raw, out weighted, out emtWeighted):
+  raw = RawMessages + 1
+  weighted    = WeightedMessages    + weighter.Weight(action)       // amend 1, cancel 3, new 0; ×0.1 outside 07:00-16:00 CT
+  emtWeighted = EMTWeightedMessages + weighter.EMTWeight(action)    // amend 1, cancel 3, new 0; every hour
+  return IsWithin(TierEMT, raw, emtWeighted * InverseQuantityTraded)
+     and IsWithin(GetMEPTier(raw), raw, weighted * InverseQuantityTraded)
+     or action == Cancel
+Send(action, weighter):    canSend = CanSend(...); store raw, weighted, emtWeighted; return canSend   // always counts
+TrySend(action, weighter): stores only when CanSend is true
 OnFill(quantity):          QuantityTraded += |quantity|; InverseQuantityTraded = 1.0 / QuantityTraded
 
 CMEGetWeightedMessage.Weight(action):  Create 0, Cancel 3, anything else 1; times 0.1 outside 07:00-16:00 CME local
@@ -1091,6 +1101,34 @@ stuck algo left its orders working. Now `Server.ReadExecution`'s `ControlType::A
   its orders cancelled, the other's 8 and the manual 2 untouched. No non-discarded reject; switches ended master `Live`,
   A `Live`, B `Paused`.
 
+### P32. MUST PORT with P24: the EMT tier in `MessageEfficiency` (C# `Execution/RateLimit.cs`, `Widget/MessageEfficiencyWidget.axaml(.cs)`; 2026-10-20)
+
+CME has two messaging limits per product group (its "Messaging Efficiency Program" document): the MEP tiers (section
+6, per Globex firm; our `Tier1`-`Tier3`) and the iLink session **Excessive Messaging Threshold** (section 15): more than
+1,000,000 raw messages in a trade date **and** a score above 500 per lot, where the score has the MEP's weights (amend 1,
+cancel 3, new 0) but **no ×0.1 outside 07:00-16:00 CT**. A breach costs $10,000 and closes the iLink port. It applies to
+every group. `Tier0` was meant to be it but was never checked, and checking it on the MEP score would understate the
+ratio up to 10× overnight. Now (the P24 layout, JSON and pseudo-code above show the result):
+
+- **Row:** `Tier0` renamed `TierEMT` (same offset 20, same JSON position, new JSON name); new `double EMTWeightedMessages`
+  at offset 84, size **84 → 92**. `Reset` zeroes it.
+- **Weights:** one weighter call returns both: the EMT's weight (new 0, cancel 3, amend 1) as an out value, and the MEP's
+  (that × (regular hours ? 1 : 0.1)) as the result. C# `IGetWeightedMessage.GetWeightedMessage(action, out emtWeight)`.
+- **Check:** within = within `TierEMT` on the EMT score **and** within the MEP tier the raw count falls in on the MEP
+  score; a cancel always is. A tier whose `DailyRawMessages` is 0 never applies (a group outside CME's MEP list has
+  `TierEMT` only). For a group with all three MEP tiers and raw messages at or below 1,000,000 the decision is the old
+  one exactly (C#: 2,000,000 random states, no difference).
+- **Realtime default** for a group with no file (`GetMinLimits`): `TierEMT` 1,000,000 / 500, other tiers 0 (was all 0,
+  which every message breached).
+- **Files:** the group files' field is now `"TierEMT"`; a line with `"Tier0"` loads `TierEMT` as 0, i.e. the EMT off.
+  `S:\CME\MessageEfficiency` was rebuilt in the new form (244 groups); copy it to the box's
+  `<server>/MessageEfficiency` with this deploy.
+- **Key:** CME counts the EMT per (iLink session, product group). On this platform a product group's orders always go
+  through the same session, so the per-group row is that count; nothing checks it at run time.
+- **Hot path:** `Send` runs per order a client sends. C# BenchmarkDotNet (.NET 10 JIT, dev PC, 6E past Tier1): 1.40 →
+  2.90 ns, no allocation. A second weighter call instead of the out value measured 5.51 ns; keep it one call.
+- **Deploy in lockstep (L13).**
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -1294,6 +1332,9 @@ listed.
 - **L12. 256-byte names (P30): the C++ server, the C# Local Mirror on the box and every desk package together, at a week
   start with fresh shared memory.** The `SocketHeader` and `ServerHeader` sizes change, so the Mirror's layout hash
   changes and old and new ends refuse each other.
+- **L13. The EMT tier (P32): the C++ server, every C# process on the box and every desk package together, with fresh
+  shared memory and the rebuilt `MessageEfficiency` files copied to the box first.** The row grows to 92 bytes (the
+  Mirror's layout hash changes), and a file still saying `"Tier0"` leaves the EMT off for that group.
 
 ---
 

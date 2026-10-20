@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Data;
 using Tools;
@@ -9,17 +10,19 @@ public class CMEGetWeightedMessage : IGetWeightedMessage
 {
     public SessionManager SessionManager = new SessionManager(new Session("CME Message Efficiency Regular Trading Hours", Session.CME.TimeZone, new TimeSpan(7,0,0), new TimeSpan(16,0,0), true));
     public bool IsRegularTradingHours => SessionManager.IsInSession;
-    public double GetWeightedMessage(OrderTargetAction orderTargetAction)
+
+    // The MEP's weight, and in emtWeightedMessage the EMT's (Excessive Messaging Threshold's): a new order 0, a cancel 3, an
+    // amend 1, the MEP's ×0.1 outside regular trading hours. Why one call: a second interface call measured +2.6 ns per send.
+    public double GetWeightedMessage(OrderTargetAction orderTargetAction, out double emtWeightedMessage)
     {
-        double weight = orderTargetAction == OrderTargetAction.Create ? 0 : orderTargetAction == OrderTargetAction.Cancel ? 3 : 1;
-        weight *= IsRegularTradingHours ? 1 : 0.1;
-        return weight;
+        emtWeightedMessage = orderTargetAction == OrderTargetAction.Create ? 0 : orderTargetAction == OrderTargetAction.Cancel ? 3 : 1;
+        return emtWeightedMessage * (IsRegularTradingHours ? 1 : 0.1);
     }
 }
 
 public interface IGetWeightedMessage
 {
-    public double GetWeightedMessage(OrderTargetAction orderTargetAction);
+    public double GetWeightedMessage(OrderTargetAction orderTargetAction, out double emtWeightedMessage);
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -35,6 +38,7 @@ public struct MessageEfficiency()
             TradeDate = dateTime.Date.AddDays(1);
             RawMessages = 0;
             WeightedMessages = 0;
+            EMTWeightedMessages = 0;
             QuantityTraded = 0;
             InverseQuantityTraded = 1;
             return true;
@@ -43,7 +47,7 @@ public struct MessageEfficiency()
     }
     public DateTime TradeDate;
     public TimeSpan TradeTime;
-    public MessageEfficiencyTier Tier0;
+    public MessageEfficiencyTier TierEMT;   // CME's iLink session Excessive Messaging Threshold, judged on EMTWeightedMessages (see Spec.md)
     public MessageEfficiencyTier Tier1;
     public MessageEfficiencyTier Tier2;
     public MessageEfficiencyTier Tier3;
@@ -54,6 +58,8 @@ public struct MessageEfficiency()
     public double Efficiency => WeightedMessages * InverseQuantityTraded;
     public double InverseQuantityTraded = 1;
     public int QuantityTraded = 0;
+    public double EMTWeightedMessages = 0;   // the EMT's score: as WeightedMessages, without the overnight discount
+    public double EMTEfficiency => EMTWeightedMessages * InverseQuantityTraded;
 
     public void OnFill(int quantity)
     {
@@ -65,65 +71,53 @@ public struct MessageEfficiency()
     public static MessageEfficiency GetMaxLimits(String4 productGroupRoot) => new MessageEfficiency()
     {
         ProductGroupRoot = productGroupRoot,
-        Tier0 = new MessageEfficiencyTier { DailyRawMessages = int.MaxValue, Benchmark = int.MaxValue },
+        TierEMT = new MessageEfficiencyTier { DailyRawMessages = int.MaxValue, Benchmark = int.MaxValue },
         Tier1 = new MessageEfficiencyTier { DailyRawMessages = int.MaxValue, Benchmark = int.MaxValue },
         Tier2 = new MessageEfficiencyTier { DailyRawMessages = int.MaxValue, Benchmark = int.MaxValue },
         Tier3 = new MessageEfficiencyTier { DailyRawMessages = int.MaxValue, Benchmark = int.MaxValue },
     };
 
-    // Restrictive default (live until configured): zero tiers => TrySend blocks every message.
+    // Realtime default for a group with no file: no MEP program (tiers of 0), and CME's EMT, which applies to every group.
     public static MessageEfficiency GetMinLimits(String4 productGroupRoot) => new MessageEfficiency()
     {
         ProductGroupRoot = productGroupRoot,
-        Tier0 = new MessageEfficiencyTier { DailyRawMessages = 0, Benchmark = 0 },
-        Tier1 = new MessageEfficiencyTier { DailyRawMessages = 0, Benchmark = 0 },
-        Tier2 = new MessageEfficiencyTier { DailyRawMessages = 0, Benchmark = 0 },
-        Tier3 = new MessageEfficiencyTier { DailyRawMessages = 0, Benchmark = 0 },
+        TierEMT = new MessageEfficiencyTier { DailyRawMessages = 1_000_000, Benchmark = 500 },
     };
 
-    public bool CanSend(OrderTargetAction orderTargetAction, IGetWeightedMessage messageWeighter, out int rawMessages, out double weightedMessages)
+    // Whether one more message keeps the day within the EMT (TierEMT, EMT score) and the MEP tier it is in (Tier1-3, MEP score); a cancel always may.
+    public bool CanSend(OrderTargetAction orderTargetAction, IGetWeightedMessage messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages)
     {
         rawMessages = RawMessages + 1;
-        double weightedMessage = messageWeighter.GetWeightedMessage(orderTargetAction);
-        weightedMessages = WeightedMessages + weightedMessage;
-        if (rawMessages > Tier1.DailyRawMessages)
-        {
-            double efficiency = weightedMessages * InverseQuantityTraded;
-            return efficiency < Tier1.Benchmark || orderTargetAction == OrderTargetAction.Cancel;
-        }
-        else if (rawMessages > Tier2.DailyRawMessages)
-        {
-            double efficiency = weightedMessages * InverseQuantityTraded;
-            return efficiency < Tier2.Benchmark || orderTargetAction == OrderTargetAction.Cancel;
-        }
-        else if (rawMessages > Tier3.DailyRawMessages)
-        {
-            double efficiency = weightedMessages * InverseQuantityTraded;
-            return efficiency < Tier3.Benchmark || orderTargetAction == OrderTargetAction.Cancel;
-        }
-        else
-        {
-            return true;
-        }
+        weightedMessages = WeightedMessages + messageWeighter.GetWeightedMessage(orderTargetAction, out double emtWeightedMessage);
+        emtWeightedMessages = EMTWeightedMessages + emtWeightedMessage;
+        bool isWithinEMT = TierEMT.IsWithin(rawMessages, emtWeightedMessages * InverseQuantityTraded);
+        bool isWithinMEP = GetMEPTier(rawMessages).IsWithin(rawMessages, weightedMessages * InverseQuantityTraded);
+        return isWithinEMT && isWithinMEP || orderTargetAction == OrderTargetAction.Cancel;
     }
+
+    // The MEP tier the day's raw messages fall in: the highest threshold passed (Tier1 has the highest), Tier3 below all.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly MessageEfficiencyTier GetMEPTier(int rawMessages) => rawMessages > Tier1.DailyRawMessages ? Tier1 : rawMessages > Tier2.DailyRawMessages ? Tier2 : Tier3;
 
     // Always sends, regardless of efficiency.
     public bool Send<T>(OrderTargetAction orderTargetAction, T messageWeighter) where T : IGetWeightedMessage
     {
-        bool canSend = CanSend(orderTargetAction, messageWeighter, out int rawMessages, out double weightedMessages);
+        bool canSend = CanSend(orderTargetAction, messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages);
         RawMessages = rawMessages;
         WeightedMessages = weightedMessages;
+        EMTWeightedMessages = emtWeightedMessages;
         return canSend;
     }
 
     // Only sends if the efficiency is below the benchmark, otherwise returns false and does not send.
     public bool TrySend<T>(OrderTargetAction orderTargetAction, T messageWeighter) where T : IGetWeightedMessage
     {
-        bool canSend = CanSend(orderTargetAction, messageWeighter, out int rawMessages, out double weightedMessages);
+        bool canSend = CanSend(orderTargetAction, messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages);
         if (canSend)
         {
             RawMessages = rawMessages;
             WeightedMessages = weightedMessages;
+            EMTWeightedMessages = emtWeightedMessages;
         }
         return canSend;
     }
@@ -140,6 +134,18 @@ public struct MessageEfficiencyTier()
 {
     public int DailyRawMessages;
     public int Benchmark;
+
+    // Applies once the day's raw messages pass its threshold; a tier of 0 is one the group does not have.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly bool IsApplied(int rawMessages) => DailyRawMessages > 0 && rawMessages > DailyRawMessages;
+
+    // Within this tier: not applied, or the score per lot below its benchmark.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly bool IsWithin(int rawMessages, double efficiency) => !IsApplied(rawMessages) || efficiency < Benchmark;
+
+    // The score per lot as a share of the benchmark, for display; 0 while not applied.
+    public readonly double GetBenchmarkRatio(int rawMessages, double efficiency) => !IsApplied(rawMessages) ? 0 : Benchmark <= 0 ? double.PositiveInfinity : efficiency / Benchmark;
+
     public override string ToString()
     {
         return Json.Serialize(this);

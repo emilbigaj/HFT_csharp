@@ -1137,6 +1137,28 @@ server does everything else:
 `MessageEfficiency` has a parameterless constructor so its field initialisers, the header among them, run on every
 construction, JSON loads included: a line written before the header existed still loads as type 18.
 
+**Two CME limits on one row (2026-10-20).** The row judges a product group's day against both of CME's messaging
+limits (CME's "Messaging Efficiency Program" document, sections 6 and 15):
+- **MEP tiers, `Tier1`-`Tier3`** (per Globex firm): the tier the day's `RawMessages` falls in (>50k, >100k, >150k; at or
+  below 50k none) holds `Efficiency` (`WeightedMessages` per lot: amend 1, cancel 3, ×0.1 outside 07:00-16:00 CT) below
+  its benchmark. Values per group from CME's quarterly benchmark list.
+- **EMT, `TierEMT`** (CME's iLink session Excessive Messaging Threshold): once `RawMessages` passes 1,000,000,
+  `EMTEfficiency` (`EMTWeightedMessages` per lot: the same weights with no overnight discount) must stay at or below 500.
+  It applies to every group, at all hours, with no waivers; a breach costs $10,000 and closes the iLink port, so every
+  product on that CoreGroup stops. CME counts it per (iLink session, product group); on this platform a product group's
+  orders always go through the same session, so one row per group is that count. Not checked at run time.
+- A message is within when it is within the EMT and the MEP tier (`MessageEfficiency.CanSend`); a cancel always is. A tier
+  of 0 is one the group does not have (`MessageEfficiencyTier.IsApplied`): a group outside CME's MEP list has `TierEMT`
+  only. In realtime a group with no file loads `GetMinLimits`: the EMT and no MEP tiers (before, all zeros, which showed
+  red). The widget colours `Efficiency` by the nearer of the two to its benchmark (`GetBenchmarkRatio`).
+- `S:\CME\MessageEfficiency` holds one file per group: the 75 groups of CME's Q3 2026 list with their tiers and every
+  other group in the instrument details with `TierEMT` only (1,000,000 / 500). "J1-JT" in CME's list is written out as
+  J1-J6, J9, JT.
+- Not counted, accepted for now: eliminated FAKs (CME counts each as a raw message weighted 3), front/back-month and spread
+  weights (CME weighs back months and spreads in regular hours ×0.1, and triples spread volume), and the firm-level EMT
+  (10 million / 500; SOFR futures 5 million / 50). The counts are the clients' (see above), so a message the server refuses
+  is counted and the server's own cancels are not.
+
 Only Realtime writes the files. Clients never write them: before, every process that allocated the group (each
 strategy, each Workspace, each Local Mirror stand-in) appended its view of the same shared row at every close and at
 exit. Both of the server's copies are plain reads, not seqlocked (a strategy that died mid-write must not hang the close),

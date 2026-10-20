@@ -29,9 +29,11 @@ public sealed class WidgetMessageEfficiency : INotifyPropertyChanged
     public string WeightedMessages => _messageEfficiency.WeightedMessages.ToString("N2");
     public string QuantityTraded => _messageEfficiency.QuantityTraded.ToString("N0");
     public string Efficiency => _messageEfficiency.Efficiency.ToString("N2");
+    public string EMTWeightedMessages => _messageEfficiency.EMTWeightedMessages.ToString("N2");
+    public string EMTEfficiency => _messageEfficiency.EMTEfficiency.ToString("N2");
 
-    public string Tier0 => _messageEfficiency.Tier0.DailyRawMessages.ToString("N0");
-    public string Tier0Benchmark => _messageEfficiency.Tier0.Benchmark.ToString("N0");
+    public string TierEMT => _messageEfficiency.TierEMT.DailyRawMessages.ToString("N0");
+    public string EMTBenchmark => _messageEfficiency.TierEMT.Benchmark.ToString("N0");
     public string Tier1 => _messageEfficiency.Tier1.DailyRawMessages.ToString("N0");
     public string Tier1Benchmark => _messageEfficiency.Tier1.Benchmark.ToString("N0");
     public string Tier2 => _messageEfficiency.Tier2.DailyRawMessages.ToString("N0");
@@ -43,8 +45,8 @@ public sealed class WidgetMessageEfficiency : INotifyPropertyChanged
 
     public string TradeTime => _messageEfficiency.TradeTime.ToString(@"hh\:mm\:ss");
 
-    // Efficiency cell highlight: green well under the active tier's benchmark, yellow within 25%, orange
-    // within 10%, red at/over it. Below the lowest tier's raw-message threshold it's unconstrained (green).
+    // Efficiency cell highlight, by the nearer to its benchmark of the EMT and the active MEP tier: green well under, yellow within
+    // 25%, orange within 10%, red at/over it. Below every applied tier's raw-message threshold it's unconstrained (green).
     public IBrush EfficiencyBrush => EfficiencyStatusBrush(in _messageEfficiency);
 
     private static readonly IBrush s_safeBrush     = new ImmutableSolidColorBrush(Palette.Lighten(Palette.SafeGreen, 0.6));
@@ -54,16 +56,13 @@ public sealed class WidgetMessageEfficiency : INotifyPropertyChanged
 
     private static IBrush EfficiencyStatusBrush(in MessageEfficiency messageEfficiency)
     {
-        // Mirror MessageEfficiency.Send tier selection: Tier1 has the highest raw-message threshold.
-        MessageEfficiencyTier tier;
-        if (messageEfficiency.RawMessages > messageEfficiency.Tier1.DailyRawMessages) tier = messageEfficiency.Tier1;
-        else if (messageEfficiency.RawMessages > messageEfficiency.Tier2.DailyRawMessages) tier = messageEfficiency.Tier2;
-        else if (messageEfficiency.RawMessages > messageEfficiency.Tier3.DailyRawMessages) tier = messageEfficiency.Tier3;
-        else return s_safeBrush;   // below the lowest tier => no benchmark applies yet
+        // Step 1: the nearer to its benchmark of the EMT and the MEP tier the day is in; 0 while neither applies
+        int rawMessages = messageEfficiency.RawMessages;
+        double emtRatio = messageEfficiency.TierEMT.GetBenchmarkRatio(rawMessages, messageEfficiency.EMTEfficiency);
+        double mepRatio = messageEfficiency.GetMEPTier(rawMessages).GetBenchmarkRatio(rawMessages, messageEfficiency.Efficiency);
+        double ratio = Math.Max(emtRatio, mepRatio);
 
-        if (tier.Benchmark <= 0) return s_criticalBrush;   // zero benchmark => always breached
-
-        double ratio = messageEfficiency.Efficiency / tier.Benchmark;
+        // Step 2: colour by how near
         if (ratio >= 1.00) return s_criticalBrush;   // at or over the benchmark
         if (ratio >= 0.90) return s_cautionBrush;    // within 10% of the benchmark
         if (ratio >= 0.75) return s_warningBrush;    // within 25% of the benchmark
