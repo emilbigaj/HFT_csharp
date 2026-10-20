@@ -4,6 +4,23 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-20 — Message efficiency widget: EMTEfficiency coloured against the EMT
+
+- `Widget/MessageEfficiencyWidget.axaml(.cs)` — the EMTEfficiency cell has the Efficiency cell's four colours, against
+  `EMTBenchmark` (green until RawMessages passes `TierEMT`); Efficiency is coloured against the MEP tier only (it was the
+  nearer of the two, so a red Efficiency could have been the EMT). One `GetBenchmarkBrush(ratio)` serves both cells.
+- Builds; GUI only, no hot path. Detailed guide and Spec.md updated.
+- Then: both cells also warn ahead of a tier: when the score is already over a tier's benchmark but raw messages have not
+  reached its threshold, the colour follows raw messages' share of the threshold (yellow from 75%, orange from 90%;
+  `MessageEfficiencyTier.GetWarningRatio`, replaces `GetBenchmarkRatio`). The MEP cell takes the highest of Tier1-3
+  (`MessageEfficiency.GetMEPWarningRatio`), so it also warns before the next, stricter tier. `Efficiency` and
+  `EMTEfficiency` are `readonly` getters. Scratch checks: EMT at 70% / 80% / 95% / past 1,000,000 raw give green /
+  yellow / orange / red, a score under 500 stays green; 6E at 140,000 raw and 60/lot is orange (Tier1 approach 93%).
+- Declined: a continuous green-to-red gradient instead of the four bands was tried and reverted (the user preferred the
+  bands).
+
+---
+
 ## 2026-10-20 — Message efficiency weighter without an interface
 
 - `Execution/RateLimit.cs` — `IGetWeightedMessage` deleted (one implementation); `CMEGetWeightedMessage` is sealed and

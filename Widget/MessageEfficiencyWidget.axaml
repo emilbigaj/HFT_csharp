@@ -50,7 +50,15 @@
 				</DataGridTemplateColumn.CellTemplate>
 			</DataGridTemplateColumn>
 			<DataGridTextColumn Header="EMTWeightedMessages" Binding="{Binding EMTWeightedMessages}" Width="Auto"/>
-			<DataGridTextColumn Header="EMTEfficiency"    Binding="{Binding EMTEfficiency}"          Width="Auto"/>
+			<DataGridTemplateColumn Header="EMTEfficiency" Width="Auto">
+				<DataGridTemplateColumn.CellTemplate>
+					<DataTemplate x:DataType="local:WidgetMessageEfficiency">
+						<Border Background="{Binding EMTEfficiencyBrush}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+							<TextBlock Text="{Binding EMTEfficiency}" Margin="8,0" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+						</Border>
+					</DataTemplate>
+				</DataGridTemplateColumn.CellTemplate>
+			</DataGridTemplateColumn>
 
 			<DataGridTextColumn Header="Tier3"           Binding="{Binding Tier3}"                     Width="Auto"/>
 			<DataGridTextColumn Header="Tier3Benchmark"   Binding="{Binding Tier3Benchmark}"           Width="Auto"/>

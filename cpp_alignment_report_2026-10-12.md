@@ -5,7 +5,7 @@ do not need the C# conversation, `patch_log.md` or `Spec.md` to act on it. C# is
 checked against the C# working tree on 2026-10-13.
 
 - **Baseline:** C# commit `9d6f3ab` ("Align with C++ (csharp_alignment_report_2026-10-05)"), which the C++ branch
-  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17, P30, P31, P32 and C20 on 2026-10-20).
+  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17, P30, P31, P32, C20 and C21 on 2026-10-20).
 - **Supersedes** `cpp_alignment_report_2026-10-07.md`, which was written piecemeal from 2026-10-07 to 2026-10-12 and never
   handed over. Everything in it that still holds is folded in here; what later work made stale is listed in §9. Read this
   report, not that one. Earlier reports (`2026-10-04` and before) stay valid for their own items, except where §9 says
@@ -62,7 +62,7 @@ Words used throughout:
 | P30 | Names | **MUST PORT** | **yes** (L12) | `SocketHeader.ServerName/ClientName`, `ServerHeader.ServerName`, `AllocateClient.ClientName` are 256 bytes; `ServerHeader` is 305 |
 | P31 | `Server` | PORT | no | A user's Pause control cancels the covered working algo orders at once, server-side; manual orders never |
 | P32 | Message efficiency | **MUST PORT** (with P24) | **yes** (L13) | `Tier0` → `TierEMT`, checked on a new full-weight `EMTWeightedMessages` (row 84 → 92); a tier of 0 never applies; no-file default is the EMT only |
-| C1-C20 | Mirror, Workspace, widgets, harness, Logging, simulator, a strategy's own book | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
+| C1-C21 | Mirror, Workspace, widgets, harness, Logging, simulator, a strategy's own book | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
 **Kinds.** PORT: change the C++ code. PORT-IF: change it only if C++ has the same construct (the item says what to look
@@ -1249,6 +1249,13 @@ listed.
   desk); startup windows go through one queue; the simulator's `CrossMask` is merged into the per-side masks and Ghost
   decays against the current depth; recorded TradingStatus tick histories are carried through but not yet applied. If a
   C++ GUI or tool ever blocks on its UI thread, the same rule applies.
+- **C21. 2026-10-20, the Message Efficiency widget's colours** (C# only, nothing to port; display, `CanSend` unchanged):
+  Efficiency is coloured against the MEP tiers and the new EMTEfficiency cell against the EMT (P32), each in four bands
+  (green, yellow from 75%, orange from 90%, red at or over) of a warning ratio, `MessageEfficiencyTier.GetWarningRatio`:
+  once a tier applies, the score's share of its benchmark; before that, if the score is already over the benchmark, the
+  raw messages' share of the tier's threshold, so a day heading into a tier it would breach warns early. The MEP cell takes
+  the highest of Tier1-3 (`MessageEfficiency.GetMEPWarningRatio`). A continuous gradient was tried and declined. If a C++
+  tool ever displays the row, it should colour the same way.
 
 ---
 

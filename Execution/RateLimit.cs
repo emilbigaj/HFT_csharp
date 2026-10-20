@@ -51,11 +51,11 @@ public struct MessageEfficiency()
     public int ProductGroupId = -1;
     public int RawMessages = 0;
     public double WeightedMessages = 0;
-    public double Efficiency => WeightedMessages * InverseQuantityTraded;
+    public readonly double Efficiency => WeightedMessages * InverseQuantityTraded;
     public double InverseQuantityTraded = 1;
     public int QuantityTraded = 0;
     public double EMTWeightedMessages = 0;   // the EMT's score: as WeightedMessages, without the overnight discount
-    public double EMTEfficiency => EMTWeightedMessages * InverseQuantityTraded;
+    public readonly double EMTEfficiency => EMTWeightedMessages * InverseQuantityTraded;
 
     public void OnFill(int quantity)
     {
@@ -95,6 +95,9 @@ public struct MessageEfficiency()
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly MessageEfficiencyTier GetMEPTier(int rawMessages) => rawMessages > Tier1.DailyRawMessages ? Tier1 : rawMessages > Tier2.DailyRawMessages ? Tier2 : Tier3;
 
+    // How near the day is to an MEP breach, for display: the highest of Tier1-3's warning ratios.
+    public readonly double GetMEPWarningRatio() => Math.Max(Tier1.GetWarningRatio(RawMessages, Efficiency), Math.Max(Tier2.GetWarningRatio(RawMessages, Efficiency), Tier3.GetWarningRatio(RawMessages, Efficiency)));
+
     // Always sends, regardless of efficiency.
     public bool Send(OrderTargetAction orderTargetAction, CMEGetWeightedMessage messageWeighter)
     {
@@ -126,8 +129,14 @@ public struct MessageEfficiencyTier()
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool IsWithin(int rawMessages, double efficiency) => !IsApplied(rawMessages) || efficiency < Benchmark;
 
-    // The score per lot as a share of the benchmark, for display; 0 while not applied.
-    public readonly double GetBenchmarkRatio(int rawMessages, double efficiency) => !IsApplied(rawMessages) ? 0 : Benchmark <= 0 ? double.PositiveInfinity : efficiency / Benchmark;
+    // How near this tier is to a breach, for display (1 = breached): once applied, the score's share of the benchmark; before that,
+    // the raw messages' share of the threshold if the score is already at or over the benchmark, else 0. 0 for a tier of 0.
+    public readonly double GetWarningRatio(int rawMessages, double efficiency)
+    {
+        if (DailyRawMessages <= 0) return 0;
+        if (IsApplied(rawMessages)) return Benchmark <= 0 ? double.PositiveInfinity : efficiency / Benchmark;
+        return efficiency >= Benchmark ? (double)rawMessages / DailyRawMessages : 0;
+    }
 
     public override string ToString()
     {

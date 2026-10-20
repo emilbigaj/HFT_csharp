@@ -45,27 +45,23 @@ public sealed class WidgetMessageEfficiency : INotifyPropertyChanged
 
     public string TradeTime => _messageEfficiency.TradeTime.ToString(@"hh\:mm\:ss");
 
-    // Efficiency cell highlight, by the nearer to its benchmark of the EMT and the active MEP tier: green well under, yellow within
-    // 25%, orange within 10%, red at/over it. Below every applied tier's raw-message threshold it's unconstrained (green).
-    public IBrush EfficiencyBrush => EfficiencyStatusBrush(in _messageEfficiency);
+    // Cell highlights, each against its own limit: green under 75%, yellow from 75%, orange from 90%, red at/over it, where the share
+    // is the score's of the benchmark once a tier applies, or the raw messages' of the threshold when the score is already over the
+    // benchmark of a tier not yet reached. Efficiency: the MEP tiers; EMTEfficiency: the EMT.
+    public IBrush EfficiencyBrush => GetWarningBrush(_messageEfficiency.GetMEPWarningRatio());
+    public IBrush EMTEfficiencyBrush => GetWarningBrush(_messageEfficiency.TierEMT.GetWarningRatio(_messageEfficiency.RawMessages, _messageEfficiency.EMTEfficiency));
 
     private static readonly IBrush s_safeBrush     = new ImmutableSolidColorBrush(Palette.Lighten(Palette.SafeGreen, 0.6));
     private static readonly IBrush s_warningBrush  = new ImmutableSolidColorBrush(Palette.Lighten(Palette.WarningYellow, 0.6));
     private static readonly IBrush s_cautionBrush  = new ImmutableSolidColorBrush(Palette.Lighten(Palette.CautionOrange, 0.6));
     private static readonly IBrush s_criticalBrush = new ImmutableSolidColorBrush(Palette.Lighten(Palette.CriticalRed, 0.6));
 
-    private static IBrush EfficiencyStatusBrush(in MessageEfficiency messageEfficiency)
+    // The colour for a warning ratio (1 = breached).
+    private static IBrush GetWarningBrush(double warningRatio)
     {
-        // Step 1: the nearer to its benchmark of the EMT and the MEP tier the day is in; 0 while neither applies
-        int rawMessages = messageEfficiency.RawMessages;
-        double emtRatio = messageEfficiency.TierEMT.GetBenchmarkRatio(rawMessages, messageEfficiency.EMTEfficiency);
-        double mepRatio = messageEfficiency.GetMEPTier(rawMessages).GetBenchmarkRatio(rawMessages, messageEfficiency.Efficiency);
-        double ratio = Math.Max(emtRatio, mepRatio);
-
-        // Step 2: colour by how near
-        if (ratio >= 1.00) return s_criticalBrush;   // at or over the benchmark
-        if (ratio >= 0.90) return s_cautionBrush;    // within 10% of the benchmark
-        if (ratio >= 0.75) return s_warningBrush;    // within 25% of the benchmark
+        if (warningRatio >= 1.00) return s_criticalBrush;   // breached
+        if (warningRatio >= 0.90) return s_cautionBrush;    // within 10%
+        if (warningRatio >= 0.75) return s_warningBrush;    // within 25%
         return s_safeBrush;
     }
 

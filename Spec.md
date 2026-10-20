@@ -1150,7 +1150,11 @@ limits (CME's "Messaging Efficiency Program" document, sections 6 and 15):
 - A message is within when it is within the EMT and the MEP tier (`MessageEfficiency.CanSend`); a cancel always is. A tier
   of 0 is one the group does not have (`MessageEfficiencyTier.IsApplied`): a group outside CME's MEP list has `TierEMT`
   only. In realtime a group with no file loads `GetMinLimits`: the EMT and no MEP tiers (before, all zeros, which showed
-  red). The widget colours `Efficiency` by the nearer of the two to its benchmark (`GetBenchmarkRatio`).
+  red). The widget colours `Efficiency` against the MEP tiers and `EMTEfficiency` against the EMT by a warning ratio
+  (`MessageEfficiencyTier.GetWarningRatio`, 1 = breached; bands at 0.75, 0.9, 1): once a tier applies, the score's share of
+  its benchmark; before that, if the score is already at or over the benchmark, the raw messages' share of the threshold,
+  so a day heading into a tier it would breach turns yellow at 75% of the threshold and orange at 90%. The MEP cell takes
+  the highest of Tier1-3 (`GetMEPWarningRatio`), which also warns ahead of the next, stricter tier. Display only.
 - `S:\CME\MessageEfficiency` holds one file per group: the 75 groups of CME's Q3 2026 list with their tiers and every
   other group in the instrument details with `TierEMT` only (1,000,000 / 500). "J1-JT" in CME's list is written out as
   J1-J6, J9, JT.
