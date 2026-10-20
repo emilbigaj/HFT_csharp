@@ -850,7 +850,6 @@ CanSend(action, weighter, out raw, out weighted, out emtWeighted):
      and IsWithin(GetMEPTier(raw), raw, weighted * InverseQuantityTraded)
      or action == Cancel
 Send(action, weighter):    canSend = CanSend(...); store raw, weighted, emtWeighted; return canSend   // always counts
-TrySend(action, weighter): stores only when CanSend is true
 OnFill(quantity):          QuantityTraded += |quantity|; InverseQuantityTraded = 1.0 / QuantityTraded
 
 CMEGetWeightedMessage.Weight(action):  Create 0, Cancel 3, anything else 1; times 0.1 outside 07:00-16:00 CME local
@@ -1113,7 +1112,9 @@ ratio up to 10× overnight. Now (the P24 layout, JSON and pseudo-code above show
 - **Row:** `Tier0` renamed `TierEMT` (same offset 20, same JSON position, new JSON name); new `double EMTWeightedMessages`
   at offset 84, size **84 → 92**. `Reset` zeroes it.
 - **Weights:** one weighter call returns both: the EMT's weight (new 0, cancel 3, amend 1) as an out value, and the MEP's
-  (that × (regular hours ? 1 : 0.1)) as the result. C# `IGetWeightedMessage.GetWeightedMessage(action, out emtWeight)`.
+  (that × (regular hours ? 1 : 0.1)) as the result. C# `CMEGetWeightedMessage.GetWeightedMessage(action, out emtWeight)`,
+  a sealed class passed by its own type: the `IGetWeightedMessage` interface (one implementation) and the unused
+  `TrySend` are deleted, as an interface call measured +1.4 ns per send. Call the weights directly in C++ too.
 - **Check:** within = within `TierEMT` on the EMT score **and** within the MEP tier the raw count falls in on the MEP
   score; a cancel always is. A tier whose `DailyRawMessages` is 0 never applies (a group outside CME's MEP list has
   `TierEMT` only). For a group with all three MEP tiers and raw messages at or below 1,000,000 the decision is the old
@@ -1125,8 +1126,9 @@ ratio up to 10× overnight. Now (the P24 layout, JSON and pseudo-code above show
   `<server>/MessageEfficiency` with this deploy.
 - **Key:** CME counts the EMT per (iLink session, product group). On this platform a product group's orders always go
   through the same session, so the per-group row is that count; nothing checks it at run time.
-- **Hot path:** `Send` runs per order a client sends. C# BenchmarkDotNet (.NET 10 JIT, dev PC, 6E past Tier1): 1.40 →
-  2.90 ns, no allocation. A second weighter call instead of the out value measured 5.51 ns; keep it one call.
+- **Hot path:** `Send` runs per order a client sends. C# BenchmarkDotNet (.NET 10 JIT, dev PC, 6E past Tier1): 1.38 ns
+  before, 1.93 ns now with the weighter called directly, no allocation. Through the interface it was 2.90 ns, and with a
+  second weighter call instead of the out value 5.51 ns: keep it one direct call.
 - **Deploy in lockstep (L13).**
 
 ---

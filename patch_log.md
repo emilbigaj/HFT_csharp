@@ -4,6 +4,17 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-20 — Message efficiency weighter without an interface
+
+- `Execution/RateLimit.cs` — `IGetWeightedMessage` deleted (one implementation); `CMEGetWeightedMessage` is sealed and
+  `MessageEfficiency.CanSend`/`Send` take it by its own type; the unused `TrySend` is deleted. Why: the interface call
+  could not be inlined on the per-order path. BenchmarkDotNet `Send` (6E past Tier1): 1.38 ns before the EMT, 2.90 ns
+  with the EMT through the interface, 1.93 ns now; no allocation. No behaviour change: the scratch EMT checks pass
+  unchanged, including new == old for 6E in 2,000,000 random states.
+- C++: P32 note (call the weights directly).
+
+---
+
 ## 2026-10-20 — Message efficiency checks CME's EMT (TierEMT); CME files rebuilt from the Q3 2026 benchmarks
 
 - `Execution/RateLimit.cs` — `Tier0` renamed `TierEMT` and now checked: CME's iLink session Excessive Messaging Threshold

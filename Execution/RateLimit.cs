@@ -6,23 +6,19 @@ using Tools;
 
 namespace Execution;
 
-public class CMEGetWeightedMessage : IGetWeightedMessage
+// CME's message weights. Sealed and passed by its own type, not an interface: dispatch measured +1.4 ns per send.
+public sealed class CMEGetWeightedMessage
 {
     public SessionManager SessionManager = new SessionManager(new Session("CME Message Efficiency Regular Trading Hours", Session.CME.TimeZone, new TimeSpan(7,0,0), new TimeSpan(16,0,0), true));
     public bool IsRegularTradingHours => SessionManager.IsInSession;
 
     // The MEP's weight, and in emtWeightedMessage the EMT's (Excessive Messaging Threshold's): a new order 0, a cancel 3, an
-    // amend 1, the MEP's ×0.1 outside regular trading hours. Why one call: a second interface call measured +2.6 ns per send.
+    // amend 1, the MEP's ×0.1 outside regular trading hours.
     public double GetWeightedMessage(OrderTargetAction orderTargetAction, out double emtWeightedMessage)
     {
         emtWeightedMessage = orderTargetAction == OrderTargetAction.Create ? 0 : orderTargetAction == OrderTargetAction.Cancel ? 3 : 1;
         return emtWeightedMessage * (IsRegularTradingHours ? 1 : 0.1);
     }
-}
-
-public interface IGetWeightedMessage
-{
-    public double GetWeightedMessage(OrderTargetAction orderTargetAction, out double emtWeightedMessage);
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -67,7 +63,7 @@ public struct MessageEfficiency()
         InverseQuantityTraded = 1.0 / QuantityTraded;
     }
 
-    // Permissive default (simulation): tiers so high TrySend always falls through to "allowed".
+    // Permissive default (simulation): tiers so high CanSend always falls through to "allowed".
     public static MessageEfficiency GetMaxLimits(String4 productGroupRoot) => new MessageEfficiency()
     {
         ProductGroupRoot = productGroupRoot,
@@ -85,7 +81,7 @@ public struct MessageEfficiency()
     };
 
     // Whether one more message keeps the day within the EMT (TierEMT, EMT score) and the MEP tier it is in (Tier1-3, MEP score); a cancel always may.
-    public bool CanSend(OrderTargetAction orderTargetAction, IGetWeightedMessage messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages)
+    public bool CanSend(OrderTargetAction orderTargetAction, CMEGetWeightedMessage messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages)
     {
         rawMessages = RawMessages + 1;
         weightedMessages = WeightedMessages + messageWeighter.GetWeightedMessage(orderTargetAction, out double emtWeightedMessage);
@@ -100,25 +96,12 @@ public struct MessageEfficiency()
     public readonly MessageEfficiencyTier GetMEPTier(int rawMessages) => rawMessages > Tier1.DailyRawMessages ? Tier1 : rawMessages > Tier2.DailyRawMessages ? Tier2 : Tier3;
 
     // Always sends, regardless of efficiency.
-    public bool Send<T>(OrderTargetAction orderTargetAction, T messageWeighter) where T : IGetWeightedMessage
+    public bool Send(OrderTargetAction orderTargetAction, CMEGetWeightedMessage messageWeighter)
     {
         bool canSend = CanSend(orderTargetAction, messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages);
         RawMessages = rawMessages;
         WeightedMessages = weightedMessages;
         EMTWeightedMessages = emtWeightedMessages;
-        return canSend;
-    }
-
-    // Only sends if the efficiency is below the benchmark, otherwise returns false and does not send.
-    public bool TrySend<T>(OrderTargetAction orderTargetAction, T messageWeighter) where T : IGetWeightedMessage
-    {
-        bool canSend = CanSend(orderTargetAction, messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages);
-        if (canSend)
-        {
-            RawMessages = rawMessages;
-            WeightedMessages = weightedMessages;
-            EMTWeightedMessages = emtWeightedMessages;
-        }
         return canSend;
     }
 
