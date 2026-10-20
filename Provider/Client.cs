@@ -180,7 +180,7 @@ public sealed class ManualClient : Client, IManualClient
             return false;
         }
         // A cancel of an algo order jumps far past the algo's own seqs, as Server.TryCloseOutOrders does, so a racing algo amend never shares its seq.
-        int seq = existingOrderTarget.OrderHeader.Seq + (orderId.IsAlgoOrder() ? 1_000_000 : 1);
+        int seq = existingOrderTarget.OrderHeader.Seq + (orderId.IsAlgoOrder() ? Execution.OrderTarget.s_foreignCancelSeqJump : 1);
         orderTarget.OrderHeader.Seq = Math.Max(seq, orderTarget.OrderHeader.Seq);
         return Send(ref orderTarget);
     }
@@ -295,10 +295,10 @@ public abstract class Client
         ClientName = clientName;
         ServerName = serverName;
 
+        // Why: an algo starts each simulation run with an empty audit; a GUI never touches audit files (it can restart within a run) and
+        // creates no folder before the server accepts its name: a desk's first try is refused RemoteDesk, its ClientContext makes the folder
         string auditDirectoryPath = Provider.Context.GetAuditDirectoryPath(ClientName);
-        Directory.CreateDirectory(auditDirectoryPath);
-        // Why: an algo starts each simulation run with an empty audit; a GUI never touches audit files (it can restart within a run)
-        if (Clock.Mode == ClockMode.Simulation && this is AlgoClient)
+        if (Clock.Mode == ClockMode.Simulation && this is AlgoClient && Directory.Exists(auditDirectoryPath))
         {
             foreach (string filePath in Directory.EnumerateFiles(auditDirectoryPath))
             {
@@ -609,7 +609,7 @@ public abstract class Client
             case (byte)OrderType.Position:
                 OnPositionHeader(rsrcObj);
                 break;
-            case (byte)OrderType.OrderTarget:   // a cancel the server sent for this client's previous process: recorded by the audit, nothing to apply
+            case (byte)OrderType.OrderTarget:   // a cancel the server sent (a user's pause, or this client's previous process): recorded by the audit, nothing to apply
                 break;
             case (byte)OrderType.RiskLimit:     // an edit of this strategy's limit, sent so the audit keeps its file: the row itself is in shared memory
                 break;

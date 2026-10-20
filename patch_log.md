@@ -4,6 +4,37 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-20 — A user's Pause cancels the algo orders it stops, at the server
+
+- `Provider/Server.cs` — the `ControlType.AlgoStatus` case calls the new `CancelAlgoOrders` after `OnControlAlgoStatus`
+  when the control pauses: the working algo orders on the instrument (every strategy's for the master switch, that
+  strategy's for its own), never a manual one. Each cancel is sent by the new `SendServerOrderTarget` (written to the
+  owner's execution channel for the audit, then `OnOrderTarget`), which the injected-cancel drain now uses too. Why: the
+  pause only turned the switch, and each algo cancelled its own orders on its next tick, so a quiet or stuck algo left
+  them working. A reject's pause still cancels nothing.
+- `Execution/Order.cs` — `OrderTarget.s_foreignCancelSeqJump` (1,000,000) names the jump a non-owner's cancel takes past the
+  owner's seqs; `ManualClient.Amend` and `Server.TryCloseOutOrders` use it (same value, no behaviour change).
+- `Provider/Client.cs` — the read switch's comment on `OrderTarget` names the pause cancel too (still ignored).
+- Verified: scratch simulation (scratchpad\pausecancel, root off S:), two algos with 8 resting orders each and two
+  manual orders on 6E (one from A's GUI on A's book, one from a server GUI on the house book). Master Pause from the
+  server GUI: 16/16 algo orders `Done` with seq >= 1,000,000 within 100 ms, both manual orders `Active`. Master Live: the
+  algos re-quoted. B's Pause from B's GUI: B's 8 cancelled, A's 8 and the 2 manual untouched. No non-discarded reject;
+  switches ended master Live, A Live, B Paused.
+- Spec.md "Algo pause", both risk-desk guides (pausing cancels the algo orders at once). C++: P31, PORT.
+
+---
+
+## 2026-10-20 — A desk GUI no longer leaves an empty `_GUI0` folder beside `_GUI0@MACHINE`
+
+- `Provider/Client.cs` — the `Client` constructor no longer creates `<name>\Audit` before connecting; only an algo in a
+  simulation clears an existing audit folder. Why: a desk's `ManualClient.Open` first tries the plain name, the Remote
+  Mirror refuses it (`RemoteDesk`) and the retry as `name@MACHINE` succeeds, so the refused try left an empty
+  `…_GUI0\Audit`. The folder is now made only by the accepted client's `ClientContext`. C++: nothing to port.
+- Verified: desk-style run (simulated server, Local and Remote Mirror on loopback, two desk windows) on a fresh desk
+  folder: both windows connected and only `…_GUI0@THREADRIPPER` folders were created.
+
+---
+
 ## 2026-10-20 — Names are 256 bytes; IPWhitelist ranges; Disconnect polls instead of Join
 
 - `Socket/Socket.cs`, `Provider/Allocate.cs`, `Provider/Context.cs`, `Provider/Server.cs`, `Simulator/ServerSimulator.cs`,

@@ -404,6 +404,14 @@ order that races a pause is refused `AlgoIsPaused` at the server.
   book has no algo, so strategy 0's own status means nothing). Pause All in a server workspace stops every algo.
 - The master is a kill switch: Live at every start, whatever its file says (`ServerContext.AllocateInstrument`). Its
   changes go on record as a fill's server row does, on the audit channel to `<server>/Positions`.
+- A user's Pause (the control, from either workspace) also cancels at once, on the server, the working algo orders it
+  stops: every strategy's on the instrument for the master, that strategy's for its own switch (`Server.CancelAlgoOrders`,
+  2026-10-20). Algo orders only (`ClientId == StrategyId`): a manual order, a GUI's booked to a strategy or the house
+  book's, is never cancelled. The cancel is numbered as a GUI's cancel of an algo order is
+  (`OrderTarget.s_foreignCancelSeqJump`, see "Manual orders"), so the algo's own cancel on its next tick, or a racing
+  amend, finds the order gone and is discarded (`StateIsDone`); a Create still unread is refused `AlgoIsPaused`. A pause after an algo
+  order's reject cancels nothing: the algo cancels its own on its next tick, as before. Without this a quiet or stuck
+  algo's orders kept working until its next tick.
 - A refusal for `AlgoIsPaused` alone is discarded (`OrderRejected.IsDiscarded`), so it never auto-pauses the strategy:
   turning the master off and on leaves every strategy's own switch as it was.
 - Every context maps `ServerPositionHeaders` (read-only in a client).

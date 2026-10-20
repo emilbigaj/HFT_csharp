@@ -5,7 +5,7 @@ do not need the C# conversation, `patch_log.md` or `Spec.md` to act on it. C# is
 checked against the C# working tree on 2026-10-13.
 
 - **Baseline:** C# commit `9d6f3ab` ("Align with C++ (csharp_alignment_report_2026-10-05)"), which the C++ branch
-  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17, P30 and C20 on 2026-10-20).
+  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17, P30, P31 and C20 on 2026-10-20).
 - **Supersedes** `cpp_alignment_report_2026-10-07.md`, which was written piecemeal from 2026-10-07 to 2026-10-12 and never
   handed over. Everything in it that still holds is folded in here; what later work made stale is listed in §9. Read this
   report, not that one. Earlier reports (`2026-10-04` and before) stay valid for their own items, except where §9 says
@@ -59,7 +59,9 @@ Words used throughout:
 | P27 | Strategy risk limits | PORT | **yes** (L11) | New region `LocalRiskLimits` [strategy, instrument]; `RiskLimits` renamed `ServerRiskLimits`; `ControlRiskLimit` gains `StrategyId` (0 = the firm's row); the server loads strategy rows from `<strategy>/RiskLimits` and records their edits on the strategy's execution channel; the server still checks the firm's limit only |
 | P28 | Strategy exposure rows | PORT | **yes** (L11) | The per-directory `WorkingRisks` region becomes `<server>/ServerWorkingRisks` (the server's, per instrument) and new `<server>/LocalWorkingRisks` (per strategy and instrument, each strategy writes its own); layout of a row unchanged |
 | P29 | `OrderRisk` rows | PORT-IF (optional) | no | C# keeps them as a plain array inside the RiskLayer instead of a shared region per context; no other process ever read them |
-| C1-C18 | Mirror, Workspace, widgets, harness, Logging, simulator, a strategy's own book | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
+| P30 | Names | **MUST PORT** | **yes** (L12) | `SocketHeader.ServerName/ClientName`, `ServerHeader.ServerName`, `AllocateClient.ClientName` are 256 bytes; `ServerHeader` is 305 |
+| P31 | `Server` | PORT | no | A user's Pause control cancels the covered working algo orders at once, server-side; manual orders never |
+| C1-C20 | Mirror, Workspace, widgets, harness, Logging, simulator, a strategy's own book | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
 **Kinds.** PORT: change the C++ code. PORT-IF: change it only if C++ has the same construct (the item says what to look
@@ -489,6 +491,11 @@ The simulation-only wipe of the client's audit folder before `Connect` now runs 
 (`Clock.Mode == Simulation && this is AlgoClient`). A `ManualClient` (GUI) never touches audit files. Why: a GUI restarted
 within one simulation run failed, because that run's logging server still holds today's audit file open. A C++ algo keeps
 the wipe; a C++ manual client, if the port has one, must drop it.
+
+2026-10-20: the constructor also no longer creates `<name>/Audit` before `Connect`; it only clears an existing one (algo,
+simulation). The accepted client's `ClientContext` creates its folders. Why: a desk GUI's first try under the plain name
+is refused `RemoteDesk` and left an empty `<name>_GUI0/Audit` beside the `@<machine>` one. A C++ client that pre-creates
+its audit folder before connecting should drop that too.
 
 ---
 
@@ -1058,6 +1065,32 @@ bytes ran out on ordinary desk folders. The name fields are now `String256` (fix
   (and the reverse) with its "array layout" message; a region an old build created must not be reopened by a new one.
 - **Hot path:** none; names are read at connect and allocation only.
 
+### P31. PORT: a user's Pause cancels the algo orders it stops, at the server (C# `Provider/Server.cs`, `Execution/Order.cs`; 2026-10-20)
+
+Before, a Pause only turned the switch row (P25) and each algo cancelled its own orders on its next tick, so a quiet or
+stuck algo left its orders working. Now `Server.ReadExecution`'s `ControlType::AlgoStatus` case, after
+`OnControlAlgoStatus`, calls `CancelAlgoOrders(strategyId, instrumentId)` when the control's `AlgoStatus` is `Paused`:
+
+- **Which orders:** the working orders on the instrument (`EnumerateOrders(instrumentId, strategyId)`, no in-flight
+  client: the server's state is this order and not `Done`) of every strategy for the master switch (strategy 0), of that
+  strategy for a strategy's switch, and of those **algo orders only** (`ClientId == StrategyId`). A manual order, a GUI's
+  booked to a strategy or the house book's, is never cancelled.
+- **The cancel:** `orderState.NewCancel()`, `Seq` = the owner's target-row seq + `OrderTarget::s_foreignCancelSeqJump`
+  (1,000,000, now one named constant for the GUI's cancel of an algo order and `TryCloseOutOrders` too), `NicTimestamp` =
+  now. It is sent by the new `SendServerOrderTarget`: written to the owner's server-to-client execution channel first (so
+  the audit tap records it, as P8's injected cancels are; clients already ignore `OrderType::OrderTarget` there), then
+  `OnOrderTarget`. The injected-cancel drain uses the same helper. The server never writes the algo's target row.
+- **Not on a reject's pause:** the two places the server pauses a strategy after an algo order's reject call
+  `OnControlAlgoStatus` directly and cancel nothing; the algo cancels its own as before.
+- **Races, unchanged rules:** an unread Create arrives after the switch is `Paused` and is refused `AlgoIsPaused`
+  (discarded). The algo's own cancel or amend that follows the server's finds the order gone (`OrderNotFound` →
+  `StateIsDone`, discarded): no reject raised, no re-pause.
+- **Hot path:** no change per order or fill; the walk runs once per user Pause on the CoreGroup thread, allocation-free.
+- **Verified (C#):** simulation, two algos (8 orders each) and two manual orders on 6E. Master Pause: 16/16 algo orders
+  `Done` with seq >= 1,000,000 within 100 ms, both manual orders `Active`. Master Live, then one strategy's Pause: 8/8 of
+  its orders cancelled, the other's 8 and the manual 2 untouched. No non-discarded reject; switches ended master `Live`,
+  A `Live`, B `Paused`.
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -1258,6 +1291,9 @@ listed.
   server now sends on their execution channel. Before trading, set `MaxFillsPerSession` on every instrument (old lines
   load 0) and each strategy's limits (no file means Min in realtime). Both Mirror ends deploy with it (the layout hash
   changes).
+- **L12. 256-byte names (P30): the C++ server, the C# Local Mirror on the box and every desk package together, at a week
+  start with fresh shared memory.** The `SocketHeader` and `ServerHeader` sizes change, so the Mirror's layout hash
+  changes and old and new ends refuse each other.
 
 ---
 

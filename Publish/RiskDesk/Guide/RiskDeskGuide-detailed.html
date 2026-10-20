@@ -575,7 +575,7 @@ OWNER CHECK 14 (handout): remove this whole OWNER CHECK comment block before the
 
 <p><strong>What pausing does:</strong></p>
 <ul>
-  <li>Every algo on that instrument cancels its own working orders the next time it runs, and sends no new ones.</li>
+  <li>The server cancels every algo order working on that instrument at once, and the algos send no new ones.</li>
   <li>The server refuses any new algo order that crosses with the pause.</li>
 </ul>
 <p><strong>What pausing does not do:</strong></p>

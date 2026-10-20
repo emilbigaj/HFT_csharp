@@ -526,6 +526,8 @@ public struct AheadOfOrder(ulong clientOrderid, int quantityAhead, int quantityB
 [method: MethodImpl(MethodImplOptions.AggressiveInlining)]   // Why: the compiler zeroes every field, so the JIT judges the constructor too big to inline
 public struct OrderTarget()
 {
+    public const int s_foreignCancelSeqJump = 1_000_000;   // a cancel sent by someone other than the order's owner jumps past the owner's own seqs
+
     public Header<OrderType> Header = new(OrderType.OrderTarget);
     public OrderHeader OrderHeader;
     public Timestamp TriggerTimestamp; // NIC arrival of the message this target reacted to; OrderHeader.NicTimestamp is the send time

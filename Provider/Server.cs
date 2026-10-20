@@ -214,9 +214,7 @@ public class Server : IDisposable
             {
                 OrderTarget orderTarget = MemoryMarshal.Read<OrderTarget>(qsrc);
                 injected.Dequeue();
-                // Why: a cancel the server sends for a gone client is in no audit otherwise; written before OnOrderTarget so the tap records it ahead of its reject or Done
-                WriteToExecution(in orderTarget.OrderHeader, in orderTarget);
-                OnOrderTarget(in orderTarget);
+                SendServerOrderTarget(in orderTarget);
             }
         }
 
@@ -255,6 +253,9 @@ public class Server : IDisposable
                     {
                         ref readonly ControlAlgoStatus controlAlgoStatus = ref MemoryMarshal.AsRef<ControlAlgoStatus>(rdst);
                         OnControlAlgoStatus(controlAlgoStatus.StrategyId, controlAlgoStatus.InstrumentId, controlAlgoStatus.AlgoStatus);
+                        // Why: a user's pause stops the algo's orders now, not on its next tick; a reject's pause (above) leaves them to the algo
+                        if (controlAlgoStatus.AlgoStatus == AlgoStatus.Paused)
+                            CancelAlgoOrders(controlAlgoStatus.StrategyId, controlAlgoStatus.InstrumentId);
                         break;
                     }
                     default:
@@ -347,6 +348,33 @@ public class Server : IDisposable
         WriteToRecord(strategyId, _serverContext.GetInstrument(instrumentId).Header.CoreGroupId, in positionHeader);
     }
 
+    // Cancels the working algo orders a user's pause stops: the master switch every strategy's on the instrument, a strategy's
+    // switch that strategy's. Algo orders only: a manual order (a GUI's, the house book's) is never touched. CoreGroup thread only.
+    private void CancelAlgoOrders(int strategyId, int instrumentId)
+    {
+        bool isMasterSwitch = strategyId == OrderIdAllocator.ServerStrategyId;
+        foreach ((OrderState orderState, OrderTarget orderTarget) in _serverContext.EnumerateOrders(instrumentId, isMasterSwitch ? -1 : strategyId))
+        {
+            // Step 1: orders the server has and still works (an unread Create is refused AlgoIsPaused when it arrives), the algo's own only
+            if (!orderState.OrderHeader.OrderId.IsAlgoOrder())
+                continue;
+
+            // Step 2: a cancel numbered past the algo's own seqs, as a GUI's cancel of an algo order is (see Spec.md "Manual orders")
+            OrderTarget cancelOrderTarget = orderState.NewCancel();
+            cancelOrderTarget.OrderHeader.Seq = orderTarget.OrderHeader.Seq + Execution.OrderTarget.s_foreignCancelSeqJump;
+            cancelOrderTarget.OrderHeader.NicTimestamp = Clock.Now;
+            SendServerOrderTarget(in cancelOrderTarget);
+        }
+    }
+
+    // Sends a target the server itself originates (a gone client's close-out, a user's pause). CoreGroup thread only.
+    // Why: in no audit otherwise; written before OnOrderTarget so the tap records it ahead of its reject or Done
+    private void SendServerOrderTarget(in OrderTarget orderTarget)
+    {
+        WriteToExecution(in orderTarget.OrderHeader, in orderTarget);
+        OnOrderTarget(in orderTarget);
+    }
+
     // Closes out a gone client's 64 order slots: cancels what is working, marks a Create the server never read Done, repairs a
     // row left mid-write. Returns true once nothing waits on the exchange (see Spec.md "Client restart").
     public bool TryCloseOutOrders(int clientId)
@@ -376,7 +404,7 @@ public class Server : IDisposable
             _isClosedOut &= !isAwaitingExchange;
             orderTarget.OrderTargetStatus = isAwaitingExchange ? OrderStateStatus.Active : OrderStateStatus.Done;
             orderTarget.OrderTargetAction = OrderTargetAction.Cancel;
-            orderTarget.OrderHeader.Seq += 1_000_000;
+            orderTarget.OrderHeader.Seq += Execution.OrderTarget.s_foreignCancelSeqJump;
             orderTarget.OrderHeader.NicTimestamp = Clock.Now;
             orderTargetEntry.RecoveryWrite(in orderTarget);
             // Why: only a working slot's cancel is sent: a torn idle row's id may name no instrument, and the lookup would throw
