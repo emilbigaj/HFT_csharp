@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Data;
 using System.Threading;
 using Provider;
 using Socket;
@@ -28,6 +29,7 @@ public sealed class RemoteMirror : IDisposable
     private readonly ServerSocket _serverSocket;
     private readonly LetterBox<int> _remoteMirrorProcessIdBox;   // this process's id, posted once it listens: Workspaces of an earlier Remote rebuild on it
     private readonly TcpLinkConnector _tcpLinkConnector;
+    private readonly FileSyncRemote? _fileSyncRemote;   // null: this desk does not sync folders (MirrorConfig.IsFolderSyncOn)
     private TcpLink _tcpLink;
     private readonly uint _layoutHash;                      // this desk's array layout; every server header must carry the same
     private readonly int _serverProcessId;                  // the server process this object serves; another in a header is a restarted server
@@ -50,12 +52,14 @@ public sealed class RemoteMirror : IDisposable
     /// The link this object reads, handed to its replacement.
     public TcpLink TcpLink => _tcpLink;
 
-    /// Serves the server in the copy's header, or, given a restarted server's header, wipes the copy for it first.
-    public RemoteMirror(ServerContext serverContext, TcpLinkConnector tcpLinkConnector, TcpLink tcpLink, ServerHeader? newServerHeader)
+    /// Serves the server in the copy's header, or, given a restarted server's header, wipes the copy for it first. The folder sync is
+    /// the desk's, kept across replacements: its copies are this desk's files, whichever server wrote them.
+    public RemoteMirror(ServerContext serverContext, TcpLinkConnector tcpLinkConnector, TcpLink tcpLink, ServerHeader? newServerHeader, FileSyncRemote? fileSyncRemote)
     {
-        // Step 1: the server, the link and this desk's layout
+        // Step 1: the server, the link, the folder sync and this desk's layout
         _serverContext = serverContext;
         _tcpLinkConnector = tcpLinkConnector;
+        _fileSyncRemote = fileSyncRemote;
         _tcpLink = tcpLink;
         _layoutHash = serverContext.GetLayoutHash();
         _serverProcessId = newServerHeader?.ServerProcessId ?? serverContext.ServerHeader.GetReadonlyRef().ServerProcessId;
@@ -108,9 +112,12 @@ public sealed class RemoteMirror : IDisposable
         if (!_tcpLink.IsConnected)
             _tcpLink.Dispose();
 
-        // Step 4: up: each GUI's messages, once the link is known to serve this server
+        // Step 4: up: each GUI's messages and its folders' sync, once the link is known to serve this server
         if (_isLinkChecked)
+        {
             WriteGuiMessages();
+            _fileSyncRemote?.Sync(_tcpLink);
+        }
 
         // Step 5: a ping every 100 ms with this machine's monotonic clock (it doubles as the keep-alive), and the latency into the copy every pass
         Timestamp pingTimestamp = Timestamp.StopwatchNow;
@@ -152,8 +159,6 @@ public sealed class RemoteMirror : IDisposable
                     // Why only the server's process: a Local end restarted over the same server is a link drop; the rest of the link is the new server's (see Spec.md "Remote workspaces")
                     if (serverHeader.ServerProcessId != _serverProcessId)
                     {
-                        if (Clock.Mode == ClockMode.Simulation)
-                            StopDesk($"the server restarted (process {_serverProcessId} is now {serverHeader.ServerProcessId}), and a simulation desk's clock cannot go back");
                         NewServerHeader = serverHeader;
                         return;
                     }
@@ -184,10 +189,16 @@ public sealed class RemoteMirror : IDisposable
                     break;
                 }
                 case MirrorPacketType.AllocatedClientId:
-                    ApplyAllocatedClientId(MirrorPacket.ReadMirrorGuis(packet)[0]);
+                    ApplyAllocatedClientId(MirrorPacket.ReadMirrorGuis<Header<MirrorPacketType>>(packet)[0]);
                     break;
                 case MirrorPacketType.Heartbeat:
                     ApplyHeartbeat();
+                    break;
+                case MirrorPacketType.FileAnnounce:
+                    _fileSyncRemote?.OnAnnounce(packet);
+                    break;
+                case MirrorPacketType.FileChunk:
+                    _fileSyncRemote?.OnChunk(packet);
                     break;
             }
         }
@@ -254,7 +265,8 @@ public sealed class RemoteMirror : IDisposable
         }
         foreach ((string clientName, int guiProcessId) in _pendingClientIds.Keys)
             _listedMirrorGuis.Add(new MirrorGui() { GuiProcessId = guiProcessId, ClientName = MirrorPacket.RewriteName(new String256(clientName), isTravelling: true) });
-        _tcpLink.Write(MirrorPacket.CreateGuiPacket(MirrorPacketType.GuiList, CollectionsMarshal.AsSpan(_listedMirrorGuis)));
+        // Why the flag here: the box serves the folders of exactly these GUIs, and only to a desk that asks
+        _tcpLink.Write(MirrorPacket.NewGuiPacket(new MirrorGuiList() { IsFolderSyncOn = _fileSyncRemote != null }, CollectionsMarshal.AsSpan(_listedMirrorGuis)));
     }
 
     // Listen thread: lists the new GUI so the Local end starts a ManualClient for it, and waits for its AllocatedClientId: that client's id

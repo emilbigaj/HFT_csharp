@@ -197,7 +197,7 @@ public abstract class Context
     protected readonly SharedArray<SocketHeader> _clientSocketHeaders;
 
     // instruments
-    protected readonly SharedArray<InstrumentHeader128> _instrumentHeaders;
+    protected readonly SharedArray<InstrumentHeader256> _instrumentHeaders;
     protected readonly SharedArray<int> _instrumentHeaderIdByInstrumentId;
 
     // subscriptions
@@ -275,7 +275,7 @@ public abstract class Context
         // Creation order is each array's id in the Mirror; both ends must agree (GetLayoutHash), so they deploy together
         _clientSocketHeaders = NewSharedArray<SocketHeader>(serverName / "ClientHeaders", serverHeader.ClientIds.Length, ServerAccess);
 
-        _instrumentHeaders = NewSharedArray<InstrumentHeader128>(serverName / "InstrumentHeaders", serverHeader.InstrumentsCapacity, ServerAccess);
+        _instrumentHeaders = NewSharedArray<InstrumentHeader256>(serverName / "InstrumentHeaders", serverHeader.InstrumentsCapacity, ServerAccess);
         _instrumentHeaderIdByInstrumentId = NewSharedArray<int>(serverName / "InstrumentHeaderIdByInstrumentId", serverHeader.InstrumentIds.Length, ServerAccess);
 
         _instrumentIdsByClientId = NewSharedArray<Bitset64>(serverName / "InstrumentIdsByClientId", serverHeader.ClientIds.Length, ServerAccess);
@@ -475,6 +475,20 @@ public abstract class Context
         return ref _marketsByPrice.GetEntry(instrumentId);
     }
 
+    // The newest NIC time among this context's books: every instrument's for the server's context, the strategy's own for a
+    // client's. Cold path (a Workspace's clock, each refresh).
+    public Timestamp GetLatestMarketDataTimestamp()
+    {
+        Timestamp _latestNicTimestamp = Timestamp.MinValue;
+        foreach (int instrumentId in InstrumentIds)
+        {
+            // Why the entry, not GetMarketByPrice64: an instrument freed since InstrumentIds was read would throw; its old time does no harm
+            Timestamp nicTimestamp = _marketsByPrice.GetEntry(instrumentId).GetReadonlyRef().NicTimestamp;
+            _latestNicTimestamp = Timestamp.Max(nicTimestamp, _latestNicTimestamp);
+        }
+        return _latestNicTimestamp;
+    }
+
     // The instrument's book, or false while its row is empty: a remote desk's copy is wiped while a restarted Remote Mirror or
     // server refills it, and a GUI then has nothing to draw yet. Cold path: copies the whole book.
     public bool TryReadMarketByPrice64(int instrumentId, out MarketByPrice64 marketByPrice64)
@@ -505,7 +519,7 @@ public abstract class Context
 
     // Common shared memory accessors
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref SharedArrayEntry<InstrumentHeader128> GetInstrumentHeader(int instrumentHeaderId)
+    public ref SharedArrayEntry<InstrumentHeader256> GetInstrumentHeader(int instrumentHeaderId)
     {
         ThrowIfInstrumentHeaderIdOutOfRange(instrumentHeaderId);
         return ref _instrumentHeaders.GetEntry(instrumentHeaderId);
@@ -629,18 +643,18 @@ public abstract class Context
         {
             return;
         }
-        ref SharedArrayEntry<InstrumentHeader128> header128Entry = ref GetInstrumentHeader(instrumentHeaderId);
-        InstrumentHeader instrHeader = header128Entry.GetReadonlyRef().AsInstrumentHeader();
+        ref SharedArrayEntry<InstrumentHeader256> header256Entry = ref GetInstrumentHeader(instrumentHeaderId);
+        InstrumentHeader instrHeader = header256Entry.GetReadonlyRef().AsInstrumentHeader();
 
         Instrument? instrument = null;
 
         if (instrHeader.InstrumentType == InstrumentType.Future)
         {
-            instrument = new Future(header128Entry.Cast<FutureHeader>());
+            instrument = new Future(header256Entry.Cast<FutureHeader>());
         }
         else if (instrHeader.InstrumentType == InstrumentType.Spread)
         {
-            ref readonly LeggedHeader leggedHeader = ref header128Entry.GetReadonlyRef().AsLegged();
+            ref readonly LeggedHeader leggedHeader = ref header256Entry.GetReadonlyRef().AsLegged();
 
             // Legs reference sibling headers; long = the positive-weight leg (2-leg spreads only: Client.GetInstrument refuses any other shape).
             Future longLeg = null!;
@@ -654,11 +668,11 @@ public abstract class Context
                     shortLeg = legFuture;
             }
 
-            instrument = new Spread(header128Entry.Cast<LeggedHeader>(), longLeg, shortLeg);
+            instrument = new Spread(header256Entry.Cast<LeggedHeader>(), longLeg, shortLeg);
         }
         else if (instrHeader.InstrumentType == InstrumentType.Forex)
         {
-            instrument = new Forex(header128Entry.Cast<ForexHeader>());
+            instrument = new Forex(header256Entry.Cast<ForexHeader>());
         }
         else
         {
@@ -685,9 +699,9 @@ public abstract class Context
     {
         ThrowIfInstrumentHeaderIdOutOfRange(instrumentHeaderId);
 
-        ref readonly InstrumentHeader128 header128 = ref _instrumentHeaders[instrumentHeaderId].GetReadonlyRef();
+        ref readonly InstrumentHeader256 header256 = ref _instrumentHeaders[instrumentHeaderId].GetReadonlyRef();
 
-        return header128.AsInstrumentHeader().InstrumentId;
+        return header256.AsInstrumentHeader().InstrumentId;
     }
 
     // Every client's orders, or only those booked to strategyId (from whichever client sent them); -1 means any.
@@ -1038,7 +1052,7 @@ public sealed class ServerContext : Context
     private void ThrowInstrumentIdOutOfRange(int instrumentId)
         => throw new ArgumentOutOfRangeException(nameof(instrumentId), $"{GetType()}.ThrowIfInstrumentIdOutOfRange({instrumentId}), instrumentId has not been allocated.");
 
-    public void OnInstrumentHeader(in InstrumentHeader128 header128)
+    public void OnInstrumentHeader(in InstrumentHeader256 header256)
     {
         ref SharedArrayEntry<ServerHeader> serverHeaderEntry = ref ServerHeader;
         ref ServerHeader serverHeader = ref serverHeaderEntry.GetRef();
@@ -1046,13 +1060,13 @@ public sealed class ServerContext : Context
         if (serverHeader.InstrumentsCount >= serverHeader.InstrumentsCapacity)
             throw new ArgumentOutOfRangeException(nameof(serverHeader.InstrumentsCount), $"ServerContext.OnInstrumentHeader: InstrumentsCount({serverHeader.InstrumentsCount}) >= InstrumentsCapacity({serverHeader.InstrumentsCapacity})");
         
-        ref InstrumentHeader header = ref header128.AsInstrumentHeader();
+        ref InstrumentHeader header = ref header256.AsInstrumentHeader();
         header.InstrumentId = -1;
         header.ProductGroupId = -1;
         header.InstrumentHeaderId = serverHeader.InstrumentsCount;
 
-        ref SharedArrayEntry<InstrumentHeader128> header128Entry = ref _instrumentHeaders[header.InstrumentHeaderId];
-        header128Entry.Write(header128);
+        ref SharedArrayEntry<InstrumentHeader256> header256Entry = ref _instrumentHeaders[header.InstrumentHeaderId];
+        header256Entry.Write(header256);
 
         serverHeaderEntry.AcquireLock();
         serverHeader.InstrumentsCount++;
@@ -1063,8 +1077,8 @@ public sealed class ServerContext : Context
     {
         ref SharedArrayEntry<ServerHeader> serverHeaderEntry = ref ServerHeader;
         ref ServerHeader serverHeader = ref serverHeaderEntry.GetRef();
-        ref InstrumentHeader128 header128 = ref GetInstrumentHeader(instrumentHeaderId).GetRef();
-        ref InstrumentHeader header = ref header128.AsInstrumentHeader();
+        ref InstrumentHeader256 header256 = ref GetInstrumentHeader(instrumentHeaderId).GetRef();
+        ref InstrumentHeader header = ref header256.AsInstrumentHeader();
 
         int instrumentId = header.InstrumentId;
         if (instrumentId >= 0 && GetInstrumentHeaderIdByInstrumentId(instrumentId).GetReadonlyRef() == instrumentHeaderId)
@@ -1084,7 +1098,7 @@ public sealed class ServerContext : Context
         _clientIdsByInstrumentId[instrumentId].Write(new Bitset64());
         _instrumentHeaderIdByInstrumentId[instrumentId].Write(instrumentHeaderId);
 
-        Symbology symbology = header128.Symbology;
+        Symbology symbology = header256.Symbology;
 
         _serverRiskLimits.GetEntry(instrumentId).Write(RiskLimit.FromFile(GetRiskLimitsFilePath(DirectoryPath, symbology.Symbol).ToString(), instrumentId));
 
@@ -1151,8 +1165,8 @@ public sealed class ServerContext : Context
         if (GetInstrumentIdsByClientId(clientId).GetReadonlyRef()[instrumentId])
             return;
 
-        ref InstrumentHeader128 header128 = ref GetInstrumentHeader(instrumentHeaderId).GetRef();
-        Symbology symbology = header128.Symbology;
+        ref InstrumentHeader256 header256 = ref GetInstrumentHeader(instrumentHeaderId).GetRef();
+        Symbology symbology = header256.Symbology;
 
         // Strategy 0 has no socket to take a name from; its book lives at ServerStrategyName (see Spec.md).
         string clientName = clientId == OrderIdAllocator.ServerStrategyId
@@ -1210,16 +1224,16 @@ public sealed class ServerContext : Context
         PrintSharedArray(_clientIdsByInstrumentId, "ClientIdsByInstrumentId [instrumentId]");
         PrintSharedArray(_instrumentHeaderIdByInstrumentId, "InstrumentHeaderIdByInstrumentId [instrumentId]");
 
-        // Custom loop: InstrumentHeader128 has no JSON ToString, and Symbology throws on anything
+        // Custom loop: InstrumentHeader256 has no JSON ToString, and Symbology throws on anything
         // but Future/Spread (Forex symbology is not implemented), so print raw fields + guarded symbol.
         Console.WriteLine();
         Console.WriteLine($"--- InstrumentHeaders [instrumentHeaderId] x {_instrumentHeaders.Capacity} ---");
         for (int i = 0; i < _instrumentHeaders.Capacity; i++)
         {
-            ref SharedArrayEntry<InstrumentHeader128> entry = ref _instrumentHeaders.GetEntry(i);
-            ref readonly InstrumentHeader128 header128 = ref entry.GetReadonlyRef();
-            InstrumentHeader header = header128.AsInstrumentHeader();
-            string symbol = header.InstrumentType == InstrumentType.Future || header.InstrumentType == InstrumentType.Spread ? header128.Symbology.Symbol : "-";
+            ref SharedArrayEntry<InstrumentHeader256> entry = ref _instrumentHeaders.GetEntry(i);
+            ref readonly InstrumentHeader256 header256 = ref entry.GetReadonlyRef();
+            InstrumentHeader header = header256.AsInstrumentHeader();
+            string symbol = header.InstrumentType == InstrumentType.Future || header.InstrumentType == InstrumentType.Spread ? header256.Symbology.Symbol : "-";
             Console.WriteLine($"[{i}] seq={entry.GetSeq()} type={header.InstrumentType} symbol={symbol} instrumentId={header.InstrumentId} exchangeInstrumentId={header.ExchangeInstrumentId} coreGroupId={header.CoreGroupId} tradingStatus={header.TradingStatus} tickSize={header.TickSize}");
         }
 
@@ -1681,7 +1695,7 @@ public struct InstrumentHeaderEnumerator
     private int _instrumentHeaderId;
     private int _count;
 
-    public InstrumentHeader128 Current { get; private set; }
+    public InstrumentHeader256 Current { get; private set; }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal InstrumentHeaderEnumerator(Context context)

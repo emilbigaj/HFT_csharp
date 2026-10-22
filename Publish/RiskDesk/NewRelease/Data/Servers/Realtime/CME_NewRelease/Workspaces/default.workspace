@@ -1,0 +1,54 @@
+{
+  "WindowWidth": 1920,
+  "WindowHeight": 1129,
+  "WindowX": -1928,
+  "WindowY": -1212,
+  "WindowMaximized": true,
+  "Widgets": [
+    {
+      "TypeKey": "PositionsWidget",
+      "Title": "Positions",
+      "X": 1201.5,
+      "Y": 0,
+      "Width": 715,
+      "Height": 332
+    },
+    {
+      "TypeKey": "RiskLimitsWidget",
+      "Title": "Risk Limits",
+      "X": 0,
+      "Y": 0,
+      "Width": 1203,
+      "Height": 326,
+      "StateJson": "{\r\n  \"Columns\": [\r\n    {\r\n      \"Header\": \"ShortSymbol\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 0,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Symbol\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 1,\r\n      \"IsVisible\": false\r\n    },\r\n    {\r\n      \"Header\": \"InstrumentId\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 2,\r\n      \"IsVisible\": false\r\n    },\r\n    {\r\n      \"Header\": \"MaxOrderQuantity\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 3,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"MaxPositionQuantity\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 4,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"MaxFillsPerSession\",\r\n      \"Width\": 93,\r\n      \"WidthUnit\": \"Pixel\",\r\n      \"DisplayIndex\": 5,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Position\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 6,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"FillsThisSession\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 7,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"WorstWorkingLongQuantity\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 8,\r\n      \"IsVisible\": false\r\n    },\r\n    {\r\n      \"Header\": \"WorstWorkingLongPosition\",\r\n      \"Width\": 149,\r\n      \"WidthUnit\": \"Pixel\",\r\n      \"DisplayIndex\": 9,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"WorstWorkingShortQuantity\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 10,\r\n      \"IsVisible\": false\r\n    },\r\n    {\r\n      \"Header\": \"WorstWorkingShortPosition\",\r\n      \"Width\": 181,\r\n      \"WidthUnit\": \"Pixel\",\r\n      \"DisplayIndex\": 11,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"WorstWorkingFills\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 12,\r\n      \"IsVisible\": false\r\n    },\r\n    {\r\n      \"Header\": \"WorstWorkingFillsThisSession\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 13,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Timestamp\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 14,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"File\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Star\",\r\n      \"DisplayIndex\": 15,\r\n      \"IsVisible\": false\r\n    }\r\n  ]\r\n}"
+    },
+    {
+      "TypeKey": "MessageEfficiencyWidget",
+      "Title": "Message Efficiency",
+      "X": -8,
+      "Y": 737.5,
+      "Width": 1548,
+      "Height": 356,
+      "StateJson": "{\r\n  \"Columns\": [\r\n    {\r\n      \"Header\": \"ProductGroupRoot\",\r\n      \"Width\": 80,\r\n      \"WidthUnit\": \"Pixel\",\r\n      \"DisplayIndex\": 0,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"TradeDate\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 1,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"TradeTime\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 2,\r\n      \"IsVisible\": false\r\n    },\r\n    {\r\n      \"Header\": \"RawMessages\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 3,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"WeightedMessages\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 4,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"QuantityTraded\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 5,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Efficiency\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 6,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Tier3\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 7,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Tier3Benchmark\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 8,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Tier2\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 9,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Tier2Benchmark\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 10,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Tier1\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 11,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Tier1Benchmark\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 12,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Tier0\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 13,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Tier0Benchmark\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 14,\r\n      \"IsVisible\": true\r\n    }\r\n  ]\r\n}"
+    },
+    {
+      "TypeKey": "RateLimitWidget",
+      "Title": "Rate Limits",
+      "X": 1197,
+      "Y": 330.5,
+      "Width": 351,
+      "Height": 200,
+      "StateJson": "{\r\n  \"Columns\": [\r\n    {\r\n      \"Header\": \"CoreGroup\",\r\n      \"Width\": 103,\r\n      \"WidthUnit\": \"Pixel\",\r\n      \"DisplayIndex\": 0,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Duration\",\r\n      \"Width\": 80,\r\n      \"WidthUnit\": \"Pixel\",\r\n      \"DisplayIndex\": 1,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Limit\",\r\n      \"Width\": 80,\r\n      \"WidthUnit\": \"Pixel\",\r\n      \"DisplayIndex\": 2,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Count\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 3,\r\n      \"IsVisible\": true\r\n    }\r\n  ]\r\n}"
+    },
+    {
+      "TypeKey": "OrdersWidget",
+      "Title": "Orders",
+      "X": 3,
+      "Y": 333.5,
+      "Width": 1196,
+      "Height": 403,
+      "StateJson": "{\r\n  \"Columns\": [\r\n    {\r\n      \"Header\": \"ShortSymbol\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 0,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Symbol\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 1,\r\n      \"IsVisible\": false\r\n    },\r\n    {\r\n      \"Header\": \"ClientOrderId\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 2,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"Side\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 3,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"StateStatus\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 4,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"StateReason\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 5,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"StateSeq\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 6,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"StatePrice\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 7,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"StateTicks\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 8,\r\n      \"IsVisible\": false\r\n    },\r\n    {\r\n      \"Header\": \"StateQuantity\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 9,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"StateQuantityAhead\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 10,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"StateQuantityBehind\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 11,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"StateFilled\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 12,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"StateWorking\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 13,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"TargetAction\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 14,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"TargetStatus\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 15,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"TargetSeq\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 16,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"TargetPrice\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 17,\r\n      \"IsVisible\": true\r\n    },\r\n    {\r\n      \"Header\": \"TargetTicks\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 18,\r\n      \"IsVisible\": false\r\n    },\r\n    {\r\n      \"Header\": \"TargetQuantity\",\r\n      \"Width\": 1,\r\n      \"WidthUnit\": \"Auto\",\r\n      \"DisplayIndex\": 19,\r\n      \"IsVisible\": true\r\n    }\r\n  ]\r\n}"
+    }
+  ],
+  "ChildWindows": []
+}

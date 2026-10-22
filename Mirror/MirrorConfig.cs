@@ -23,12 +23,12 @@ public sealed class MirrorConfig
 
     public MirrorRole MirrorRole;
     public string ServerName = "";                      // the trading server's leaf name; the remote copies it under the same name
-    public ClockMode ClockMode = ClockMode.Realtime;
     public int ListenPort;                              // > 0: accept a peer that dials in
     public string[] IPWhitelist = [];                   // the only peers a listening end accepts, each an address or a CIDR range ("10.10.0.0/16"): the peer's (a Remote: the CME box's; a Local: each risk desk's)
     public string[] ConnectAddresses = [];              // "host:port", each dialled every second until connected
     public string DirectoriesRoot = "";                 // "" keeps S:\ (/mnt/S/); a relative folder is beside the executable ("Data" on a risk desk)
     public bool IsConsoleVisible = true;                // false: this end closes its console window at startup and writes Mirror.log beside the executable
+    public bool IsFolderSyncOn = false;                 // a Remote: true copies the box's files for the Workspaces open here (Audit, Fills, Series...; see Spec.md "Folder sync"); off by default
 
     /// The MirrorConfig at this path; a missing one is written with the defaults, to be filled in.
     public static MirrorConfig LoadOrCreate(string mirrorConfigPath)

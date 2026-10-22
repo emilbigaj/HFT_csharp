@@ -1,0 +1,8 @@
+{
+  "ServerName": "CME_Production",
+  "DirectoriesRoot": "Data",
+  "Workspaces": [
+    // if StrategyName is blank, the workspace shows the aggregate of all strategies (a server workspace)
+    { "StrategyName": "", "WorkspaceName": "default" }
+  ]
+}

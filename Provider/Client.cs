@@ -370,7 +370,7 @@ public abstract class Client
 
         if (!Context.TryGetInstrumentId(instrumendHeaderId, out instrumentId))
         {
-            ref readonly InstrumentHeader128 instrumentHeader = ref Context.GetInstrumentHeader(instrumendHeaderId).GetReadonlyRef();
+            ref readonly InstrumentHeader256 instrumentHeader = ref Context.GetInstrumentHeader(instrumendHeaderId).GetReadonlyRef();
             AllocateInstrument allocateInstrument = new AllocateInstrument()
             {
                 InstrumentHeaderId = instrumendHeaderId,

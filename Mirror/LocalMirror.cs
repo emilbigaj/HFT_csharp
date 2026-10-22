@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Data;
 using Execution;
 using Provider;
 using Socket;
@@ -28,12 +30,13 @@ public sealed class LocalMirror
     private readonly Dictionary<string, (Timestamp Timestamp, ConnectRefusal ConnectRefusal)> _failedStartByClientName = new();   // the last refusal per GUI name
     private bool _isStandInUpdated;                              // a stand-in read an order state since the last Publish (main thread only)
 
-    // One connected remote: its link, whether it has had every row yet, and the packets waiting for the next Publish.
+    // One connected remote: its link, whether it has had every row yet, the packets waiting for the next Publish, and its folder sync.
     private sealed class MirrorSession(TcpLink tcpLink)
     {
         public TcpLink TcpLink { get; } = tcpLink;
         public bool IsSynced { get; set; }
         public List<byte[]> QueuedPackets { get; } = new();
+        public FileSyncLocal FileSyncLocal { get; } = new(Context.DirectoriesRoot);
     }
 
     // The ManualClient serving one attached GUI, for as long as its remote lists that GUI process.
@@ -76,9 +79,13 @@ public sealed class LocalMirror
             _mirrorSessions.RemoveAt(mirrorSessionIndex);
         }
 
-        // Step 3: each remote's packets
+        // Step 3: each remote's packets, then its folders' news (once it has its snapshot, so the server header still opens the link)
         foreach (MirrorSession mirrorSession in _mirrorSessions)
+        {
             ReadPackets(mirrorSession);
+            if (mirrorSession.IsSynced)
+                mirrorSession.FileSyncLocal.Announce(mirrorSession.TcpLink);
+        }
 
         // Step 4: each ManualClient reads what the server sent back (what it sends went out in ApplyMessage)
         foreach (GuiManualClient? guiManualClient in _guiManualClients)
@@ -163,7 +170,7 @@ public sealed class LocalMirror
             switch ((MirrorPacketType)packet[0])
             {
                 case MirrorPacketType.GuiList:
-                    AttachGuis(mirrorSession, MirrorPacket.ReadMirrorGuis(packet));
+                    AttachGuis(mirrorSession, MirrorPacket.ReadMirrorGuis<MirrorGuiList>(packet), MemoryMarshal.Read<MirrorGuiList>(packet).IsFolderSyncOn);
                     break;
                 case MirrorPacketType.Message:
                 {
@@ -175,6 +182,9 @@ public sealed class LocalMirror
                     // Why after a publish, not straight back: the pong then proves the screen is fed too, so a Local end that no longer publishes reads as a stall
                     MemoryMarshal.AsRef<MirrorPing>(packet).Header = new(MirrorPacketType.Pong);
                     mirrorSession.QueuedPackets.Add(packet.ToArray());
+                    break;
+                case MirrorPacketType.FileRequest:
+                    mirrorSession.FileSyncLocal.OnRequest(packet, mirrorSession.TcpLink);
                     break;
             }
         }
@@ -214,8 +224,9 @@ public sealed class LocalMirror
         manualClient.WriteSocket();
     }
 
-    // Matches the GUIs a remote lists: one no longer listed (or listed with a new process) is closed, each new one is started.
-    private void AttachGuis(MirrorSession mirrorSession, ReadOnlySpan<MirrorGui> mirrorGuis)
+    // Matches the GUIs a remote lists: one no longer listed (or listed with a new process) is closed, each new one is started, and
+    // their folders are synced to the remote when it asks (isFolderSyncOn).
+    private void AttachGuis(MirrorSession mirrorSession, ReadOnlySpan<MirrorGui> mirrorGuis, bool isFolderSyncOn)
     {
         // Step 1: names under this end's root
         HashSet<(string ClientName, int GuiProcessId)> _listedGuis = new();
@@ -231,6 +242,9 @@ public sealed class LocalMirror
             if (!Array.Exists(_guiManualClients, candidate => candidate?.MirrorSession == mirrorSession && candidate.GuiProcessId == guiProcessId && candidate.ManualClient.ClientName == clientName))
                 StartGuiManualClient(mirrorSession, clientName, guiProcessId);
         }
+
+        // Step 4: the listed GUIs' folders, when the remote syncs them
+        mirrorSession.FileSyncLocal.Serve(_listedGuis.Select(listedGui => listedGui.ClientName), isFolderSyncOn);
     }
 
     // Closes the ManualClient of each GUI this remote drives that is not in stillListedGuis (every one, when null): the server
@@ -296,6 +310,6 @@ public sealed class LocalMirror
     private static void SendAllocatedClientId(MirrorSession mirrorSession, string clientName, int guiProcessId, int clientId)
     {
         MirrorGui mirrorGui = new() { ClientId = clientId, GuiProcessId = guiProcessId, ClientName = MirrorPacket.RewriteName(new String256(clientName), isTravelling: true) };
-        mirrorSession.QueuedPackets.Add(MirrorPacket.CreateGuiPacket(MirrorPacketType.AllocatedClientId, new ReadOnlySpan<MirrorGui>(in mirrorGui)));
+        mirrorSession.QueuedPackets.Add(MirrorPacket.NewGuiPacket(new Header<MirrorPacketType>(MirrorPacketType.AllocatedClientId), new ReadOnlySpan<MirrorGui>(in mirrorGui)));
     }
 }

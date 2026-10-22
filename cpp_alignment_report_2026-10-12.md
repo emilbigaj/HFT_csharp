@@ -5,7 +5,7 @@ do not need the C# conversation, `patch_log.md` or `Spec.md` to act on it. C# is
 checked against the C# working tree on 2026-10-13.
 
 - **Baseline:** C# commit `9d6f3ab` ("Align with C++ (csharp_alignment_report_2026-10-05)"), which the C++ branch
-  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17, P30, P31, P32, C20 and C21 on 2026-10-20).
+  `persist-client-sockets` was aligned with. This report covers everything C# changed after it, up to 2026-10-17 (P22, P23, P24 and C15 to C17 were added on 2026-10-13, C17 extended on 2026-10-14, P25 to P29 and C18 on 2026-10-15 and 2026-10-16, C19 on 2026-10-17, P30, P31, P32, C20 to C22 on 2026-10-20, P33 to P35 and C23 on 2026-10-21, P36 on 2026-10-22).
 - **Supersedes** `cpp_alignment_report_2026-10-07.md`, which was written piecemeal from 2026-10-07 to 2026-10-12 and never
   handed over. Everything in it that still holds is folded in here; what later work made stale is listed in §9. Read this
   report, not that one. Earlier reports (`2026-10-04` and before) stay valid for their own items, except where §9 says
@@ -62,7 +62,11 @@ Words used throughout:
 | P30 | Names | **MUST PORT** | **yes** (L12) | `SocketHeader.ServerName/ClientName`, `ServerHeader.ServerName`, `AllocateClient.ClientName` are 256 bytes; `ServerHeader` is 305 |
 | P31 | `Server` | PORT | no | A user's Pause control cancels the covered working algo orders at once, server-side; manual orders never |
 | P32 | Message efficiency | **MUST PORT** (with P24) | **yes** (L13) | `Tier0` → `TierEMT`, checked on a new full-weight `EMTWeightedMessages` (row 84 → 92); a tier of 0 never applies; no-file default is the EMT only |
-| C1-C21 | Mirror, Workspace, widgets, harness, Logging, simulator, a strategy's own book | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
+| P33 | Instrument header, session refusals | **MUST PORT** | **yes** (L14) | `InstrumentHeader` 64 → 128 bytes with `TradingStatusTimestamp` (int64 ns, offset 64), instrument row 128 → 256; a session refusal within 1 s of the last status change is the discarded `NotInSessionInFlight` (47), the server rewrites an exchange's bare `NotInSession` the same way |
+| P34 | `Server` book updates | PORT | no | The server no longer writes `ServerHeader.Timestamp` on each book update (one line shared by every CoreGroup thread and read by every risk check); GUIs show the newest book `NicTimestamp` instead; the field stays as the simulation clock |
+| P35 | Risk check, session | PORT | no | One rule for what a status allows (`RiskLayer.MaySend`): Open and Auction anything, Halted a cancel only, Closed and Unknown nothing; the server's create check uses it (was: create only while Open) |
+| P36 | Server listener, connect requests | PORT-IF | no | The listener reads a connect request from its letterbox (peek), decides, and empties the letterbox just before it replies; it emptied it first, so a listener that died deciding lost the request and the client waited forever |
+| C1-C23 | Mirror, Workspace, widgets, harness, Logging, simulator, a strategy's own book and quote | C#-ONLY | — | §8. Shared values they introduced: `ConnectRefusal::RemoteDesk = -7`, region `<server>/Latency` |
 | R1-R8 | — | REVERTED / SUPERSEDED | — | §9. Do not port: `DeallocateOrder`, `isCreateRejectedByClient`, `HasActiveOrders`/`IsOrderActive`, client-side restart check |
 
 **Kinds.** PORT: change the C++ code. PORT-IF: change it only if C++ has the same construct (the item says what to look
@@ -1131,6 +1135,69 @@ ratio up to 10× overnight. Now (the P24 layout, JSON and pseudo-code above show
   second weighter call instead of the out value 5.51 ns: keep it one direct call.
 - **Deploy in lockstep (L13).**
 
+### P33. MUST PORT: the time of the last status change, and session refusals of orders in flight (C# `Data/Instrument.cs`, `Provider/Server.cs`, `Provider/RiskLayer.cs`, `Execution/Order.cs`; 2026-10-21)
+
+An algo sends only while its instrument is `Open`, but it learns of a close through the feed, so an order sent just
+before a close was refused `NotInSession` and paused the algo. Now:
+
+- **Layout:** `InstrumentHeader` is 128 bytes (was 64); the fields up to `ProductGroupRoot` (offset 60) are unchanged,
+  then `int64 TradingStatusTimestamp` (ns since the Unix epoch) at **offset 64**, then padding to 128. The instrument
+  header row (C# `InstrumentHeader128`, now `InstrumentHeader256`) is **256 bytes** (was 128); `FutureHeader`,
+  `ForexHeader` and `LeggedHeader` keep their fields after the 128-byte `InstrumentHeader`, so every type-specific field
+  moves by 64 bytes (`LeggedHeader` is 192).
+- **Writer:** on a `TradingStatusUpdate` whose status differs from the header's, the server stores the update's
+  exchange timestamp in `TradingStatusTimestamp`, then the status byte with a release store. A repeated status leaves
+  both alone.
+- **Reason:** `OrderRejectedReason::NotInSessionInFlight = 47`, in the discarded mask (no pause, no alert, reserved
+  risk still released). Wherever the server's risk check would set `NotInSession` (status not `Open`), it sets
+  `NotInSessionInFlight` instead when now − `TradingStatusTimestamp` ≤ 1 s (`RiskLayer.NotInSessionInFlightWindow`).
+- **Exchange refusals:** in the server's entry point for exchange refusals, rewrite **each reason bit on its own**:
+  for a done order, an `OrderNotFound` bit becomes `StateIsDone` (this used to need the refusal to be exactly
+  `OrderNotFound`), and a `NotInSession` bit becomes the window's reason. A replace that meets a close comes back
+  `OrderNotFound|NotInSession` and must end up `StateIsDone|NotInSessionInFlight`, discarded. Map CME's
+  closed-market / instrument-state rejection to `NotInSession`, or this never fires live.
+- **Readers:** read the status before the time. A C++ reader of a row never takes a copy it then points into (the C#
+  overlay members were made `readonly` because a non-readonly call through `ref readonly` copied the row).
+- **Deploy in lockstep (L14).**
+
+### P34. PORT: no header timestamp per book update (C# `Provider/Server.cs`, `Provider/Context.cs`, `Workspace/Workspace.axaml.cs`; 2026-10-21)
+
+- **Server:** delete the store of the update's `NicTimestamp` into `ServerHeader.Timestamp` on the book-update path (C#
+  `Server.OnMarketByPrice`, after a successful apply, before the instrument-data write). Every CoreGroup thread wrote that
+  one line on every update, and every order's risk check reads `ClientIds`/`InstrumentIds` from the same line, so each
+  update could cost the next order on another CoreGroup a cross-chiplet fetch. Expected effect: lower order latency after
+  busy book updates on other CoreGroups; not measured.
+- **Layout:** unchanged. `ServerHeader.Timestamp` stays; only the simulator writes it (its clock).
+- **Readers:** a GUI's clock is the newest `NicTimestamp` among its principal's book rows (C#
+  `Context.GetLatestMarketDataTimestamp`). If a C++ tool shows the server's time, read it the same way.
+- **Deploy:** no lockstep. An old C++ server keeps writing the field, which nothing live reads any more.
+
+### P35. PORT: one session rule for what may be sent (C# `Provider/RiskLayer.cs`, `Strategy/Algo.cs`, `Simulator/ServerSimulator.cs`; 2026-10-21)
+
+- **The rule** (C# `RiskLayer.MaySend(tradingStatus, orderTargetAction)`): `Open` and `Auction` allow a create, an amend
+  and a cancel; `Halted` a cancel only; `Closed` and `Unknown` nothing.
+- **Server risk check:** a create is refused `NotInSession` (or `NotInSessionInFlight`, P33) when the rule refuses it,
+  i.e. in `Halted`, `Closed` or `Unknown`; it used to be refused in anything but `Open`, so a create in an auction is now
+  sent on to the exchange. Amends and cancels are still not session-checked by the risk layer.
+- **Why:** at a CME velocity-logic pause (status `Auction`) a quoting algo cancels its orders, which CME accepts; the
+  C# simulator refused them, and the first refusal over 1 s into the pause paused the algo. The C# client (`Algo.Send`)
+  now applies the same rule in both modes, so it never sends what the server or the exchange's session would refuse.
+- **Live check:** CME's "no cancel" phase before some opens refuses cancels while our status says `Auction`; such a
+  refusal still pauses the algo after the P33 window. Listed for the CME call.
+- **Deploy:** no lockstep (no layout or wire change).
+
+### P36. PORT-IF: a connect request leaves the letterbox only as it is answered (C# `Socket/Socket.cs` `ServerSocket.PollLetterBox`; 2026-10-22)
+
+- **Look for:** the C++ server's listener taking a client's connect request out of its letterbox (an empty/take) before
+  deciding the client's id.
+- **Change:** read it without taking it (peek), decide, then empty the letterbox immediately before replying (before the
+  refusal reply and before opening an accepted client). Not after replying: a listener that dies between the reply and the
+  empty would leave the request for its successor, which would answer it a second time.
+- **Why in C#:** on a remote desk the listener is the Remote Mirror, whose decision waits for the box (up to 10 s); a Remote
+  killed then lost the request and its Workspaces waited forever. In C++ the listener dies with its server, so this is for
+  symmetry; a client posting a second request meanwhile waits in its store loop, as before.
+- **Deploy:** no lockstep.
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -1140,8 +1207,9 @@ listed.
 
 - **C1. The `Mirror` project** (`Mirror/LocalMirror.cs`, `RemoteMirror.cs`, `TcpLink.cs`, `MirrorPacket.cs`,
   `MirrorConfig.cs`, `Program.cs`): remote desks run the normal Workspace against a copy of the CME server. Its TCP protocol
-  (`MirrorPacketType` 1..8: `Row`, `Message`, `Heartbeat`, `GuiList`, `AllocatedClientId`, `ServerHeader`, `Ping`, `Pong`),
-  `MirrorConfig.json` (role, server name, clock mode, ports, `IPWhitelist`, `DirectoriesRoot`) and the layout hash are
+  (`MirrorPacketType` 1..11: `Row`, `Message`, `Heartbeat`, `GuiList`, `AllocatedClientId`, `ServerHeader`, `Ping`, `Pong`,
+  and the folder sync's `FileAnnounce`, `FileRequest`, `FileChunk`, C24), `MirrorConfig.json` (role, server name, ports,
+  `IPWhitelist`, `DirectoriesRoot`, `IsFolderSyncOn`; the clock mode was removed 2026-10-21) and the layout hash are
   between two C# ends only. What touches the C++ server on the CME box:
   - The **Local Mirror** reads the C++ server's regions and publishes changed rows. It copies rows with
     `SharedArray.TryCopy`, which never waits and never writes. Like every C# process, it does stamp row frames when it
@@ -1153,7 +1221,8 @@ listed.
     client. It relies on P1, P2, P5 and P9 (§10, L7).
   - The Local Mirror publishes when a stand-in reads an order state. It relies on the server writing a fill's state and
     position rows **before** it sends the client the state message (as C# `Server.OnFill` does).
-  - A remote desk's clock is the copied `ServerHeader.Timestamp`, which C# relies on the server rewriting every pass.
+  - A remote desk's clock is the newest `NicTimestamp` among its principal's copied book rows (P34); it no longer reads
+    `ServerHeader.Timestamp`.
 - **C2. `Provider/RemoteClient.cs` and `IManualClient`.** On a remote desk the Workspace's manual client is a pass-through:
   each call (`OrderTarget`, `AllocateInstrument`, `ControlAlgoStatus`, `ControlRiskLimit`, all existing message types) goes
   up its admin channel to the Remote Mirror's `ServerSocket`, and the Local end makes the same call on the stand-in. It
@@ -1256,6 +1325,32 @@ listed.
   raw messages' share of the tier's threshold, so a day heading into a tier it would breach warns early. The MEP cell takes
   the highest of Tier1-3 (`MessageEfficiency.GetMEPWarningRatio`). A continuous gradient was tried and declined. If a C++
   tool ever displays the row, it should colour the same way.
+- **C22. 2026-10-20, the simulator applies recorded TradingStatus** (C# only, nothing to port): a contract with a
+  `.TradingStatus` tick history takes its status from it, not from the session schedule or the crossed-book guess, so a
+  simulation sees the halts, early closes and pre-opens the live server hears from the exchange feed. Fills and targets read
+  only that status; the schedule and the crossed-book guess remain as the fallback for data without status. Also: the
+  simulator's level-update lists are sized from the update (a 305-level reopen message overflowed the old 128), and a feed
+  message that fails ends the simulation run instead of being retried.
+- **C23. 2026-10-21, a strategy's quote removes only the order states its book already shows** (C# only, nothing to port;
+  `Position` is client code): `Position.TryGetQuote` subtracts an order only once the exchange has answered its latest
+  target and the state's `OrderHeader.ExchangeTimestamp` is at or before the book's `ExchangeTimestamp`; otherwise it holds
+  the last such quote. It reads the book in place through the new C#-only `SideByPrice64.TryGetBestLevelExcluding`. The
+  simulator's republish of a user order's book change now crosses the exchange-to-NIC leg like its ack. **Check in C++
+  (live correctness depends on it):** the `OrderState` the server writes carries the iLink TransactTime in
+  `OrderHeader.ExchangeTimestamp`, and the book the server publishes carries the MDP TransactTime in `ExchangeTimestamp`,
+  the same matching-engine clock for the same event. If either is a local receive time, a strategy's quote holds after
+  every order change until a later book update, or subtracts states the book does not show yet.
+- **C24. 2026-10-21/22, Mirror folder sync and timer resolution** (C# only, nothing to port; one file contract to keep):
+  a desk whose `MirrorConfig.IsFolderSyncOn` is true (default false) copies the box's files under the folders of its open
+  Workspaces (each GUI's principal folder and the GUI's own, never `Workspaces`), over the existing Mirror link: the desk's
+  `GuiList` packet carries one byte, `IsFolderSyncOn`, the Local Mirror derives the folders from the listed GUI names and
+  announces each file's length and write time every 100 ms, and the desk pulls what its copy lacks (`Mirror/FileSync.cs`).
+  `FileSubscribe` existed for a day and was removed before shipping; the file packets are 9..11. **What touches the C++
+  side:** the Local Mirror only reads files the C++ server and the C# Logging write (shared read; it never writes on the box).
+  It treats a file bigger than 64 KB as append-only and fetches only what was appended, so a C++ writer that rewrites a big
+  file in place (same or longer length) is copied wrongly until it shrinks: keep audits, fills, series and logs
+  append-only, as they are. On Windows only, `LowLatency.RaiseTimerResolution` (`timeBeginPeriod(1)` plus the Windows 11
+  `PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION` opt-out) keeps a hidden Mirror's 1 ms loop at 1 ms; Linux needs nothing.
 
 ---
 
@@ -1344,6 +1439,13 @@ listed.
 - **L13. The EMT tier (P32): the C++ server, every C# process on the box and every desk package together, with fresh
   shared memory and the rebuilt `MessageEfficiency` files copied to the box first.** The row grows to 92 bytes (the
   Mirror's layout hash changes), and a file still saying `"Tier0"` leaves the EMT off for that group.
+- **L14. The 256-byte instrument row (P33): the C++ server, every C# process on the box and every desk package together,
+  with fresh shared memory (remove the old `InstrumentHeaders` region under `/dev/shm`).** Every type-specific header
+  field moves, so an old reader of a new row, or the reverse, misreads it; the Mirror's layout hash changes, so old and
+  new ends refuse each other.
+- **L15. Withdrawn (2026-10-22).** The Mirror's link hello was replaced the next day by the folder sync on the one row link
+  (C24). Nothing in the C++ server changes. C#-only, as L6: both Mirror ends deploy together, since `GuiList` grew one byte
+  and an old end would misread the GUI names after it.
 
 ---
 

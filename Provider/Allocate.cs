@@ -107,7 +107,7 @@ public struct CoreGroup()
 public struct ServerHeader()
 {
     public String256 ServerName;
-    public Timestamp Timestamp;
+    public Timestamp Timestamp;   // simulation only: the simulation clock, written by ServerSimulator, which a simulated Workspace or Mirror follows
     public int InstrumentsCapacity = 4096;
     public int InstrumentsCount = 0;
 

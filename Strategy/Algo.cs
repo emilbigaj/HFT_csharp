@@ -110,13 +110,15 @@ public unsafe abstract class Algo
         return (signPart << 63) | (ticksPart << 31);
     }
 
-    // Sends the targets exactly as asked: anything refused comes back as a reject and pauses the algo, so a strategy bug shows (see Spec.md).
+    // Sends the targets as asked, except what the exchange's session would refuse (RiskLayer.MaySend): anything refused comes back as a reject
+    // and pauses the algo, so a strategy bug shows (see Spec.md).
     public void Target(ref StackList<Target> targets)
     {
         Target(ref targets, isBestEffort: false);
     }
 
-    // Best effort: clipped to the risk limits, dropped when it would be refused, never a reject; false when a target was not sent as asked (see Spec.md).
+    // Best effort on the risk limits: clipped to them, dropped when they would refuse it, never a reject; the session rule is Target's;
+    // false when a target was not sent as asked (see Spec.md).
     public bool TryTarget(ref StackList<Target> targets)
     {
         return Target(ref targets, isBestEffort: true);
@@ -572,15 +574,20 @@ public unsafe abstract class Algo
         };
     }
 
-    // Best effort drops what would be refused (a closed session, no free order slot) and clips what would not fit, noting the miss; strict sends as asked.
+    // Both modes drop what the exchange's session would refuse (RiskLayer.MaySend), noting the miss; best effort also drops a Create
+    // with no free order slot and clips what would not fit the risk limits; strict sends the rest as asked.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Send(ref OrderTarget orderTarget)
     {
+        if (!RiskLayer.MaySend(Instrument.Header.TradingStatus, orderTarget.OrderTargetAction))
+        {
+            _isTargetAchieved = false;
+            return;
+        }
         if (_isBestEffort)
         {
             int quantity = orderTarget.OrderProfile.Quantity;
-            bool isSendable = Instrument.Header.TradingStatus == TradingStatus.Open
-                && (orderTarget.OrderTargetAction != OrderTargetAction.Create || Client.HasFreeOrderSlot)
+            bool isSendable = (orderTarget.OrderTargetAction != OrderTargetAction.Create || Client.HasFreeOrderSlot)
                 && (orderTarget.OrderTargetAction == OrderTargetAction.Cancel || Client.RiskLayer.TryClipToRiskLimit(ref orderTarget));
             _isTargetAchieved &= isSendable && orderTarget.OrderProfile.Quantity == quantity;
             if (!isSendable)

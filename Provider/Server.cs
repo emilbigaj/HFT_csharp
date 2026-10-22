@@ -429,9 +429,9 @@ public class Server : IDisposable
         return true;
     }
 
-    public void OnInstrumentHeader(in InstrumentHeader128 instrumentHeader128)
+    public void OnInstrumentHeader(in InstrumentHeader256 instrumentHeader256)
     {
-        _serverContext.OnInstrumentHeader(in instrumentHeader128);
+        _serverContext.OnInstrumentHeader(in instrumentHeader256);
     }
 
     public void OnQuantityAhead(OrderId clientOrderId, int quantityAhead, int quantityBehind)
@@ -483,13 +483,15 @@ public class Server : IDisposable
         return ref existingOrderState;
     }
 
-    private const ulong _orderNotFound = 1UL << (int)OrderRejectedReason.OrderNotFound;
     // The entry point for every refused target, the server's own (OnOrderTarget) and the exchange's (see Spec.md).
     public OrderRejected OnOrderRejected(ref OrderRejected orderRejected, string message)
     {
+        // Why per reason: a refusal made only of races (a done order's OrderNotFound, an in-flight NotInSession) is discarded (see Spec.md)
         ref OrderState orderState = ref _serverContext.GetOrderState(orderRejected.OrderHeader.OrderId).GetRef();
-        if (orderState.OrderStateStatus == OrderStateStatus.Done && orderRejected.OrderRejectedReasons.Raw == _orderNotFound)
-            orderRejected.OrderRejectedReasons = new Bitset64(1UL << (int)OrderRejectedReason.StateIsDone);
+        if (orderState.OrderStateStatus == OrderStateStatus.Done)
+            orderRejected.OrderRejectedReasons.Replace((int)OrderRejectedReason.OrderNotFound, (int)OrderRejectedReason.StateIsDone);
+        OrderRejectedReason notInSessionReason = RiskLayer.GetNotInSessionReason(in _serverContext.GetInstrument(orderRejected.OrderHeader.OrderId.InstrumentId).Header);
+        orderRejected.OrderRejectedReasons.Replace((int)OrderRejectedReason.NotInSession, (int)notInSessionReason);
 
         if (orderState.OrderHeader.OrderId == orderRejected.OrderHeader.OrderId)
         {
@@ -561,9 +563,9 @@ public class Server : IDisposable
         int instrumentId = _serverContext.AllocateInstrument(allocateInstrument.InstrumentHeaderId);
         allocateInstrument.InstrumentId = instrumentId;
 
-        ref InstrumentHeader128 header128 = ref _serverContext.GetInstrumentHeader(allocateInstrument.InstrumentHeaderId).GetRef();
-        allocateInstrument.Symbol = header128.Symbology.Symbol;
-        allocateInstrument.ExchangeInstrumentId = header128.AsInstrumentHeader().ExchangeInstrumentId;
+        ref InstrumentHeader256 header256 = ref _serverContext.GetInstrumentHeader(allocateInstrument.InstrumentHeaderId).GetRef();
+        allocateInstrument.Symbol = header256.Symbology.Symbol;
+        allocateInstrument.ExchangeInstrumentId = header256.AsInstrumentHeader().ExchangeInstrumentId;
 
         if (_instrumentData[instrumentId] != null)
             return instrumentId; // already attached + seeded
@@ -585,11 +587,11 @@ public class Server : IDisposable
         // them and throws otherwise. Each leg is fully client-allocated too (the client tracks leg
         // positions and fills), but only the SPREAD — the instrument the client asked for — echoes
         // an admin reply: the client's GetInstrument handshake reads exactly one. See Spec.md.
-        ref InstrumentHeader128 header128 = ref _serverContext.GetInstrumentHeader(allocateInstrument.InstrumentHeaderId).GetRef();
-        if (header128.AsInstrumentHeader().InstrumentType == InstrumentType.Spread)
+        ref InstrumentHeader256 header256 = ref _serverContext.GetInstrumentHeader(allocateInstrument.InstrumentHeaderId).GetRef();
+        if (header256.AsInstrumentHeader().InstrumentType == InstrumentType.Spread)
         {
             AllocateInstrument allocateLegInstrument = allocateInstrument;
-            ref LeggedHeader leggedHeader = ref header128.AsLegged();
+            ref LeggedHeader leggedHeader = ref header256.AsLegged();
             foreach (ref readonly LegHeader legHeader in leggedHeader.Legs)
             {
                 allocateLegInstrument.InstrumentHeaderId = legHeader.InstrumentHeaderId;
@@ -731,8 +733,14 @@ public class Server : IDisposable
     public void OnTradingStatusUpdate(in TradingStatusUpdate tradingStatusUpdate)
     {
         int instrumentHeaderId = _serverContext.GetInstrumentHeaderIdByInstrumentId(tradingStatusUpdate.TickHeader.InstrumentId).GetReadonlyRef();
-        ref InstrumentHeader128 instrumentHeader = ref _serverContext.GetInstrumentHeader(instrumentHeaderId).GetRef();
-        instrumentHeader.AsInstrumentHeader().TradingStatus = tradingStatusUpdate.TradingStatus;
+        ref InstrumentHeader256 instrumentHeader = ref _serverContext.GetInstrumentHeader(instrumentHeaderId).GetRef();
+        ref InstrumentHeader header = ref instrumentHeader.AsInstrumentHeader();
+        if (header.TradingStatus != tradingStatusUpdate.TradingStatus)
+        {
+            // Why: the time before the status, so a reader that sees the new status sees its time (see Spec.md)
+            header.TradingStatusTimestamp = tradingStatusUpdate.TickHeader.ExchangeTimestamp;
+            Volatile.Write(ref Unsafe.As<TradingStatus, byte>(ref header.TradingStatus), (byte)tradingStatusUpdate.TradingStatus);
+        }
         WriteToInstrumentData(in tradingStatusUpdate);
 
         // The exchange closing the instrument ends its session: its product group's message-efficiency day and its fills count (see Spec.md)
@@ -816,8 +824,6 @@ public class Server : IDisposable
 
         if (!isDeltas)
             return;
-
-        _serverContext.ServerHeader.GetRef().Timestamp = marketByPrice.TickHeader.NicTimestamp;
 
         _instrumentData[instrumentId]?.Write(deltaSpan);
     }

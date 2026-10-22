@@ -15,11 +15,14 @@ public enum MirrorPacketType : byte
     Row = 1,         // Local → Remote: one shared-memory row whose bytes changed (every row, the first time)
     Message = 2,     // Remote → Local: a call one GUI wrote
     Heartbeat = 3,   // Local → Remote: closes each publish pass (the first completes a remote's copy)
-    GuiList = 4,     // Remote → Local, every second: the GUIs attached on the remote
+    GuiList = 4,     // Remote → Local, every second: the GUIs attached on the remote, and whether it syncs their folders
     AllocatedClientId = 5,    // Local → Remote: a listed GUI's id (its ManualClient's), or a negative ConnectRefusal saying why not
     ServerHeader = 6,  // Local → Remote: opens each publish pass; a remote sizes its copy from the first and posts it in its LetterBox
     Ping = 7,        // Remote → Local, every 100 ms: the Remote's clock, echoed at once
     Pong = 8,        // Local → Remote: that ping, unchanged; the Remote times the round trip on its own clock
+    FileAnnounce = 9,     // Local → Remote: one file's length and write time, sent when either changes; FileVersion.s_withdrawn: no longer offered
+    FileRequest = 10,     // Remote → Local: one file's bytes from an offset (what the desk holds of it)
+    FileChunk = 11,       // Local → Remote: the answer, up to one chunk from that offset (empty when the file cannot be read now)
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -58,6 +61,13 @@ public struct MirrorPing()
     public Timestamp PingTimestamp;         // the Remote's clock when it sent the ping
 }
 
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public struct MirrorGuiList()                // + the GUIs (MirrorGui each)
+{
+    public Header<MirrorPacketType> Header = new(MirrorPacketType.GuiList);
+    public bool IsFolderSyncOn;             // this desk copies the box's files of these GUIs' folders (its MirrorConfig.IsFolderSyncOn)
+}
+
 // One GUI attached on a remote: listed in GuiList (ClientId -1), answered by AllocatedClientId (its ManualClient's id, or a negative ConnectRefusal).
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct MirrorGui()
@@ -80,19 +90,19 @@ public static class MirrorPacket
         return packet;
     }
 
-    /// [Header][MirrorGui ...]: a GuiList with any number of GUIs, an AllocatedClientId with one.
-    public static byte[] CreateGuiPacket(MirrorPacketType mirrorPacketType, ReadOnlySpan<MirrorGui> mirrorGuis)
+    /// [header][MirrorGui ...]: a GuiList (MirrorGuiList header) with any number of GUIs, an AllocatedClientId (a plain Header) with one.
+    public static byte[] NewGuiPacket<THeader>(in THeader header, ReadOnlySpan<MirrorGui> mirrorGuis) where THeader : unmanaged
     {
-        int headerLength = Unsafe.SizeOf<Header<MirrorPacketType>>();
+        int headerLength = Unsafe.SizeOf<THeader>();
         byte[] packet = new byte[headerLength + mirrorGuis.Length * Unsafe.SizeOf<MirrorGui>()];
-        MemoryMarshal.Write(packet, new Header<MirrorPacketType>(mirrorPacketType));
+        MemoryMarshal.Write(packet, in header);
         MemoryMarshal.AsBytes(mirrorGuis).CopyTo(packet.AsSpan(headerLength));
         return packet;
     }
 
-    /// The MirrorGui entries of a GuiList or AllocatedClientId packet.
-    public static ReadOnlySpan<MirrorGui> ReadMirrorGuis(ReadOnlySpan<byte> packet)
-        => MemoryMarshal.Cast<byte, MirrorGui>(packet[Unsafe.SizeOf<Header<MirrorPacketType>>()..]);
+    /// The MirrorGui entries of a GuiList or AllocatedClientId packet, after its header.
+    public static ReadOnlySpan<MirrorGui> ReadMirrorGuis<THeader>(ReadOnlySpan<byte> packet) where THeader : unmanaged
+        => MemoryMarshal.Cast<byte, MirrorGui>(packet[Unsafe.SizeOf<THeader>()..]);
 
     /// Rewrites the paths in a SocketHeader row: relative to this end's root to travel, or back under it on arrival.
     public static void RewriteNames(SharedArray sharedArray, Span<byte> row, bool isTravelling)

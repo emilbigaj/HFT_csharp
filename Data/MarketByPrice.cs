@@ -126,7 +126,7 @@ namespace Data
 
         // ── Mapping: price ticks -> ring index (O(1)) ────────────────────
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private int MapBestOffsetToRingIndex(int bestOffset)
+        private readonly int MapBestOffsetToRingIndex(int bestOffset)
         {
             return (_bestIndex + bestOffset) & IndexMask;                    // mask to ring
         }
@@ -167,9 +167,39 @@ namespace Data
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public int MapBestOffsetToTicks(int bestOffset)
+        public readonly int MapBestOffsetToTicks(int bestOffset)
         {
             return _bestTicks - bestOffset * (int)Side;
+        }
+
+        // The best level once these quantities are taken out at their prices; false when they cover the whole side.
+        // Why readonly: Position reads the book through ref readonly, and a non-readonly call would copy the 320-byte side
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public readonly bool TryGetBestLevelExcluding(ReadOnlySpan<Level> excludedLevels, out Level bestLevel)
+        {
+            ulong _unreadLevelBits = _bitset.RotateRight(_bestIndex).Raw;
+            while (_unreadLevelBits != 0UL)
+            {
+                // Step 1: the next active level, best first
+                int bestOffset = BitOperations.TrailingZeroCount(_unreadLevelBits);
+                _unreadLevelBits &= _unreadLevelBits - 1;
+                int levelTicks = MapBestOffsetToTicks(bestOffset);
+                int levelQuantity = _quantities[MapBestOffsetToRingIndex(bestOffset)];
+
+                // Step 2: take out the excluded quantity at this price
+                for (int excludedIndex = 0; excludedIndex < excludedLevels.Length; excludedIndex++)
+                {
+                    if (excludedLevels[excludedIndex].Ticks == levelTicks)
+                        levelQuantity -= excludedLevels[excludedIndex].Quantity;
+                }
+                if (levelQuantity > 0)
+                {
+                    bestLevel = new Level(levelTicks, levelQuantity);
+                    return true;
+                }
+            }
+            bestLevel = default;
+            return false;
         }
 
         /// <summary>

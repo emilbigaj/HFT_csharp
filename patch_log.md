@@ -4,6 +4,234 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-22 — A hidden Mirror keeps its 1 ms timer on Windows 11
+
+- `Tools/LowLatency.cs` — `RaiseTimerResolution` first opts the process out of timer power throttling
+  (`SetProcessInformation`, `ProcessPowerThrottling`, `PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION`). Why: Windows 11
+  ignores `timeBeginPeriod(1)` after about 4 s for a process with no visible window of its own, so a hidden desk Mirror's
+  1 ms loops fell back to 15.6 ms passes (every row and file request delayed; file sync 66 → 21 MB/s in the retests).
+  Measured (scratch `sleeptest`): `Sleep(1)` 15.4 ms from 4 s on before, about 2 ms for 20 s after. +17 lines.
+- C++: nothing (Linux).
+
+---
+
+## 2026-10-22 — Folder sync rides the GuiList: one byte replaces the subscribe packet
+
+- `Mirror/MirrorPacket.cs` — `FileSubscribe` removed; `FileAnnounce`/`FileRequest`/`FileChunk` renumbered 9-11 (never
+  shipped); `MirrorGuiList` header with `IsFolderSyncOn`; `CreateGuiPacket` renamed `NewGuiPacket<THeader>`, read back by
+  `ReadMirrorGuis<THeader>`. `Mirror/RemoteMirror.cs` sends the flag (`_fileSyncRemote != null`); `EnumerateGuiClientNames`
+  deleted. `Mirror/LocalMirror.cs` — `AttachGuis` hands the listed names and the flag to `FileSyncLocal.Serve`, which
+  derives the folders on the box. Why: the GUIs and the sync can no longer disagree, the folder rule has one owner, one
+  packet type fewer (user's design).
+- `Mirror/FileSync.cs` — a withdraw (`FileVersion.s_withdrawn`, length −1) answers a request for a file not offered or
+  gone; the desk stops asking. Why: a deleted box file was asked for every 100 ms (Spec.md residual removed).
+- Verified in scratch: the adversary's rig (overshoot, overshootheld, empty, starve, sizes, latency, cuts, restart,
+  subchange, smallfiles, deleted: 0 requests after the delete, rangelockbig), `filesync2` (14 checks) and the lifecycle
+  harness (real Mirror processes, 22 scenarios: restarts, kill-everything in three orders, link cuts, flapping, 200 MB
+  catch-ups interrupted four ways, each resuming from what the desk held) pass.
+- Deploy: both Mirror ends together (the packet numbers moved; an old end misreads them). C++: nothing.
+
+---
+
+## 2026-10-22 — Folder sync is off unless the desk's config turns it on
+
+- `Mirror/MirrorConfig.cs` — `IsFolderSyncOn`, default `false`. `Mirror/Program.cs` — `RunRemote` builds a `FileSyncRemote`
+  only when it is on; `Mirror/RemoteMirror.cs` — the sync is optional (`_fileSyncRemote?`). Why: the risk team's desks need
+  not see the strategies' audit trail and series; the risk-desk packages leave the field out, so they are off. A desk
+  preference, not access control (Spec.md "Folder sync").
+- Verified in scratch (lifecycle harness, real Mirror processes): with the field absent, no subscribe, announce or chunk
+  crossed the link and both Workspaces worked; with `true`, the sync ran as before.
+
+---
+
+## 2026-10-22 — A connect request leaves the letterbox only as it is answered
+
+- `Socket/Socket.cs` — `ServerSocket.PollLetterBox` reads the request with `TryPeek`, decides, and empties the letterbox
+  just before it replies (it emptied it first). Why: on a desk deciding takes a round trip to the box, and a Remote killed
+  in that window lost the request, so its Workspaces waited forever (lifecycle harness S7b, about 1 run in 3). Emptying
+  after the reply instead was tried and refuted: a death between reply and empty answered the request twice and brought
+  the Workspace back as GUI1. Residual: a death between emptying and replying (microseconds). 1 line moved, 1 changed.
+- C++: PORT-IF, cpp_alignment_report_2026-10-12.md P36.
+
+---
+
+## 2026-10-21/22 — Folder sync: a desk gets the box's files for its open Workspaces (pull, on the row link)
+
+- `Mirror/FileSync.cs` (new) — `FileSyncLocal` (box, one per `MirrorSession`, Local main thread): announces each file under
+  the desk's folders whose length or write time changed (every 100 ms) and answers `FileRequest`s with 64 KB chunks from
+  the offset asked for; it keeps no model of the desk. `FileSyncRemote` (desk, inside `RemoteMirror`, one per desk):
+  subscribes its GUIs' folders (each principal and the GUI's own folder), compares each announcement with its copy on
+  disk, asks for what the copy lacks (from its length for a bigger file that only grew, else whole), stamps a whole copy
+  with the box's write time; a locked desk file is asked for again once writable. `FileSyncPacket`: the four packets
+  and the path rules (relative, '/'-separated, every segment checked; `Workspaces` excluded).
+- `Mirror/MirrorPacket.cs` — `FileSubscribe`, `FileAnnounce`, `FileRequest`, `FileChunk`.
+- `Mirror/LocalMirror.cs`, `RemoteMirror.cs`, `Program.cs` — the sync on the existing link and loops; `RemoteMirror` takes
+  the desk's `FileSyncRemote` and keeps it across server restarts.
+- `Tools/LowLatency.cs` — `RaiseTimerResolution` (`timeBeginPeriod(1)` on Windows); the Mirror calls it at startup: a
+  Windows desk's 1 ms loop passed every 15.6 ms, delaying every row and every file request (measured by the adversarial run).
+- Why pull, on one link: the same day's first design (a second link with a hello, the box pushing from its own model of
+  the desk) failed adversarial and lifecycle tests in ways that were all that model drifting from the desk's disk, or the
+  two links failing apart (see Spec.md "Folder sync"). `Mirror/TcpLink.cs` is back to the committed version.
+- Verified in scratch (`filesync2`, one process over loopback): 14 checks pass; append median 63 ms, 40 MB at 66 MB/s, link
+  flaps and bursts caught up at once, a desk restart fetched no file.
+- Fixed after the verification workflow (2026-10-22): the desk asks only up to the length announced (a live big file
+  was refetched from 0 forever: the box served appends past the announcement and the copy looked rewritten); one ordered
+  pending map replaces the announced map and the pending set, and an answer's end hands its slot to the file waiting
+  longest (a live fill waited 8.8 s behind four catch-ups, now 659 ms at 100 Mbps); an empty answer writes an empty copy
+  (an empty box file never synced); a refused write holds its slot until its answer ends (the 2 MB bound held);
+  `ToRelativePath` replaces this end's separator only (a Linux '\' in a name travels as itself). Net +10 lines.
+- On a Windows box (a test PC) the scan refreshes each file (`OperatingSystem.IsWindows()`): NTFS kept a held-open file's
+  listed size stale, so LoggingServer's all-day appends were never announced (0 bytes in 10 s); now synced while the writer
+  stays open. Costs about 16 ms per 1,000 files per scan there (2 ms without); Linux skips it. A file named for a day
+  before yesterday (`yyyy-MM-dd.*`) is finished and closed, so it is not refreshed: a 200-file folder with 90 days of
+  history scans in 0.8 ms (about 2.8 ms refreshing every file); today's held-open audit still synced while open (78 ms).
+  The adversary's rig (overshoot, empty, starve, sizes, latency, cuts, restart, subchange, smallfiles) passes.
+- Deploy: no lockstep (an old end ignores the new packet types; it just does not sync).
+- C++: nothing (the C++ server only starts the Local Mirror).
+
+---
+
+## 2026-10-21 — The Mirror is realtime only
+
+- `Mirror/MirrorConfig.cs` — `ClockMode` removed; `Mirror/Program.cs` sets `ClockMode.Realtime`, drops the Local end's
+  clock that followed a simulated server's header, the Remote's "another simulation run" refusal and the "ClockMode must
+  match" wording; `Mirror/RemoteMirror.cs` — a server restart is always rebuilt (a simulation desk used to stop).
+- `Publish/RiskDesk/{NewRelease,Production}/MirrorConfig.json` — the `"ClockMode"` line removed (an old file's is ignored).
+- Why: nobody streams a simulation; it also lets the planned folder sync assume files only grow.
+- Built; the remote-desk restart harness was not rerun.
+- C++: nothing (the C++ server only starts the Local Mirror).
+
+---
+
+## 2026-10-21 — A refusal made only of races is discarded, whatever the mix
+
+- `Provider/Server.cs` — `OnOrderRejected` rewrites each race reason on its own (a done order's `OrderNotFound` to
+  `StateIsDone`, `NotInSession` through `RiskLayer.GetNotInSessionReason`) instead of only a refusal that is exactly
+  that reason; the two `s_orderNotFound`/`s_notInSession` constants are gone.
+- `Tools/Bitset.cs` — `Bitset64.Replace(fromIndex, toIndex)`: moves a set bit, else changes nothing.
+- Why: a replace reaching the simulated exchange just after a close (which cancels every order) came back
+  `OrderNotFound|NotInSession`, matched neither rewrite and paused the algo (EMD, 2026-06-15 21:00:00.000150).
+- Verified in scratch (closewf, 2026-03-19 close): before, the replace and the cancel after it each paused the algo
+  (`1125934266580992`); after, both `StateIsDone|NotInSessionInFlight` (`141836999983104`), discarded.
+- C++: P33 updated (per-bit rewrite).
+
+---
+
+## 2026-10-21 — One session rule for what may be sent: cancels pass an auction
+
+- `Provider/RiskLayer.cs` — `static MaySend(TradingStatus, OrderTargetAction)`: Open and Auction anything, Halted a
+  cancel only, Closed and Unknown nothing; `ValidateInstrument` refuses a create by it (was: unless Open).
+- `Strategy/Algo.cs` — `Send` applies it in both modes (was: best effort only, and only Open); `TryTarget` is best effort
+  on the risk limits only. Comments of `Target`/`TryTarget` updated.
+- `Simulator/ServerSimulator.cs` — the simulated exchange refuses a target by it, on both the found and not-found paths
+  (was: everything unless Open, cancels included).
+- Why: EMD went to Auction (velocity logic) at 2026-03-23 11:05:25.143739 for 10 s; the quoting algo's empty target list
+  cancelled its orders, the simulator refused every cancel, the first refusal more than 1 s in (11:05:26.300) paused it,
+  and the paused algo's cancel on every Execute was refused and alerted again (about 20 Telegram alerts).
+- Verified in scratch (closewf, 2026-03-23): before, a strict create at 11:05:30 in the auction was refused by the client
+  and paused the algo; after, it was acked and the algo's next Execute cancelled it in the auction (Canceled).
+- Open: the simulator fills a marketable order accepted in an auction at once (CME holds it for the reopening).
+- C++: PORT (server risk check): cpp_alignment_report_2026-10-12.md P35.
+
+---
+
+## 2026-10-21 — The server stops writing a timestamp into its header per book update
+
+- `Provider/Server.cs` — the book-update path no longer stores `ServerHeader.Timestamp`: every CoreGroup thread wrote that
+  one shared line on every update, and the risk check reads the same line (`ClientIds`, `InstrumentIds`) on every order.
+- `Provider/Context.cs` — `GetLatestMarketDataTimestamp()`: the newest `NicTimestamp` among the context's own books (all
+  instruments for the server's context, the strategy's for a client's); reads rows directly so an instrument freed during
+  a refresh cannot throw on the UI thread.
+- `Workspace/Workspace.axaml.cs` — the top-bar clock shows it. `ServerHeader.Timestamp` stays as the simulation clock
+  (`ServerSimulator` writes it; simulated Workspaces and Mirrors follow it).
+- Not benchmarked (a pure removal on the server); the GUI clock change was built, not run against a live server.
+- C++: PORT, no layout change, no lockstep: cpp_alignment_report_2026-10-12.md P34.
+
+---
+
+## 2026-10-21 — An order in flight at a session close no longer pauses the algo
+
+- `Data/Instrument.cs` — `InstrumentHeader` 64 → 128 bytes with `TradingStatusTimestamp` at offset 64;
+  `InstrumentHeader128` → `InstrumentHeader256` (renamed at every use); its overlay members are `readonly`, which
+  fixes a dangling ref (a non-readonly call through `ref readonly` copied the row, and `Instrument.Header` pointed into
+  the copy: the server read status `Unknown` and a 1970 time in `OnOrderRejected`).
+- `Provider/Server.cs` — `OnTradingStatusUpdate` writes the time, then the status (`Volatile.Write`), on a change only;
+  `OnOrderRejected` rewrites an exchange's bare `NotInSession` through `RiskLayer.GetNotInSessionReason`; small
+  refactor: `_orderNotFound` renamed `s_orderNotFound` (constant naming).
+- `Provider/RiskLayer.cs` — `NotInSessionInFlightWindow` (1 s) and `GetNotInSessionReason`; `ValidateInstrument` uses it.
+- `Execution/Order.cs` — `OrderRejectedReason.NotInSessionInFlight = 47`, in the discarded set.
+- Verified in scratch (closewf): before, a create sent 10 µs before the 21:00 close came back `NotInSession` and paused
+  the algo; after, `NotInSessionInFlight`, algo live; a strict create 5 s after the close still pauses.
+- C++: MUST PORT and deploy in lockstep (shared layout): cpp_alignment_report_2026-10-12.md P33.
+
+---
+
+## 2026-10-21 — A strategy's quote stops chasing its own orders
+
+- `Simulator/ServerSimulator.cs` — `UpdateMarketByPrice` stamps the republish of a user order's book change
+  `Clock.Now + FromExchangeToNicLatency`, so it reaches the client with its ack. Since fdae2ab (2026-10-04) split the
+  exchange-to-client FIFO into market data and execution, the republish skipped the exchange-to-NIC leg and showed an
+  amended order 50 µs before its ack; `Position.TryGetQuote` then subtracted the order at its old price and left it in the
+  quote, and EMD_TESTING re-priced off itself (bisected in scratchpad\repricewf).
+- `Provider/Position.cs` — `TryGetQuote` subtracts an order only once the exchange has answered its latest target and
+  the book's `ExchangeTimestamp` has reached the state's; otherwise it holds the last such quote (still true, so a
+  strategy never gets an empty target list from it). IOCs are no longer subtracted. The book is read in place instead of
+  copied. `ActiveTargets` and `TryGetQuote` share the new `OrderTarget.IsConfirmedBy`.
+- `Data/MarketByPrice.cs` — `SideByPrice64.TryGetBestLevelExcluding` (best level with given quantities taken out);
+  `MapBestOffsetToTicks` and `MapBestOffsetToRingIndex` are `readonly`.
+- Verified (scratch EMD_TESTING, EMD/RTY Jun26, 2026-03-19 00:00-16:00): 604,330 re-prices before, 23,839 after
+  (09-24 build 23,206). Swapping the two `ReleaseToServer` calls changed nothing (identical counts). BenchmarkDotNet
+  (JIT, dev PC): quote with 0 / 2 / 4 orders per side 11.1 / 24.8 / 38.6 ns → 4.6 / 13.9 / 19.6 ns, no allocation.
+- Open: an order that has just left (Done) is not subtracted until the next book update; the user will handle it.
+  C++: nothing to port, but live correctness needs the server's order states and book stamped with CME TransactTime
+  (cpp_alignment_report_2026-10-12.md C23).
+
+---
+
+## 2026-10-20 — Risk desk packages per server flavour
+
+- `Publish/RiskDesk/Publish.ps1` — builds the exes once into `Staging\Build`, then packages `BigajRiskDesk_NewRelease` and
+  `BigajRiskDesk_Production`, each with `Start.bat`, the short guide and everything in `Publish\RiskDesk\<flavour>\` (its
+  `MirrorConfig.json`, `WorkspaceConfig.json` and `Data` folder template with the default layout), zipped beside its
+  folder. The configs moved from `Publish\RiskDesk\` into the two flavour folders (the user's layout). Verified by a dry
+  run of the packaging steps with stand-in exes; the full build was not run. Older `Staging` outputs are left alone.
+
+---
+
+## 2026-10-20 — Simulator applies the exchange's recorded TradingStatus
+
+- `Simulator/ServerSimulator.cs` — `InstrumentSimulator.OnRecordedTradingStatus` publishes the recorded status through
+  `OnTradingStatus` when it changes the status; from a contract's first recorded tick (`_hasRecordedTradingStatus`)
+  `UpdateTradingStatus` returns, so the session schedule and the crossed-book guess stop setting it. A contract with no
+  `.TradingStatus` file keeps them. Why: the schedule knows no holidays, early closes or halts, and the crossed-book guess
+  flickered through pre-opens (2025-11-28's NotInSession rejects). Databento's files now cover all 306 products.
+- Verified: scratch run (scratchpad\statuscheck, root off S:) on NQ Dec 2025: 2025-11-25 Open (00:00), Closed 22:00,
+  Auction 22:45, Open 23:00 UTC; 2025-11-28 Open, Halted 02:44:27, Closed 11:55:34, Auction 13:00 (stopped before 13:30,
+  see the next item).
+- Alert flood fixed: at 13:30:00 on 2025-11-28 CME's reopen message cancels 305 NQ bids at once; the changed-levels
+  update overflowed `OnMarketByPriceUpdate`'s 128-level `StackList` ("Fixed capacity exceeded"), and because
+  `DataSimulator.OnTickTock` dequeues only after a message is handled, the already-applied message was re-applied on every
+  tick ("SideByPriceByOrder corrupt: Buy does not own level 95000", 348,544 alerts in one run). The feed data is clean: a
+  straight replay of 2025-11-25 to 13:31 on 11-28 through `MarketByPriceByOrder` holds every level. Now the lists are
+  sized from the update (its levels + `SideByPrice64.Capacity` + the side's `TicksRemoved` and queue count), and a
+  message whose handling throws stops the clock (`Clock.Stop`, rethrown): one alert, the run ends (user's choice over
+  continuing on a damaged book). Verified: NQ 2025-11-28 to 13:35 passes the reopen with 0 exceptions (Open at 13:30:00);
+  the same run with the simulator's MBO aggregation emptied at 13:29:59 (scratch, reflection) gives exactly 1 alert and
+  stops at 13:29:59.385.
+- simulator spec.txt. C++: nothing (C21-style C#-only item).
+- Then: fills and targets read `TradingStatus` only. The resting-order cross step runs only while Open (was: unless the
+  book is crossed); `Take` and `IsMarketable` lose their crossed-book refusals (a target reaches them only once accepted,
+  which needs Open); the fallback guess (schedule + crossed book = Auction, for a contract with no status data) is kept and
+  runs before matching instead of after it. Why: the crossed-book checks were the old stand-in for a pre-open and would
+  have refused fills while the recorded status said Open; the fallback stays for data sources without status.
+  Verified (scratchpad\statuscheck): NQ 2025-11-28 to 13:29:59 with the recorded status: Open, Halted 02:44, Closed
+  11:55, Auction from 13:00 and steady, while the pre-open book was crossed on 20,067 of 173,890 updates. The same window
+  with the status file hidden from the search (fallback): the schedule's Open, then Auction at the first crossed update
+  (13:00:02.698, already in force for that update's matching), flipping Open/Auction as the pre-open book uncrosses
+  briefly, the guess's known weakness. A busy 2025-11-25 session in fallback: 26.3 million updates, never crossed, Open.
+
+---
+
 ## 2026-10-20 — Message efficiency widget: EMTEfficiency coloured against the EMT
 
 - `Widget/MessageEfficiencyWidget.axaml(.cs)` — the EMTEfficiency cell has the Efficiency cell's four colours, against

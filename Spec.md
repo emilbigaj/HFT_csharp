@@ -755,16 +755,17 @@ not from the action byte. An exchange adapter maps Reduce to the venue's quantit
 
 `Algo` is a convenience class with two entry points over one implementation:
 
-- **`Target(ref targets)`** — strict. It sends exactly what was asked (after the zipper) and skips
-  the session, slot and risk checks in `Send`. Anything the client's own `ValidateOrder`, the server
-  or the exchange refuses comes back as a reject, and a reject that is not discarded pauses the algo,
-  so a strategy bug fails loudly. Existing strategies call this.
-- **`TryTarget(ref targets) -> bool`** — best effort. It never sends anything it can see would be
-  refused: while the instrument's `TradingStatus` is not `Open` it sends nothing at all, cancels
-  included (outside the session a venue may refuse anything, and the simulator cancels every order
-  at a close anyway); a Create needs a free client order slot (`Client.HasFreeOrderSlot`); every
-  non-cancel is clipped by `TryClipToRiskLimit` to the biggest size within the limits, or dropped
-  when nothing workable fits.
+- **Both modes keep the session rule** in `Send`: nothing the exchange's session would refuse is sent
+  (`RiskLayer.MaySend`, see "Session state is the exchange's TradingStatus"), and the miss is noted.
+  Best effort is about the risk limits, not the exchange's rules.
+- **`Target(ref targets)`** — strict. It sends what was asked (after the zipper) and skips the slot
+  and risk checks in `Send`. Anything the client's own `ValidateOrder`, the server or the exchange
+  refuses comes back as a reject, and a reject that is not discarded pauses the algo, so a strategy
+  bug fails loudly. Existing strategies call this.
+- **`TryTarget(ref targets) -> bool`** — best effort on the risk limits. It never sends anything it
+  can see the limits would refuse: a Create needs a free client order slot
+  (`Client.HasFreeOrderSlot`); every non-cancel is clipped by `TryClipToRiskLimit` to the biggest
+  size within the limits, or dropped when nothing workable fits.
 
 `TryTarget` returns false when any target was not sent exactly as asked: an order dropped or cut in
 `Send`, a Phase 1 reduce cut further or turned into a cancel, a Phase 2 target retired with a
@@ -1096,15 +1097,94 @@ under NativeAOT. The C++ server is a port of this type and needs the same change
   a row left mid-write). That P&L now marks to the server's book, which also gives a remote strategy workspace its P&L
   (the strategy's region was never copied to a desk).
 
+## Removing our own orders from the book: only states the book already shows (2026-10-21)
+
+`Position.TryGetQuote` is the strategy's quote with its own resting orders taken out of the instrument's own book. The
+book (market data) and each order's state (execution reports) arrive on separate channels, so at any moment one can be
+ahead of the other: the book can already show an amend while the state still holds the old price (the simulator did this
+from fdae2ab on, see `Simulator/spec.txt`), or the ack can arrive before the book shows it (usual at CME: iLink beats
+MDP). Subtracting a state the book does not show leaves our own order in the quote, the strategy re-prices off it, and
+the re-price opens the same gap again (EMD_TESTING, 2026-03-19: 604,330 re-prices in 16 hours instead of about 23,000).
+
+- **The rule.** CME stamps both streams with the matching engine's time for the same event (iLink and MDP TransactTime),
+  so the book shows an order's state exactly when the state's `OrderHeader.ExchangeTimestamp` is at or before the book's
+  `MarketByPrice64.ExchangeTimestamp`. A state is used only when, in addition, the exchange has answered the order's latest
+  target (`OrderTarget.IsConfirmedBy`, the decision `ActiveTargets` also uses); while a create, amend or cancel is in
+  flight the book may or may not show it.
+- **The hold.** When any active order fails the rule, `TryGetQuote` returns the last quote it computed from a book that
+  passed, and still returns true: false would hand the strategy no quote, and a strategy that then sends an empty target
+  list cancels every order. The hold ends at the first book update at or after the ack: microseconds live, and in
+  simulation the republish that carries the ack's book change. The held quote is dropped at every close (not Open).
+- **IOCs** never rest, so they are never subtracted (they used to be, taking other participants' size away).
+- **No copy.** The book is read in place; `SideByPrice64.TryGetBestLevelExcluding` walks each side from the best and
+  stops at the first level with size left once ours is taken out. Measured (BenchmarkDotNet, JIT, dev PC, 20-level book,
+  our first order covering the whole best level): 0 orders 11.1 → 4.6 ns, 2 per side 24.8 → 13.9 ns, 4 per side
+  38.6 → 19.6 ns; no allocation either way. Not measured: the extra read of each order's target row (one cache line).
+- **Accepted residual: an order that has just left.** A Done (cancel or final fill) clears the order from
+  `_isOrderActive` at once, so until the next book update the book still shows it and nothing subtracts it. Live this is
+  the time iLink leads MDP; in simulation the Done and its republish arrive together. The user will close this separately.
+- **Live dependency:** the C++ server must set `OrderState.OrderHeader.ExchangeTimestamp` from the iLink TransactTime and
+  the book's `ExchangeTimestamp` from the MDP TransactTime (cpp_alignment_report_2026-10-12.md C23).
+
 ## Session state is the exchange's TradingStatus
 
 Whether an instrument is trading is what the exchange says, not what a timetable predicts. The
-instrument header's `TradingStatus` byte is the only session state: `RiskLayer.ValidateInstrument`
-rejects a create with `NotInSession` unless it is `Open`, and `Instrument.TryGetQuote` and the
-position's quote return nothing unless it is `Open`. There is no `SessionManager` on the
-instrument any more. Unknown, Closed, Auction and Halted all count as not open, so an instrument
-whose first status has not arrived yet cannot trade and has no quote; a live server must publish
-status from the snapshot at startup. Amends and cancels are not session-checked, as before.
+instrument header's `TradingStatus` byte is the only session state. What may be sent in it is one
+rule, `RiskLayer.MaySend(tradingStatus, orderTargetAction)`, used by `Algo.Send` (both modes),
+`RiskLayer.ValidateInstrument` (a create, client and server) and the simulated exchange (every
+target), so the three cannot disagree (2026-10-21):
+
+| Status | Create | Amend | Cancel |
+|---|---|---|---|
+| Open, Auction | yes | yes | yes |
+| Halted | no | no | yes |
+| Closed, Unknown | no | no | no |
+
+An instrument whose first status has not arrived yet (Unknown) cannot trade; a live server must
+publish status from the snapshot at startup. A refusal is `NotInSession` (or `NotInSessionInFlight`,
+below). The quotes are stricter: `Instrument.TryGetQuote` and the position's quote return nothing
+unless the status is `Open`, so a quoting algo sends no creates in an auction, and an empty target
+list there cancels its orders, which CME accepts in a pre-open or velocity-logic pause (2026-03-23,
+EMD: before, every cancel in the 10 s auction was refused, the algo paused 1.156 s in, and each
+later cancel of the paused algo was refused and alerted again). The risk layer checks only creates;
+amends and cancels reach the exchange's rule. Residual: the simulator fills a marketable order sent
+in an auction at once, where CME would hold it for the reopening.
+
+### An order in flight at a status change (2026-10-21)
+
+An algo sends only while it sees `Open`, but it learns of a close through the feed, late, so an order sent
+microseconds before a close meets the close at the client's risk check, the server's, or the exchange. It
+used to come back `NotInSession` and pause the algo. Now:
+
+- **The time of the change is in the header.** `InstrumentHeader.TradingStatusTimestamp` (offset 64) is the
+  exchange time of the update that last changed `TradingStatus`. Only `Server.OnTradingStatusUpdate` writes
+  it, on a change only (a repeated status keeps the time of the change), before the status byte, which it
+  stores with `Volatile.Write`, so a reader that sees the new status sees its time.
+- **The refusal says whether it was in flight.** `RiskLayer.GetNotInSessionReason` returns
+  `NotInSessionInFlight` (47) while `Clock.Now` is within `RiskLayer.NotInSessionInFlightWindow` (1 s) of
+  that time, else `NotInSession`. `ValidateInstrument` sets it for our own checks, and
+  `Server.OnOrderRejected` rewrites an exchange refusal's `NotInSession` bit the same way, and a done
+  order's `OrderNotFound` bit to `StateIsDone`, each on its own (`Bitset64.Replace`), so a refusal made
+  only of races is discarded. `NotInSessionInFlight` is discarded: no pause, no alert, and the risk the
+  client reserved is still released. Until 2026-10-21 both rewrites needed the refusal to be exactly that
+  one reason, so a replace that reached the simulated exchange just after a close (which cancels every
+  order) came back `OrderNotFound|NotInSession` and paused the algo (EMD, 2026-06-15 21:00:00.000150;
+  reproduced in scratch on 2026-03-19, now `StateIsDone|NotInSessionInFlight`, discarded).
+- **Outside the window** a session refusal still pauses: a strict `Target` while closed, or an exchange
+  that refuses while our feed still says `Open` (the server then has no recent change) fail loudly.
+- **Residuals.** The window runs from any change, so a strict order within 1 s of a close-to-pre-open
+  change is discarded too. An exchange refusal that reaches the server before the status update does
+  (live: within the few µs iLink leads MDP) still pauses.
+- **Verified** (scratch EMD_TESTING, 2026-03-19, close at 21:00:00.000000): a create sent at
+  20:59:59.999990 was refused by the simulated exchange at 21:00:00.000290 as `NotInSessionInFlight` and
+  the algo stayed live (before: `NotInSession`, paused); a strict create at 21:00:05 was refused by the
+  client as `NotInSession` and paused.
+- **Layout.** `InstrumentHeader` grew from 64 to 128 bytes and the row from 128 to 256
+  (`InstrumentHeader128` renamed `InstrumentHeader256`), so the field has room and `LeggedHeader` (now
+  192 bytes) still fits. Its overlay members (`AsInstrumentHeader`, `AsFuture`, `AsForex`, `AsLegged`,
+  `Symbology`) are `readonly`: rows are read through `ref readonly`, where a non-readonly call copies the
+  row and the returned ref pointed into the dead copy (`Instrument.Header` read garbage once the copy's
+  stack was reused; found by this change's test, latent before).
 
 The status reaches every process the same way live and in simulation: `Server.OnTradingStatusUpdate`
 writes the header byte and broadcasts a `TradingStatusUpdate` on the instrument ring, and the client
@@ -1305,6 +1385,12 @@ People outside the colo (arb's risk desk, the home office) run the normal Worksp
 full order entry. Either end may open the link, set in the JSON alone; which one does is the networks' choice (the CME box
 dialling out needs no inbound rule at TNS; a desk dialling the box needs none at the office).
 
+- **Realtime only (2026-10-21).** A desk mirrors only a live server: the Mirror always runs `ClockMode.Realtime`, has no
+  `ClockMode` setting (an old config's `"ClockMode"` is ignored), and a server restart is always rebuilt on the desk.
+  Until then a simulation Mirror followed the simulated server's header clock, refused another run's copy, and stopped
+  at a server restart. A test server for the Mirror must run Realtime too: server directories are
+  `<root>/Servers/<ClockMode>/<name>`, so the Mirror finds no server under `Servers/Simulation` (market data is not needed
+  to test links and restarts).
 - **Two ends, one program.** `Mirror.exe <absolute config path>` reads that file; with no argument it reads
   `MirrorConfig.json` in the working directory. A missing file is written with defaults and the program stops, naming its
   full path. One build can so serve both roles from two files (a relative path would resolve from the working directory;
@@ -1391,11 +1477,76 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   once the server's process has exited (`ProcessId.IsAlive(ServerHeader.ServerProcessId)`, each refresh) it shows
   "Disconnected – server stopped, close this Workspace" there instead: it cannot reconnect by itself, and while it maps the
   dead run's header the server cannot restart (see "A server never starts on a previous run's memory").
-  Clicks while the link is down are dropped, with no refusal: the display is the signal. The clock beside it is the
-  copy's `ServerHeader.Timestamp`, which the server rewrites every pass and the Local end sends at the start of every
-  publish, so it moves only while the server is alive. Read together: a moving clock and a healthy latency mean all is
-  well; a frozen clock with a climbing latency or "Connection broken" means the link or a Mirror is down; a frozen clock
-  with a healthy latency means the server itself has stopped (no code needed for that case).
+  Clicks while the link is down are dropped, with no refusal: the display is the signal. The clock beside it is
+  `Context.GetLatestMarketDataTimestamp()`: the newest `NicTimestamp` among the books of the window's principal (every
+  instrument for a server workspace, the strategy's own for a strategy workspace), read from the copy's book rows, so it
+  moves only while the server is alive and those markets update. Read together: a moving clock and a healthy latency mean
+  all is well; a frozen clock with a climbing latency or "Connection broken" means the link or a Mirror is down; a frozen
+  clock with a healthy latency means the server has stopped or those markets are quiet (no code needed for that case).
+  Until 2026-10-21 the clock was `ServerHeader.Timestamp`, which every CoreGroup thread rewrote on every book update: one
+  shared line, also read by every order's risk check, pulled between chiplets on each update. The server no longer writes
+  it; it is the simulation clock only (written by `ServerSimulator`, followed by a simulated Workspace).
+- **Folder sync (2026-10-21).** Each desk keeps a byte-for-byte copy, at the same relative paths under its `Data`, of every
+  file in the folders of the Workspaces open on it: each GUI's principal (the server for a server workspace, the strategy
+  for a strategy workspace) and the GUI's own folder (its stand-in's audit), everything except `Workspaces` folders, which
+  stay each machine's own. The widgets that tail files (Audit Trail, Fills, Charts) work on the copy unchanged; they open
+  files with `FileShare.ReadWrite`, so the desk writes while they read.
+  - *Off unless the desk asks (2026-10-22).* `MirrorConfig.IsFolderSyncOn` (default `false`): a desk syncs only when its
+    config says `true`; otherwise `RunRemote` builds no `FileSyncRemote`, the desk's GuiList says `IsFolderSyncOn = false`,
+    and the box sends it nothing (its Audit Trail, Fills and Charts stay empty; rows and orders are unchanged). The
+    risk-desk packages leave it out, so they are off. It is the desk's preference, not access control: a desk that edits
+    its config to `true` is served, so keeping files from a desk needs a box-side rule (not built).
+  - *No subscription message (2026-10-22).* The GuiList a desk already sends every second carries one byte,
+    `MirrorGuiList.IsFolderSyncOn`, and the box derives the folders from the listed GUI names itself
+    (`FileSyncLocal.Serve`): the GUIs and the sync cannot disagree, and the folder rule lives on the box only. A change of
+    folders announces every file afresh. The same-day `FileSubscribe` packet (the desk listing folders) was removed.
+  - *One link.* The sync rides the desk's single row link, so rows and files connect and disconnect together. A row waits
+    behind at most the desk's requests in flight (4 of 512 KB: about 160 ms at 100 Mbps, 16 ms at 1 Gbps, and only while
+    files catch up). A first two-link design (2026-10-21, same day) let the links fail apart and was replaced.
+  - *Each fact has one owner.* The box owns what a file is: every 100 ms (`FileSyncLocal`, one per `MirrorSession`, on
+    the Local's main thread) it announces `(path, length, write time)` for each file under the desk's GUIs' folders
+    whose version changed, and it keeps no picture of what the desk holds. The desk owns what it holds: its own files.
+    `FileSyncRemote` (on the Remote's main thread, inside `RemoteMirror.Read`, one object for the desk's life) compares
+    each announcement with its copy on disk, and asks for what the copy lacks: a file of 64 KB or less, or a copy that is not a shorter start of the box's file, from 0; a bigger
+    file from the copy's length (big files only grow). The box answers a request (up to 512 KB) with consecutive 64 KB
+    chunks from the offset asked for, a short or empty chunk ending the answer. It serves only files it announced; a
+    request for any other, or for one gone since, is answered with a withdraw (`FileVersion.s_withdrawn`, length −1), and
+    the desk stops asking for it (its copy stays). A
+    copy made whole takes the box's write time, so the copy itself says what the desk holds; a copy whose length and
+    write time match (or, for a big file, whose length matches) is settled. The desk asks only up to the length announced:
+    the box serves what the file holds when it answers, so a request past the announcement would let the copy outrun the
+    box's word and look rewritten (verification, 2026-10-22: a live 1 GB audit was refetched from 0 forever). One request
+    per file in flight, 4 in all; when an answer ends, its slot goes to the file waiting longest, so a live fill never
+    waits behind catch-ups; a request's slot is held until its answer ends, whether or not the copy took its chunks.
+  - *Why pull.* A first design had the box decide what the desk lacked from its own model of the desk's disk (lengths,
+    last 64 bytes, a generation per subscription). Every failure the adversarial tests found (2026-10-21) was that model
+    drifting from the real disk: a refused write, a subscription that failed to build, a same-length edit, an append
+    without a moved write time, chunks in flight across a resubscribe, an unbounded push. With the desk asking from what
+    it really holds, a chunk always fits, and there is nothing to drift.
+  - *Refusals.* A desk file another program holds without sharing (an editor, Excel) is not written: logged once, and
+    asked for again once a write open succeeds. A box file the Mirror cannot read is answered empty; the desk asks again
+    on its next 100 ms check. A box name this machine cannot hold (a `:` on Windows, `..`) is not synced (logged).
+  - *Measured* (scratch harness `filesync2`, both ends in one process over loopback, 2026-10-22): append median 63 ms
+    (max 105); config rewrites shorter, same length (a change far from the end) and longer, 63-102 ms; 40 MB at 65 MB/s;
+    a live append during a 200 MB catch-up 31 ms; 20 link cuts in 6 s and 1,519 appends in 3 s caught up at once; a locked
+    file synced 17 ms after release; a desk restart over its copy fetched no file again.
+  - *Accepted residuals.*
+    - A file bigger than 64 KB rewritten in place to the same or a longer length is taken for an append (big files are
+      append-only logs by contract); a whole refetch of a big copy, which only an out-of-contract rewrite causes, cuts it
+      to one chunk while a widget may tail it (its rows can repeat).
+    - A file of 64 KB or less is fetched whole on each announced change (at most about 640 KB/s per live small file).
+    - Deletions are not mirrored: a box file deleted is withdrawn when next asked for, and the desk's copy stays.
+    - A box file the Mirror cannot read is answered empty, which cuts a copy being fetched whole to empty until it can be read.
+    - A desk that can open but not write a copy (a full disk, a byte-range lock) keeps the link as busy as a catch-up.
+    - Box names that differ only in case, or end in a dot or a space, collide or change on a Windows desk (out of contract).
+    - The desk's Data folder must be on NTFS or ReFS: settling a small copy compares 100 ns write times.
+    - The box scans each desk's folders every 100 ms on the Local's main thread (about 2 ms per 1,000 files on Linux):
+      folders up to a few thousand files, a few desks. A Local Mirror on Windows (a test box) refreshes each file during
+      the scan, since NTFS keeps a held-open file's listed size stale (LoggingServer appends to a file it holds open all
+      day): about 16 ms per 1,000 files there. A file named for a day before yesterday (`yyyy-MM-dd.*`: audits, alerts,
+      LoggingServer logs) is finished and closed, so its listing is right and it is not refreshed; the day's margin covers
+      UTC, Chicago and local dates. A 200-file folder (90 days of audits and alerts, 20 undated) scans in 0.8 ms on Windows.
+      A finished day's file written again (a backfill) while held open would be missed on a Windows box until it closes.
 - **Link loss.** Ten seconds of silence ends a link; both ends send at least once a second. The Remote closes a dead link at
   once, so the Local end sees it end and redials without waiting for its own 10 s; the Local end drops what was still
   queued on it, closes that link's stand-ins, and the server cancels what they left working. While the link is down a
@@ -1410,7 +1561,7 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   rebuild in place, under its own GUI number. The old sessions need no close: the new Remote's `ServerSocket` starts with
   no clients, and every socket skips to the head of its rings when built, so a call left unread in a ring is not
   replayed. Not reused, as before (the Remote stops, saying to close the Workspaces): a copy sized for other capacities
-  or another build (its layout hash differs from the box's), and on a simulation desk a copy of another run. Restart
+  or another build (its layout hash differs from the box's). Restart
   harness R8: two GUIs open, the Remote killed and started, both rebuilt under their own names and their calls reached
   the server.
 - **Restarts (2026-10-13).** The Remote tells them apart by the server's process id in each server header, which opens every
@@ -1470,11 +1621,21 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
     reading a row's sequence before the wipe and re-reading it after the new run's first write (which can reach the same
     even value) could accept a row mixing both runs. It needs a stall of milliseconds at exactly that moment, during a
     rebuild that discards that Workspace's view anyway; accepted.
-  A simulation desk stops instead (the process clock cannot run back to a restarted simulation's earlier time), as does a
-  layout change: both write -1 ns into `Latency[0]` first, so every Workspace reads "Connection broken" at once, and are
+  A layout change stops the Remote instead (a desk mirrors only a live server, so a restart is always rebuilt): it
+  writes -1 ns into `Latency[0]` first, so every Workspace reads "Connection broken" at once, and is
   restarted by hand. A Remote stopped any other way (killed, closed) leaves its last latency value, and the 10 s age check
   catches it. A server restart still cancels every working order (the old run's state is gone). Replaced: the heartbeat's
   Local start time, which ended the desk on any Local restart.
+- **A connect request leaves the letterbox only as it is answered (2026-10-22).** A client posts its request once and waits
+  for the reply (`ClientSocket.RequestClientId`). `ServerSocket.PollLetterBox` reads it with `TryPeek`, decides, and empties
+  the letterbox just before it replies. Until then it emptied the letterbox first, and on a desk deciding takes a round trip
+  to the box (`RemoteMirror.AllocateClientId`, up to 10 s): a Remote killed in that window lost the request, and its
+  Workspaces waited on "Waiting for server" for good (lifecycle harness, S7b, about 1 run in 3). Emptied before the reply,
+  never after it: a listener that died between replying and emptying would leave the request for the next one, which
+  would answer it again, start a second stand-in, and bring the real Workspace back as GUI1. While a request is being
+  decided, another client's post waits in its `TryStore` loop; the listener answers one at a time either way.
+  Residual: a listener that dies in the microseconds between emptying and replying leaves that client waiting; close and
+  reopen the Workspace.
 - **The Local Mirror lives and dies with the server.** It reads `ServerHeader.ServerProcessId` once at startup and stops
   when that process has exited (`ProcessId.IsAlive`, every pass): a dead server's stand-ins would be read by no one, and
   the server cannot restart while this process maps its header (next bullet). Its exit closes its TCP links, so a remote
@@ -1513,7 +1674,7 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   `<server>/LocalMirror.alert`, not the context's default `<server>.alert`, which the trading server itself holds: Logging
   keeps one connection per name and refused the Mirror `AlreadyConnected` (seen on the CME box, 2026-10-13); its alerts
   land in `<server>/LocalMirror/Alerts/`. The stand-ins' sockets are tapped by the server's Logging like any client's, so the CME box has
-  the full audit; the remote Audit Trail stays empty (the menu entry is kept). The `AlertManager` also alerts
+  the full audit, which the folder sync copies to each desk that has those Workspaces open. The `AlertManager` also alerts
   `TaskScheduler.UnobservedTaskException`, so the dial loop cancels a connect that times out (`TcpLinkConnector.DialTcpLink`,
   a 2 s `CancellationTokenSource`) instead of abandoning it: an abandoned connect task faulted unobserved, and with the home
   PC off overnight (a dropped SYN every redial) that was an Exception alert about every 3 s, over 1,000 an hour.
@@ -1540,14 +1701,16 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
 
 Both deploy scripts live under `Publish\`, each building into a `Staging` folder beside itself (ignored by git):
 `Publish\CME\PublishAndDeploy.ps1` publishes the solution for Linux into `Publish\CME\Staging` and sends it to the CME box
-(rsync plus a dated snapshot there); `Publish\RiskDesk\Publish.ps1` builds the desk package into
-`Publish\RiskDesk\Staging\BigajRiskDesk` and zips it to `Publish\RiskDesk\Staging\BigajRiskDesk.zip` beside that folder,
-sending nothing.
+(rsync plus a dated snapshot there); `Publish\RiskDesk\Publish.ps1` builds the exes once into
+`Publish\RiskDesk\Staging\Build`, then one desk package per server flavour, `Staging\BigajRiskDesk_NewRelease` and
+`Staging\BigajRiskDesk_Production`, each zipped beside its folder, sending nothing (2026-10-20; before, one
+`BigajRiskDesk` package).
 
-A desk gets that one zip. It unzips to a
-`BigajRiskDesk` folder holding `Mirror.exe`, `Workspace.exe` (NativeAOT, no .NET install, built for `x86-64-v3` (AVX2):
+A desk gets the zip for the server it watches. It unzips to a
+`BigajRiskDesk_<flavour>` folder holding `Mirror.exe`, `Workspace.exe` (NativeAOT, no .NET install, built for `x86-64-v3` (AVX2):
 the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs), Avalonia's three native libraries,
-`Start.bat`, and the templates `Publish\RiskDesk\MirrorConfig.json` and `Publish\RiskDesk\WorkspaceConfig.json`.
+`Start.bat`, the short guide, and everything in `Publish\RiskDesk\<flavour>\`: that flavour's `MirrorConfig.json` and
+`WorkspaceConfig.json` and its `Data` folder template (the server's folder with a default layout).
 - **`Start.bat`**, the double-click: starts this folder's `Mirror.exe` unless one runs from this folder (matched by full
   path, so a Mirror run from elsewhere on the same PC does not count), with the folder as its working directory, so it
   reads `MirrorConfig.json` there; then starts `Workspace.exe`. Both can start at once: the Workspace waits for the
@@ -1581,7 +1744,7 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
 
 - The usual way is the risk desk package above. By hand: ship the Build output folder (Mirror, Workspace and their libraries; Logging is not run there) with a `MirrorConfig.json`,
   and start `Mirror.exe` from that folder or with the file's absolute path:
-  `{ "MirrorRole": "Remote", "ServerName": "<server leaf>", "ClockMode": "Realtime", "ListenPort": 7400, "IPWhitelist": ["<CME box egress IP>"], "DirectoriesRoot": "Data" }`.
+  `{ "MirrorRole": "Remote", "ServerName": "<server leaf>", "ListenPort": 7400, "IPWhitelist": ["<CME box egress IP>"], "DirectoriesRoot": "Data" }`.
   Nothing lives outside that folder: `DirectoriesRoot` is relative to the executables, so no S: drive is needed. Keep the
   folder near the drive root: every name (folder included) must fit 256 characters, and the Mirror stops with a message
   naming the path that does not. A remote GUI's name also carries `@<machine>` (up to 15 characters on Windows).
@@ -1606,12 +1769,14 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
 - Right after a reconnect, a GUI's calls are dropped until the Local end has started its stand-in again (milliseconds, or
   seconds while the server finishes the old cancels; `NotReady` is retried). The latency is the link's, so it reads healthy
   meanwhile. Machine-unique names (`@<machine>`) remove the lasting case, a CME-box Workspace taking the name.
-- The latency includes each end's polling: the Remote Mirror's 1 ms sleeps (on Windows
-  up to a timer tick each, about 15 ms) and the Local end's pass, so it reads a little above the click's own path (a
-  loopback smoke run showed 30 to 50 ms).
-- A remote desk keeps no audit and sends no alerts; the remote Audit Trail is empty. The audit is the stand-ins' on the CME
-  box, and their rejects reach Telegram from the Local Mirror. A remote Workspace's clock exceptions (simulation) are not
-  reported, as it has no `AlertManager`.
+- The latency includes each end's polling: the Remote Mirror's 1 ms sleeps and the Local end's pass, so it reads a little
+  above the click's own path (a loopback smoke run showed 30 to 50 ms). On Windows a sleep lasts a 15.6 ms timer tick
+  unless the process asks for 1 ms (`LowLatency.RaiseTimerResolution`, called at Mirror startup), and Windows 11 drops
+  that request after about 4 s for a process with no visible window of its own (a hidden desk Mirror) unless the process
+  also opts out of timer power throttling (`SetProcessInformation`, `PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION`).
+  Measured 2026-10-22: `Sleep(1)` 1.99 ms, then 15.4 ms from 4 s on without the opt-out; about 2 ms for 20 s with it.
+- A remote desk writes no audit and sends no alerts; its Audit Trail shows the box's files, copied by the folder sync. The audit is the stand-ins' on the CME
+  box, and their rejects reach Telegram from the Local Mirror.
 - `ManualClient.Open` on a remote desk first builds a plain ManualClient to hear `RemoteDesk`, which creates that GUI
   number's empty audit folder under the copy's root.
 - Remote GUI names are unique per host name: two desks with the same machine name would share GUI names and ids.
@@ -1718,8 +1883,9 @@ footer `Navigate`.
 
 Each of these was seen in the harness or reasoned through and left as is on purpose.
 
-- **Session-close race.** Orders in flight when the session closes come back `NotInSession` and
-  pause the algo, under `TryTarget` too: it saw `Open` when it sent them. Accepted.
+- **Session-close race (closed 2026-10-21).** Orders in flight when the session closes come back
+  `NotInSessionInFlight`, a discarded reason, and do not pause the algo; see "An order in flight
+  at a status change". Left: an exchange refusal that reaches the server before the status does.
 - **Risk limit lowered mid-flight.** A limit lowered between the client's check and the server's
   read of the order refuses it at the server and pauses the algo. A fix (a discarded
   `RiskLimitChanged` reason) was declined.

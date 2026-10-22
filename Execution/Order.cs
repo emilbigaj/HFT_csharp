@@ -104,6 +104,7 @@ public enum OrderRejectedReason : byte
     TargetIsStale          = 44,
     TooManyActiveTargets   = 45,
     AlgoIsPaused           = 46,
+    NotInSessionInFlight   = 47,   // NotInSession within RiskLayer.NotInSessionInFlightWindow of the status change: sent before the change was known
 
     // ---- 50..59: Risk and business limits ----
     NotInSession           = 50,
@@ -169,7 +170,8 @@ public struct OrderRejected()
     // Why: a constant, not a static constructor: that cost every OrderRejected constructor a class-init check and kept IsDiscarded from inlining
     private const ulong s_orderDiscardedMask = 1UL << (int)OrderRejectedReason.CreateIsActive | 1UL << (int)OrderRejectedReason.CancelIsActive
         | 1UL << (int)OrderRejectedReason.TargetIsActive | 1UL << (int)OrderRejectedReason.TargetIsStale | 1UL << (int)OrderRejectedReason.StateIsDone
-        | 1UL << (int)OrderRejectedReason.AlgoIsPaused | 1UL << (int)OrderRejectedReason.TooManyOrdersPerSecond | 1UL << (int)OrderRejectedReason.TooManyActiveTargets;
+        | 1UL << (int)OrderRejectedReason.AlgoIsPaused | 1UL << (int)OrderRejectedReason.TooManyOrdersPerSecond | 1UL << (int)OrderRejectedReason.TooManyActiveTargets
+        | 1UL << (int)OrderRejectedReason.NotInSessionInFlight;
     public static Bitset64 OrderDiscarded => new Bitset64(s_orderDiscardedMask);
 }
 
@@ -536,6 +538,12 @@ public struct OrderTarget()
     public OrderTargetAction OrderTargetAction;  // 1
     public OrderStateStatus OrderTargetStatus = OrderStateStatus.Active;
     private byte _reserved;   // Why: a plain byte, not a fixed buffer: that puts a stack-cookie check in every frame holding the struct
+
+    /// True when the state is the latest word on this target: the target was answered, or the state has reached its seq.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly bool IsConfirmedBy(in OrderState orderState) =>
+        OrderTargetStatus == OrderStateStatus.Done
+        || (orderState.OrderHeader.OrderId == OrderHeader.OrderId && orderState.OrderHeader.Seq >= OrderHeader.Seq);
 
     /// The reject that refuses this target, for these reasons, from this source.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

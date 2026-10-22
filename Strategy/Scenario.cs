@@ -61,12 +61,12 @@ public class Scenario
 
         String8 _exchange = new String8(exchange);
         String8 _root = new String8(root);
-        foreach (var header128 in context.EnumerateInstrumentHeaders())
+        foreach (var header256 in context.EnumerateInstrumentHeaders())
         {
-            Console.WriteLine(header128.AsInstrumentHeader().InstrumentType);
-            if (header128.AsInstrumentHeader().InstrumentType != InstrumentType.Spread)
+            Console.WriteLine(header256.AsInstrumentHeader().InstrumentType);
+            if (header256.AsInstrumentHeader().InstrumentType != InstrumentType.Spread)
                 continue;
-            ref LeggedHeader leggedHeader = ref header128.AsLegged();
+            ref LeggedHeader leggedHeader = ref header256.AsLegged();
             if (leggedHeader.InstrumentHeader.Exchange == _exchange && leggedHeader.InstrumentHeader.Root == _root)
             {
                 LegHeader longLeg = default, shortLeg = default;
@@ -98,11 +98,11 @@ public class Scenario
 
         String8 _exchange = new String8(exchange);
         String8 _root = new String8(root);
-        foreach (var header128 in context.EnumerateInstrumentHeaders())
+        foreach (var header256 in context.EnumerateInstrumentHeaders())
         {
-            if (header128.AsInstrumentHeader().InstrumentType != InstrumentType.Future)
+            if (header256.AsInstrumentHeader().InstrumentType != InstrumentType.Future)
                 continue;
-            ref FutureHeader futureHeader = ref header128.AsFuture();
+            ref FutureHeader futureHeader = ref header256.AsFuture();
             if (futureHeader.InstrumentHeader.Exchange == _exchange && futureHeader.InstrumentHeader.Root == _root)
             {
                 if (months != null && !months.Contains(futureHeader.MaturityDate.Month))
@@ -126,11 +126,11 @@ public class Scenario
 
         String8 _exchange = new String8(exchange);
         String8 _root = new String8(root);
-        foreach (var header128 in context.EnumerateInstrumentHeaders())
+        foreach (var header256 in context.EnumerateInstrumentHeaders())
         {
-            if (header128.AsInstrumentHeader().InstrumentType != InstrumentType.Future)
+            if (header256.AsInstrumentHeader().InstrumentType != InstrumentType.Future)
                 continue;
-            ref FutureHeader futureHeader = ref header128.AsFuture();
+            ref FutureHeader futureHeader = ref header256.AsFuture();
             if (futureHeader.InstrumentHeader.Exchange == _exchange && futureHeader.InstrumentHeader.Root == _root)
             {
                 if (months != null && !months.Contains(futureHeader.MaturityDate.Month))

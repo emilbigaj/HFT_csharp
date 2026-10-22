@@ -19,7 +19,7 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    private InstrumentHeader128 _header128;
+    private InstrumentHeader256 _header256;
 
     public int InstrumentHeaderId { get; }
     public string Symbol { get; }
@@ -51,20 +51,20 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
     public string BaseCurrency { get; private set; } = "";
     public string QuoteCurrency { get; private set; } = "";
 
-    public WidgetInstrumentHeader(int headerId, in InstrumentHeader128 header128)
+    public WidgetInstrumentHeader(int headerId, in InstrumentHeader256 header256)
     {
         InstrumentHeaderId = headerId;
         SymbolStrings symbols = ContextManager.ServerContext.GetSymbolStrings(headerId);
         Symbol = symbols.Symbol;
         ShortSymbol = symbols.ShortSymbol;
-        Update(in header128);
+        Update(in header256);
     }
 
     /// Recomputes every cached value from the header and re-evaluates every binding.
-    public void Update(in InstrumentHeader128 header128)
+    public void Update(in InstrumentHeader256 header256)
     {
-        _header128 = header128;
-        ref readonly InstrumentHeader header = ref _header128.AsInstrumentHeader();
+        _header256 = header256;
+        ref readonly InstrumentHeader header = ref _header256.AsInstrumentHeader();
         Data.InstrumentType instrumentType = header.InstrumentType;
 
         InstrumentType = instrumentType.ToString();
@@ -84,13 +84,13 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
 
         if (instrumentType == Data.InstrumentType.Future)
         {
-            ref readonly FutureHeader future = ref _header128.AsFuture();
+            ref readonly FutureHeader future = ref _header256.AsFuture();
             Multiplier = future.Multiplier;
             MaturityDate = future.MaturityDate.NanosSinceEpoch > 0 ? future.MaturityDate.ToDateString() : "";
         }
         else if (instrumentType == Data.InstrumentType.Spread)
         {
-            ref LeggedHeader leggedHeader = ref _header128.AsLegged();
+            ref LeggedHeader leggedHeader = ref _header256.AsLegged();
             Multiplier = leggedHeader.Multiplier;
             string[] legTexts = new string[] { "", "", "", "", "", "" };
             int legIndex = 0;
@@ -102,7 +102,7 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
         }
         else if (instrumentType == Data.InstrumentType.Forex)
         {
-            ref readonly ForexHeader forex = ref _header128.AsForex();
+            ref readonly ForexHeader forex = ref _header256.AsForex();
             BaseCurrency = forex.BaseCurrency.ToString();
             QuoteCurrency = forex.QuoteCurrency.ToString();
         }
@@ -206,10 +206,10 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
     private void LoadAllHeaders()
     {
         _previousInstrumentIds = ContextManager.ServerContext.InstrumentIds;
-        foreach (InstrumentHeader128 header128 in _context.Primary.EnumerateInstrumentHeaders())
+        foreach (InstrumentHeader256 header256 in _context.Primary.EnumerateInstrumentHeaders())
         {
-            int instrumentHeaderId = header128.AsInstrumentHeader().InstrumentHeaderId;
-            WidgetInstrumentHeader widgetInstrumentHeader = new(instrumentHeaderId, in header128);
+            int instrumentHeaderId = header256.AsInstrumentHeader().InstrumentHeaderId;
+            WidgetInstrumentHeader widgetInstrumentHeader = new(instrumentHeaderId, in header256);
             _allHeaders.Add(widgetInstrumentHeader);
             _headersById[instrumentHeaderId] = widgetInstrumentHeader;
         }
@@ -232,8 +232,8 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
                 int instrumentHeaderId = _context.Primary.GetInstrumentHeaderIdByInstrumentId(instrumentId).GetReadonlyRef();
                 if (_headersById.TryGetValue(instrumentHeaderId, out WidgetInstrumentHeader? widgetInstrumentHeader))
                 {
-                    InstrumentHeader128 header128 = _context.Primary.GetInstrumentHeader(instrumentHeaderId).Read();
-                    rowUpdates.Add(() => widgetInstrumentHeader.Update(in header128));
+                    InstrumentHeader256 header256 = _context.Primary.GetInstrumentHeader(instrumentHeaderId).Read();
+                    rowUpdates.Add(() => widgetInstrumentHeader.Update(in header256));
                 }
             }
             catch { }

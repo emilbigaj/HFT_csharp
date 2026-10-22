@@ -169,74 +169,85 @@ public sealed class Position
     }
 
 
+    private Quote _reconciledQuote;           // the last quote from a book that showed all our orders' latest states
+    private bool _isReconciledQuoteValid;     // false until the first such quote, and again at every close
+
+    // Our quote with our own resting orders taken out of the book; while the book and our order states describe different
+    // moments it holds the last quote they agreed on (see Spec.md). False while the instrument is not open or a side is empty.
+    [SkipLocalsInit]
     public bool TryGetQuote(out Quote quote)
     {
         using Latency latency = new Latency(CallId.PositionTryGetQuote);
 
-        MarketByPrice64 mbp = Instrument.MarketByPrice;
-        Bitset64 isOrderActive = _isOrderActive; // Snapshot
-
-    NextOrder:
-        while (!isOrderActive.IsEmpty)
+        // Step 1: no quote while the instrument is not open, and none held across a close
+        ref readonly MarketByPrice64 marketByPrice = ref Instrument.MarketByPrice;
+        if (Instrument.Header.TradingStatus != TradingStatus.Open)
         {
-            int localOrderIndex = isOrderActive.LowestSet;
-            isOrderActive.Clear(localOrderIndex);
-
-            // 1. Setup Pointers
-            SharedArrayEntry<OrderState> stateEntry = _context.GetOrderState(GetOrderId(localOrderIndex));
-            
-
-            // Clear bit and move to next for next iteration
-
-            ref readonly OrderState state = ref stateEntry.GetReadonlyRef();
-
-            // Variables to extract safely
-            int ticks = 0;
-            int working = 0;
-            Side side = Side.Buy;
-
-            ulong seq0, seq1 = 0;
-            while(true)
-            {
-                seq0 = stateEntry.GetSeq();
-                if (Protocol.IsWriteInProgress(seq0))
-                {
-                    X86BaseWrapper.Pause();
-                    continue;
-                }
-
-                if (state.OrderStateStatus == OrderStateStatus.Done)
-                {
-                    seq1 = stateEntry.GetSeq(); 
-                    if (seq0 != seq1)
-                        continue;
-                    goto NextOrder;
-                }
-
-                ticks = state.OrderProfile.Ticks;
-                side = state.OrderProfile.Side;
-                working = Math.Abs(state.OrderProfile.Quantity - state.QuantityFilled);
-
-                seq1 = stateEntry.GetSeq();
-
-                if (seq0 == seq1)
-                    break;
-            }
-
-            ref SideByPrice64 sbp = ref side == Side.Buy ? ref mbp.Bids : ref mbp.Asks;
-            int total = sbp.GetQuantity(ticks);
-            int quantity = Math.Max(total - working, 0);
-            sbp.TrySetQuantity(ticks, quantity, out _);
-        }
-
-        if (Instrument.Header.TradingStatus != TradingStatus.Open || mbp.BidsCount == 0 || mbp.AsksCount == 0)
-        {
+            _isReconciledQuoteValid = false;
             quote = default;
             return false;
         }
 
-        quote = new Quote(mbp.BestBid, mbp.BestAsk, Instrument.TickSize);
-        return true;
+        // Step 2: our resting levels per side, while the book shows every order's latest state
+        bool isBookCaughtUp = true;
+        Bitset64 isOrderActive = _isOrderActive;
+        StackList<Level> userBids = new StackList<Level>(stackalloc Level[isOrderActive.Count]);
+        StackList<Level> userAsks = new StackList<Level>(stackalloc Level[isOrderActive.Count]);
+        while (isBookCaughtUp && !isOrderActive.IsEmpty)
+        {
+            int localOrderIndex = isOrderActive.LowestSet;
+            isOrderActive.Clear(localOrderIndex);
+            isBookCaughtUp = TryGetActiveLevel(localOrderIndex, marketByPrice.ExchangeTimestamp, out Side side, out Level level);
+            if (level.Quantity == 0)
+                continue;
+            if (side == Side.Buy)
+                userBids.Add(level);
+            else
+                userAsks.Add(level);
+        }
+
+        // Step 3: a caught-up book gives a fresh quote; otherwise hold the last one
+        if (isBookCaughtUp)
+        {
+            bool hasBestBid = marketByPrice.Bids.TryGetBestLevelExcluding(userBids.AsSpan(), out Level bestBid);
+            bool hasBestAsk = marketByPrice.Asks.TryGetBestLevelExcluding(userAsks.AsSpan(), out Level bestAsk);
+            _isReconciledQuoteValid = hasBestBid && hasBestAsk;
+            _reconciledQuote = _isReconciledQuoteValid ? new Quote(bestBid, bestAsk, Instrument.TickSize) : default;
+        }
+        quote = _reconciledQuote;
+        return _isReconciledQuoteValid;
+    }
+
+    // One order's resting level as the book shows it (quantity 0 when it rests nowhere: an IOC or a Done order); false while
+    // the exchange has not answered its latest target or the book has not caught up with its state.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool TryGetActiveLevel(int localOrderIndex, Timestamp bookExchangeTimestamp, out Side side, out Level level)
+    {
+        // Step 1: an IOC never rests
+        OrderId orderId = GetOrderId(localOrderIndex);
+        ref readonly OrderTarget target = ref _context.GetOrderTarget(orderId).GetReadonlyRef();
+        side = target.OrderProfile.Side;
+        level = default;
+        if (target.TimeInForce == TimeInForce.ImmediateOrCancel)
+            return true;
+
+        // Step 2: read the state under its seqlock and compare its exchange time with the book's
+        SharedArrayEntry<OrderState> stateEntry = _context.GetOrderState(orderId);
+        ref readonly OrderState state = ref stateEntry.GetReadonlyRef();
+        while (true)
+        {
+            ulong seq0 = stateEntry.GetSeq();
+            if (Protocol.IsWriteInProgress(seq0))
+            {
+                X86BaseWrapper.Pause();
+                continue;
+            }
+            bool isStateInBook = target.IsConfirmedBy(in state) && state.OrderHeader.ExchangeTimestamp <= bookExchangeTimestamp;
+            bool isDone = state.OrderStateStatus == OrderStateStatus.Done;
+            level = isDone ? default : new Level(state.OrderProfile.Ticks, Math.Abs(state.WorkingQuantity));
+            if (seq0 == stateEntry.GetSeq())
+                return isStateInBook;
+        }
     }
 
     public ActiveTargetsEnumerable ActiveTargets
@@ -328,7 +339,7 @@ public sealed class Position
 
                     bool targetIsCancel = !targetRejected && (target.OrderTargetAction == OrderTargetAction.Cancel || target.OrderProfile.Sign * (target.OrderProfile.Quantity - quantityFilled) <= 0);
 
-                    bool stateIsTruth = targetRejected || (isSameOrder && state.OrderHeader.Seq >= target.OrderHeader.Seq);
+                    bool stateIsTruth = target.IsConfirmedBy(in state);
 
                     // Done once the state says so, or as soon as a cancel is sent, even before the server has read the Create.
                     bool isOrderDone = (isSameOrder && state.OrderStateStatus == OrderStateStatus.Done) || targetIsCancel;

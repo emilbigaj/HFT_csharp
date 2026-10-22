@@ -131,24 +131,33 @@ public class DataSimulator
                 Console.WriteLine(_date);
             }
 
-            if (tickHeader.TickType.IsTick())
+            try
             {
-                Tick tick = MemoryMarshal.AsRef<Tick>(src);
-                _exchangeSimulator.OnTick(ref tick);
+                if (tickHeader.TickType.IsTick())
+                {
+                    Tick tick = MemoryMarshal.AsRef<Tick>(src);
+                    _exchangeSimulator.OnTick(ref tick);
+                }
+                else if (tickHeader.TickType == TickType.MarketByPriceUpdate || tickHeader.TickType == TickType.MarketByPriceSnapshot)
+                {
+                    ref readonly MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(src);
+                    _exchangeSimulator.OnMarketByPrice(in mbp, src);
+                }
+                else if (tickHeader.TickType == TickType.MarketByOrderUpdate || tickHeader.TickType == TickType.MarketByOrderSnapshot)
+                {
+                    ref readonly MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(src);
+                    _exchangeSimulator.OnMarketByOrder(in mbo, src);
+                }
+                else
+                {
+                    throw new NotImplementedException($"Unsupported TickType: {tickHeader.TickType}");
+                }
             }
-            else if (tickHeader.TickType == TickType.MarketByPriceUpdate || tickHeader.TickType == TickType.MarketByPriceSnapshot)
+            catch
             {
-                ref readonly MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(src);
-                _exchangeSimulator.OnMarketByPrice(in mbp, src);
-            }
-            else if (tickHeader.TickType == TickType.MarketByOrderUpdate || tickHeader.TickType == TickType.MarketByOrderSnapshot)
-            {
-                ref readonly MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(src);
-                _exchangeSimulator.OnMarketByOrder(in mbo, src);
-            }
-            else
-            {
-                throw new NotImplementedException($"Unsupported TickType: {tickHeader.TickType}");
+                // Why end the run: a message that failed part-way leaves the book damaged, and a retry would apply it twice; nothing after it can be trusted (see spec.txt)
+                Clock.Stop();
+                throw;
             }
 
             _priorityTickQueue.TryDequeue();

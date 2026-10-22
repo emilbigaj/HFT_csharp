@@ -14,24 +14,26 @@ mirrorConfig.ThrowIfInvalid(mirrorConfigPath);
 // Why after the checks: a config that cannot work still shows its error in the console it was started from
 if (!mirrorConfig.IsConsoleVisible)
     Application.DetachConsole(Path.Combine(AppContext.BaseDirectory, "Mirror.log"));
-Clock.Mode = mirrorConfig.ClockMode;
+Clock.Mode = ClockMode.Realtime;   // Why: a remote desk only ever mirrors a live server (see Spec.md "Remote workspaces")
 // Before any path is built. Why: a remote risk desk has no S: drive; a relative DirectoriesRoot is beside this executable
 if (mirrorConfig.DirectoriesRoot.Length > 0)
     Context.DirectoriesRoot = Path.Combine(AppContext.BaseDirectory, mirrorConfig.DirectoriesRoot);
 FileSystemPath serverName = ServerContext.GetDirectoryPath(mirrorConfig.ServerName);
 // Why: on the CME box this process must stay off the isolated trading cores
 LowLatency.PinCurrentThreadToCoreRange(LowLatency.HouseKeepingCores);
+// Why: a Windows desk's 1 ms loop otherwise passes every 15.6 ms, which every row and every file request waits for
+LowLatency.RaiseTimerResolution();
 TcpLinkConnector tcpLinkConnector = new(mirrorConfig);
 
 if (mirrorConfig.MirrorRole == MirrorRole.Local)
     RunLocal(serverName, tcpLinkConnector);
 else
-    RunRemote(serverName, tcpLinkConnector);
+    RunRemote(serverName, tcpLinkConnector, mirrorConfig.IsFolderSyncOn);
 
 // Beside the real server: mirrors its shared memory to every remote and runs the remote GUIs' ManualClients.
 static void RunLocal(FileSystemPath serverName, TcpLinkConnector tcpLinkConnector)
 {
-    // Step 1: attach to the running server, read-only; in simulation its clock drives this one
+    // Step 1: attach to the running server, read-only
     ContextManager.Initialize(serverName);
     // Why exit with the server: a dead server's stand-ins are read by no one, and its restart cannot post its header while this process maps it
     int serverProcessId = ContextManager.ServerContext.ServerHeader.GetReadonlyRef().ServerProcessId;
@@ -40,16 +42,6 @@ static void RunLocal(FileSystemPath serverName, TcpLinkConnector tcpLinkConnecto
     {
         Console.WriteLine($"Mirror.RunLocal: the posted server header names process {serverProcessId}, which has exited; start the Local Mirror after the server");
         return;
-    }
-    if (Clock.Mode == ClockMode.Simulation)
-    {
-        Clock.Begin = ContextManager.ServerContext.ServerHeader.GetReadonlyRef().Timestamp;
-        Clock.End = Timestamp.MaxValue;
-        Clock.Interject += timestamp =>
-        {
-            Clock.OnInterject(ContextManager.ServerContext.ServerHeader.GetReadonlyRef().Timestamp);
-            Thread.Sleep(1);
-        };
     }
     LowLatency.StartBackgroundThread("Clock", Clock.Start);
 
@@ -81,7 +73,7 @@ static void RunLocal(FileSystemPath serverName, TcpLinkConnector tcpLinkConnecto
 }
 
 // Where people sit: keeps a copy of the server that local Workspaces attach to.
-static void RunRemote(FileSystemPath serverName, TcpLinkConnector tcpLinkConnector)
+static void RunRemote(FileSystemPath serverName, TcpLinkConnector tcpLinkConnector, bool isFolderSyncOn)
 {
     // Step 1: the first link's first packet is the trading server's header; posted here, it sizes the copy
     tcpLinkConnector.Start();
@@ -89,9 +81,6 @@ static void RunRemote(FileSystemPath serverName, TcpLinkConnector tcpLinkConnect
     TcpLink tcpLink = ReadServerHeader(serverName, tcpLinkConnector, out ServerHeader serverHeader, out uint localLayoutHash);
     // Why reuse: Workspaces still open from the last Remote keep its copy, header posted; it is rebuilt as on a server restart, and they rebuild on this Remote (see Spec.md "Remote workspaces")
     bool isCopyReused = !serverHeaderBox.TryStore(in serverHeader);
-    // Why: as on a server restart, a simulation desk's clock cannot go back to another run's start
-    if (isCopyReused && Clock.Mode == ClockMode.Simulation && serverHeaderBox.GetReadonlyRef().ServerProcessId != serverHeader.ServerProcessId)
-        throw new InvalidOperationException("Mirror.RunRemote: this desk's open Workspaces show another simulation run, must show this one; close them, then start the Mirror again");
     ServerContext serverContext = new(serverName, Access.Write);
     // Why: until the copy's ServerContext maps the header region, this is the only handle keeping it alive on Windows
     GC.KeepAlive(serverHeaderBox);
@@ -105,7 +94,8 @@ static void RunRemote(FileSystemPath serverName, TcpLinkConnector tcpLinkConnect
         Console.WriteLine("Mirror.RunRemote: Workspaces from the last run are still open; the copy is rebuilt and they rebuild themselves");
 
     // Step 3: keep the copy current; a restarted server gets a fresh RemoteMirror over the same copy and link (see Spec.md "Remote workspaces")
-    RemoteMirror remoteMirror = new(serverContext, tcpLinkConnector, tcpLink, newServerHeader: isCopyReused ? serverHeader : null);
+    FileSyncRemote? fileSyncRemote = isFolderSyncOn ? new(Context.DirectoriesRoot) : null;   // Why null: a desk with the sync off says so in its GuiList, so the box sends it nothing
+    RemoteMirror remoteMirror = new(serverContext, tcpLinkConnector, tcpLink, newServerHeader: isCopyReused ? serverHeader : null, fileSyncRemote);
     while (!Application.IsExiting)
     {
         // Why: one bad packet must not stop the copy for everyone
@@ -116,7 +106,7 @@ static void RunRemote(FileSystemPath serverName, TcpLinkConnector tcpLinkConnect
             {
                 Console.WriteLine($"Mirror.RunRemote: the server restarted (process {serverContext.ServerHeader.GetReadonlyRef().ServerProcessId} is now {newServerHeader.ServerProcessId}); the copy is rebuilt and the Workspaces rebuild themselves");
                 remoteMirror.Dispose();
-                remoteMirror = new RemoteMirror(serverContext, tcpLinkConnector, remoteMirror.TcpLink, newServerHeader);
+                remoteMirror = new RemoteMirror(serverContext, tcpLinkConnector, remoteMirror.TcpLink, newServerHeader, fileSyncRemote);
             }
         }
         catch (Exception exception)
@@ -152,7 +142,7 @@ static TcpLink ReadServerHeader(FileSystemPath serverName, TcpLinkConnector tcpL
             serverHeader.ServerName = MirrorPacket.RewriteName(serverHeader.ServerName, isTravelling: false);
             FileSystemPath mirroredServerName = serverHeader.ServerName.ToString();
             if (mirroredServerName != serverName)
-                throw new InvalidDataException($"Mirror.ReadServerHeader: the Local end serves {mirroredServerName}; this Remote is configured for {serverName} (ServerName and ClockMode must match)");
+                throw new InvalidDataException($"Mirror.ReadServerHeader: the Local end serves {mirroredServerName}; this Remote is configured for {serverName} (ServerName must match)");
             return tcpLink;
         }
         tcpLink.Dispose();

@@ -30,6 +30,34 @@ public static class LowLatency
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetProcessAffinityMask(IntPtr hProcess, out UIntPtr lpProcessAffinityMask, out UIntPtr lpSystemAffinityMask);
 
+    [DllImport("winmm.dll")]
+    private static extern uint timeBeginPeriod(uint periodMilliseconds);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessPowerThrottlingState
+    {
+        public uint Version;        // PROCESS_POWER_THROTTLING_CURRENT_VERSION
+        public uint ControlMask;    // the throttling kinds this call decides
+        public uint StateMask;      // which of them are on: 0 turns them off
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetProcessInformation(IntPtr hProcess, int processInformationClass, ref ProcessPowerThrottlingState processInformation, int processInformationSize);
+
+    private const int s_processPowerThrottling = 4;                    // PROCESS_INFORMATION_CLASS.ProcessPowerThrottling
+    private const uint s_powerThrottlingIgnoreTimerResolution = 0x4;   // PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+
+    /// Makes Thread.Sleep(1) sleep about 1 ms in this process on Windows, where it otherwise sleeps a 15.6 ms timer tick; nothing elsewhere.
+    public static void RaiseTimerResolution()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+        // Why: Windows 11 stops honouring the request of a process with no visible window of its own (a console) after a few seconds
+        ProcessPowerThrottlingState processPowerThrottlingState = new() { Version = 1, ControlMask = s_powerThrottlingIgnoreTimerResolution, StateMask = 0 };
+        SetProcessInformation(GetCurrentProcess(), s_processPowerThrottling, ref processPowerThrottlingState, Marshal.SizeOf<ProcessPowerThrottlingState>());
+        timeBeginPeriod(1);
+    }
+
     [DllImport("libc", SetLastError = true)]
     private static extern int sched_setaffinity(int pid, IntPtr cpusetsize, ref ulong mask);
 

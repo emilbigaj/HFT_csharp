@@ -100,6 +100,16 @@ public struct Bitset64
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Clear(int index) => _bits &= ~(1UL << index);
 
+    /// Moves a set bit: when fromIndex is set it is cleared and toIndex set; otherwise nothing changes.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Replace(int fromIndex, int toIndex)
+    {
+        ulong fromBit = 1UL << fromIndex;
+        if ((_bits & fromBit) == 0UL)
+            return;
+        _bits = (_bits & ~fromBit) | (1UL << toIndex);
+    }
+
     /// <summary>Toggles the bit at <paramref name="index"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Toggle(int index) => _bits ^= (1UL << index);

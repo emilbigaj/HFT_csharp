@@ -85,12 +85,32 @@ public class RiskLayer
 
         Instrument instrument = _context.GetInstrument(instrumentId);
 
-        if (instrument.Header.TradingStatus != TradingStatus.Open)
+        if (!MaySend(instrument.Header.TradingStatus, OrderTargetAction.Create))
         {
-            orderRejectedReasons.Set((int)OrderRejectedReason.NotInSession);
+            orderRejectedReasons.Set((int)GetNotInSessionReason(in instrument.Header));
         }
 
         return orderRejectedReasons;
+    }
+
+    // Whether an exchange in this status takes this action: Open and Auction anything, Halted a cancel only, Closed and Unknown nothing (see Spec.md).
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool MaySend(TradingStatus tradingStatus, OrderTargetAction orderTargetAction) => tradingStatus switch
+    {
+        TradingStatus.Open or TradingStatus.Auction => true,
+        TradingStatus.Halted => orderTargetAction == OrderTargetAction.Cancel,
+        _ => false,
+    };
+
+    // How long after an instrument's status changes a session refusal counts as an order sent before the change was known (see Spec.md).
+    public static Duration NotInSessionInFlightWindow { get; set; } = Duration.FromSeconds(1);
+
+    // The reason a session refusal of this instrument carries: in flight within the window of its last status change, else NotInSession.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static OrderRejectedReason GetNotInSessionReason(in InstrumentHeader instrumentHeader)
+    {
+        bool isWithinWindow = Clock.Now - instrumentHeader.TradingStatusTimestamp <= NotInSessionInFlightWindow;
+        return isWithinWindow ? OrderRejectedReason.NotInSessionInFlight : OrderRejectedReason.NotInSession;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -1108,8 +1108,8 @@ public sealed class ServerSocket : IDisposable
     // Takes one connect request and answers it exactly once: the client's id, or a negative ConnectRefusal.
     private void PollLetterBox()
     {
-        // Step 1: take the request
-        if (!_letterBox.TryEmpty(out SocketHeader socketHeader))
+        // Step 1: read the request, left posted until it is answered. Why: a listener that dies deciding leaves it for the next one (see Spec.md)
+        if (!_letterBox.TryPeek(out SocketHeader socketHeader))
             return;
         string clientName = socketHeader.ClientName.ToString();
         Console.WriteLine($"{GetType().Name}::{ServerName}: Received connection request from {clientName}");
@@ -1126,7 +1126,8 @@ public sealed class ServerSocket : IDisposable
             socketHeader.ClientId = (int)ConnectRefusal.ServerError;
         }
 
-        // Step 3: a refused client is told why; an accepted one is attached, and OpenClient sends its id
+        // Step 3: emptied first, so no request is answered twice; a refused client is told why, an accepted one is attached and OpenClient sends its id
+        _letterBox.TryEmpty(out _);
         if (socketHeader.ClientId < 0)
         {
             Console.WriteLine($"{GetType().Name}::{ServerName}: Client {clientName} refused: {(ConnectRefusal)socketHeader.ClientId}.");

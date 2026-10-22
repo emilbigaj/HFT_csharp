@@ -40,7 +40,7 @@ public struct Header<T> where T : Enum
 
 
 
-[StructLayout(LayoutKind.Sequential, Pack = 1, Size = 64)]
+[StructLayout(LayoutKind.Sequential, Pack = 1, Size = 128)]
 [RegisterJson]
 public struct InstrumentHeader()
 {
@@ -58,18 +58,20 @@ public struct InstrumentHeader()
     public int InstrumentId;
     public int ExchangeInstrumentId;
     public String4 ProductGroupRoot;   // the group CME counts its message efficiency under (MDP3 SecurityGroup), set by whoever builds the header
+    public Timestamp TradingStatusTimestamp;   // @64: exchange time TradingStatus last changed; MinValue never. Server only, written before TradingStatus
 }
 
+// Why every member is readonly: rows are read through ref readonly, where a non-readonly call copies the row and its As* ref points into the dead copy
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct InstrumentHeader128
+public struct InstrumentHeader256
 {
-    private unsafe fixed byte _raw[128];
-    public Symbology Symbology
+    private unsafe fixed byte _raw[256];
+    public readonly Symbology Symbology
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get
         {
-            ref readonly InstrumentHeader header = ref Unsafe.As<InstrumentHeader128, InstrumentHeader>(ref Unsafe.AsRef(in this));
+            ref readonly InstrumentHeader header = ref Unsafe.As<InstrumentHeader256, InstrumentHeader>(ref Unsafe.AsRef(in this));
 
             switch (header.InstrumentType)
             {
@@ -86,36 +88,36 @@ public struct InstrumentHeader128
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref FutureHeader AsFuture()
+    public readonly ref FutureHeader AsFuture()
     {
         ref InstrumentHeader instrumentHeader = ref AsInstrumentHeader();
         if (instrumentHeader.InstrumentType != InstrumentType.Future)
             throw new NotSupportedException();
-        return ref Unsafe.As<InstrumentHeader128, FutureHeader>(ref Unsafe.AsRef(in this));
+        return ref Unsafe.As<InstrumentHeader256, FutureHeader>(ref Unsafe.AsRef(in this));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref ForexHeader AsForex()
+    public readonly ref ForexHeader AsForex()
     {
         ref InstrumentHeader instrumentHeader = ref AsInstrumentHeader();
         if (instrumentHeader.InstrumentType != InstrumentType.Forex)
             throw new NotSupportedException();
-        return ref Unsafe.As<InstrumentHeader128, ForexHeader>(ref Unsafe.AsRef(in this));
+        return ref Unsafe.As<InstrumentHeader256, ForexHeader>(ref Unsafe.AsRef(in this));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref LeggedHeader AsLegged()
+    public readonly ref LeggedHeader AsLegged()
     {
         ref InstrumentHeader instrumentHeader = ref AsInstrumentHeader();
         if (instrumentHeader.InstrumentType != InstrumentType.Spread)
             throw new NotSupportedException();
-        return ref Unsafe.As<InstrumentHeader128, LeggedHeader>(ref Unsafe.AsRef(in this));
+        return ref Unsafe.As<InstrumentHeader256, LeggedHeader>(ref Unsafe.AsRef(in this));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref InstrumentHeader AsInstrumentHeader()
+    public readonly ref InstrumentHeader AsInstrumentHeader()
     {
-        return ref Unsafe.As<InstrumentHeader128, InstrumentHeader>(ref Unsafe.AsRef(in this));
+        return ref Unsafe.As<InstrumentHeader256, InstrumentHeader>(ref Unsafe.AsRef(in this));
     }
 }
 
@@ -163,7 +165,7 @@ public readonly record struct InstrumentLeg(int InstrumentId, int Weight);
 [RegisterJson]
 public struct LeggedHeader
 {
-    // 128-byte overlay budget: InstrumentHeader 64 + Multiplier 8 + LegCount 4 + 6*8 legs = 124.
+    // 256-byte overlay budget: InstrumentHeader 128 + Multiplier 8 + LegCount 4 + reserved 4 + 6*8 legs = 192.
     public InstrumentHeader InstrumentHeader;
     public double Multiplier;
     public int LegCount;
@@ -177,8 +179,8 @@ public struct LeggedHeader
 
     static LeggedHeader()
     {
-        if (Unsafe.SizeOf<LeggedHeader>() > Unsafe.SizeOf<InstrumentHeader128>())
-            throw new InvalidOperationException($"LeggedHeader ({Unsafe.SizeOf<LeggedHeader>()} bytes) must fit within InstrumentHeader128.");
+        if (Unsafe.SizeOf<LeggedHeader>() > Unsafe.SizeOf<InstrumentHeader256>())
+            throw new InvalidOperationException($"LeggedHeader ({Unsafe.SizeOf<LeggedHeader>()} bytes) must fit within InstrumentHeader256.");
     }
 
     // Live legs, maturity-ascending — same invariant as the ticker. Clamped: LegCount comes from
@@ -188,7 +190,7 @@ public struct LeggedHeader
     public Span<LegHeader> Legs => MemoryMarshal.CreateSpan(ref Leg0, Math.Clamp(LegCount, 0, 6));
 
     // Legs reference sibling headers by id; the context hooks this, like InstrumentDetails.GetLeg.
-    public static Func<int, InstrumentHeader128>? GetLegHeader;
+    public static Func<int, InstrumentHeader256>? GetLegHeader;
 
     public SpreadSymbology Symbology
     {
@@ -216,7 +218,7 @@ public abstract class Instrument
 {
     public int ProductGroupId => Header.ProductGroupId;
 
-    protected SharedArrayEntry<InstrumentHeader128> _headerEntry;
+    protected SharedArrayEntry<InstrumentHeader256> _headerEntry;
     public ref readonly InstrumentHeader Header => ref _headerEntry.GetReadonlyRef().AsInstrumentHeader();
 
     // This process's own book, built by its Client from the server's snapshot and the instrument's feed, on the feed thread
@@ -334,7 +336,7 @@ public abstract class Instrument
     // > 1: every instrument is its own single leg (base ctor); legged means legs BEYOND itself.
     public bool IsLegged => _legs.Length > 1;
 
-    protected Instrument(SharedArrayEntry<InstrumentHeader128> headerEntry)
+    protected Instrument(SharedArrayEntry<InstrumentHeader256> headerEntry)
     {
         _headerEntry = headerEntry;
         _quote = new Quote() { TickSize = TickSize };
@@ -388,7 +390,7 @@ public class Future : Instrument
     public ref readonly FutureHeader FutureHeader => ref _headerEntry.GetReadonlyRef().AsFuture();
 
     public Future(SharedArrayEntry<FutureHeader> headerEntry)
-        : base(headerEntry.Cast<InstrumentHeader128>())
+        : base(headerEntry.Cast<InstrumentHeader256>())
     {
         Multiplier = FutureHeader.Multiplier;
     }
@@ -425,7 +427,7 @@ public sealed class Forex : Instrument
 
 
     public Forex(SharedArrayEntry<ForexHeader> headerEntry)
-        : base(headerEntry.Cast<InstrumentHeader128>())
+        : base(headerEntry.Cast<InstrumentHeader256>())
     {
     }
 }
@@ -443,7 +445,7 @@ public sealed class Spread : Instrument
 
 
     public Spread(SharedArrayEntry<LeggedHeader> headerEntry, Future @long, Future @short)
-        : base(headerEntry.Cast<InstrumentHeader128>())
+        : base(headerEntry.Cast<InstrumentHeader256>())
     {
         Long = @long;
         Short = @short;

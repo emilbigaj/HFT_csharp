@@ -23,9 +23,12 @@ public class InstrumentSimulator
 
     public InstrumentDetails InstrumentDetails { get; }
 
-    // Set by the exchange's SessionManager in ServerSimulator, refined by the book (Auction while crossed in session); Unknown until the first open or close.
+    // The one status every fill and every target is judged by. The exchange's recorded status once the contract's .TradingStatus
+    // history has spoken; for a contract with none (a data source without status), the exchange's SessionManager in ServerSimulator,
+    // refined by the book (Auction while crossed in session). Unknown until the first.
     public TradingStatus TradingStatus { get; private set; } = TradingStatus.Unknown;
     private TradingStatus _sessionTradingStatus = TradingStatus.Unknown;   // Open or Closed from the exchange's session hours; Unknown until the first
+    private bool _hasRecordedTradingStatus;   // true from the first recorded status tick: the schedule and the crossed-book guess stop setting the status
 
 
     public int _bidMask = 0;
@@ -87,21 +90,28 @@ public class InstrumentSimulator
         ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Tick(ref Unsafe.As<TradingStatusUpdate, Tick>(ref tradingStatusUpdate));
     }
 
-    // The exchange's own announced status, replayed from a .TradingStatus tick history. Not applied yet: the session schedule and the crossed-book guess still set the status (see spec.txt).
+    // The exchange's own announced status, replayed from a .TradingStatus tick history: from its first tick it alone sets the status (see spec.txt).
     public void OnRecordedTradingStatus(in TradingStatusUpdate tradingStatusUpdate)
     {
+        _hasRecordedTradingStatus = true;
+        // Why the check: each day restates the status in effect at 00:00 UTC, which is usually no change
+        if (tradingStatusUpdate.TradingStatus != TradingStatus)
+            OnTradingStatus(tradingStatusUpdate.TickHeader.ExchangeTimestamp, tradingStatusUpdate.TradingStatus);
     }
 
-    // The session's hours set the status; in session, a crossed book is the exchange's pre-open auction (see Spec.md).
+    // For a contract with no recorded status (a data source without one): the session's hours set the status, and in session a
+    // crossed book is taken as the pre-open auction (see spec.txt).
     public void OnSessionChanged(Timestamp timestamp, TradingStatus sessionTradingStatus)
     {
         _sessionTradingStatus = sessionTradingStatus;
         UpdateTradingStatus(timestamp);
     }
 
-    // Publishes the status the session and the book imply, when it changes.
+    // Publishes the status the session and the book imply, when it changes; a contract with a recorded status history is left to it.
     private void UpdateTradingStatus(Timestamp timestamp)
     {
+        if (_hasRecordedTradingStatus)
+            return;
         TradingStatus tradingStatus = _sessionTradingStatus == TradingStatus.Open && _marketByPrice64.IsCrossed ? TradingStatus.Auction : _sessionTradingStatus;
         if (tradingStatus != TradingStatus)
             OnTradingStatus(timestamp, tradingStatus);
@@ -261,8 +271,11 @@ public class InstrumentSimulator
     {
         _marketByPrice64.ExchangeTimestamp = update.TickHeader.ExchangeTimestamp;
 
-        StackList<Level> _bids = new StackList<Level>(stackalloc Level[128]);
-        StackList<Level> _asks = new StackList<Level>(stackalloc Level[128]);
+        // Why sized from the update: a reopen changes hundreds of levels in one message (NQ 2025-11-28 13:30: 305 bids); the rest is the 64-level book (masks, restores) and the user's queues
+        int bidCapacity = update.BidsCount + SideByPrice64.Capacity + Buys.TicksRemoved.Count + Buys.QueueManagers.Count;
+        int askCapacity = update.AsksCount + SideByPrice64.Capacity + Sells.TicksRemoved.Count + Sells.QueueManagers.Count;
+        StackList<Level> _bids = new StackList<Level>(stackalloc Level[bidCapacity]);
+        StackList<Level> _asks = new StackList<Level>(stackalloc Level[askCapacity]);
 
         ReadOnlySpan<Level> marketAsks = update.AsksAsSpan(src);
         foreach (Level ask in marketAsks)
@@ -294,13 +307,16 @@ public class InstrumentSimulator
 
         }
 
+        // Why before matching and before the book is published: a guessed status must govern this update's fills, and the client hears Auction before it sees the crossed book
+        UpdateTradingStatus(update.TickHeader.ExchangeTimestamp);
+
         /// EXECUTE QUEUED ORDERS IF ASK CROSSES BID
         /// loop through the book, and first mask off levels that have already been traded against. ie local mask = _mask
         /// after masking off levels, if there is quantity left, execute against the level, and update _mask with any additional masking from this trade
-        /// Skip when the book is auction-locked/crossed (best bid >= best ask): the matching engine isn't running continuously,
-        /// so user orders must not be passively filled and mask must not accumulate every tick.
+        /// Only while Open: in a pre-open (Auction) or a halt the matching engine isn't running, so user orders must not be
+        /// passively filled and the mask must not accumulate every tick.
 
-        if (!_marketByPrice64.IsCrossed)
+        if (TradingStatus == TradingStatus.Open)
         {
             {
                 ref QueueManager firstBuys = ref Buys.QueueManagers.FirstRef;
@@ -440,8 +456,6 @@ public class InstrumentSimulator
             OverwriteLevel(ref _asks, new Level(queueManager.Ticks, adjustedQty));
         }
 
-        // Why before the book: both share the instrument's queue, so the client hears Auction before it sees the crossed book
-        UpdateTradingStatus(update.TickHeader.ExchangeTimestamp);
         FromExchangeToNic_MarketByPriceAggregatedUpdate(in update.TickHeader, _bids, _asks);
 
     }
@@ -517,7 +531,8 @@ public class InstrumentSimulator
 
         Span<byte> src = stackalloc byte[MarketByPrice.SizeOf(0, 0)];
         ref MarketByPrice update = ref MemoryMarshal.AsRef<MarketByPrice>(src);
-        update = new MarketByPrice(TickType.MarketByPriceUpdate, InstrumentId, Clock.Now, Clock.Now, Clock.Now, 0, 0);
+        // Why: the republish crosses the exchange->NIC leg like the ack it belongs to (see spec.txt)
+        update = new MarketByPrice(TickType.MarketByPriceUpdate, InstrumentId, Clock.Now, Clock.Now, Clock.Now.AddMicroseconds(ExchangeSimulator.ServerSimulator.FromExchangeToNicLatency), 0, 0);
         OnMarketByPrice(in update, src);
     }
 
@@ -531,10 +546,6 @@ public class InstrumentSimulator
         {
             Console.WriteLine($"        ExecutionSimulator.Take(ClientOrderId: {orderState.OrderHeader.OrderId}, TargetTicks: {orderProfile.Ticks}, TargetQuantity: {orderProfile.Quantity}, WorkingQuantity: {workingQuantity})");
         }
-
-        // if market is cross its probably closed or in auction, so don't take any fills
-        if (_marketByPrice64.IsCrossed)
-            return;
 
         int quantityTaken = 0;
         int sign = Math.Sign(workingQuantity);
@@ -675,11 +686,8 @@ public class InstrumentSimulator
     }
 
     // Would Take trade at least one lot right now: the same guard Take's loop applies against the opposite best.
-    // Probed, not enqueued: a crossing order placed in our own book first would make IsCrossed true and Take would never trade.
     private bool IsMarketable(OrderProfile orderProfile, int workingQuantity)
     {
-        if (_marketByPrice64.IsCrossed)
-            return false;
         if (workingQuantity > 0)
             return _marketByPrice64.AsksCount > 0 && orderProfile.Ticks >= _marketByPrice64.BestAsk.Ticks;
         return _marketByPrice64.BidsCount > 0 && orderProfile.Ticks <= _marketByPrice64.BestBid.Ticks;
@@ -788,7 +796,7 @@ public class InstrumentSimulator
             }
 
 
-            if (TradingStatus != TradingStatus.Open)
+            if (!RiskLayer.MaySend(TradingStatus, orderTarget.OrderTargetAction))
             {
                 if (orderState.OrderHeader.OrderId == Debug.OrderId)
                 {
@@ -898,7 +906,7 @@ public class InstrumentSimulator
                 Console.WriteLine($"ExecutionSimulator.Target.Missed");
             }
 
-            if (TradingStatus != TradingStatus.Open)
+            if (!RiskLayer.MaySend(TradingStatus, orderTarget.OrderTargetAction))
             {
                 if (orderState.OrderHeader.OrderId == Debug.OrderId)
                 {
@@ -1451,8 +1459,8 @@ public class ServerSimulator
             _instrumentDetailsByInstrumentHeaderId.TryAdd(instrumentHeaderId, instrumentDetails);
             _instrumentHeaderIdBySymbol.TryAdd(instrumentDetails.Symbology.Symbol, instrumentHeaderId);
 
-            InstrumentHeader128 header128 = default;
-            ref InstrumentHeader header = ref Unsafe.As<InstrumentHeader128, InstrumentHeader>(ref header128);
+            InstrumentHeader256 header256 = default;
+            ref InstrumentHeader header = ref Unsafe.As<InstrumentHeader256, InstrumentHeader>(ref header256);
 
             header = new InstrumentHeader()
             {
@@ -1468,7 +1476,7 @@ public class ServerSimulator
             };
             if (instrumentDetails.InstrumentType == InstrumentType.Future)
             {
-                ref FutureHeader future = ref Unsafe.As<InstrumentHeader128, FutureHeader>(ref header128);
+                ref FutureHeader future = ref Unsafe.As<InstrumentHeader256, FutureHeader>(ref header256);
                 future.Multiplier = instrumentDetails.Multiplier;
                 future.MaturityDate = instrumentDetails.MaturityDate!.Value;
             }
@@ -1476,7 +1484,7 @@ public class ServerSimulator
             {
                 // Legs are the source of truth. They registered before this spread (the Symbology
                 // build above already resolved them via GetLeg), so reference them by header id.
-                ref LeggedHeader leggedHeader = ref Unsafe.As<InstrumentHeader128, LeggedHeader>(ref header128);
+                ref LeggedHeader leggedHeader = ref Unsafe.As<InstrumentHeader256, LeggedHeader>(ref header256);
                 leggedHeader.Multiplier = instrumentDetails.Multiplier;
 
                 System.Collections.Generic.List<(Leg Leg, InstrumentDetails Details)> legDetailsList = instrumentDetails.GetLegDetails();
@@ -1493,7 +1501,7 @@ public class ServerSimulator
                     };
                 }
             }
-            _server.OnInstrumentHeader(in header128);
+            _server.OnInstrumentHeader(in header256);
             foreach (InstrumentDetail instrumentDetail in instrumentDetails.Schedule)
             {
                 Console.WriteLine(instrumentDetails.Symbol);
@@ -1501,9 +1509,9 @@ public class ServerSimulator
                 Clock.AddReminder(new Reminder(instrumentDetail.Timestamp, timestamp =>
                 {
                     // Step 1: the server's header row as it stands
-                    ref SharedArrayEntry<InstrumentHeader128> header128Entry = ref ServerContext.GetInstrumentHeader(instrumentHeaderId);
-                    InstrumentHeader128 changedHeader128 = header128Entry.Read();
-                    ref InstrumentHeader changedHeader = ref changedHeader128.AsInstrumentHeader();
+                    ref SharedArrayEntry<InstrumentHeader256> header256Entry = ref ServerContext.GetInstrumentHeader(instrumentHeaderId);
+                    InstrumentHeader256 changedHeader256 = header256Entry.Read();
+                    ref InstrumentHeader changedHeader = ref changedHeader256.AsInstrumentHeader();
 
                     // Step 2: the scheduled change
                     switch (instrumentDetail)
@@ -1517,7 +1525,7 @@ public class ServerSimulator
                     }
 
                     // Step 3: publish it
-                    header128Entry.Write(changedHeader128);
+                    header256Entry.Write(changedHeader256);
                 }));
             }
         }

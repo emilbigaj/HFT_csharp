@@ -161,7 +161,7 @@ public partial class Workspace : Window, IWidgetHost
     {
         Dispatcher.UIThread.Post(() =>
         {
-            TimestampText.Text = Context.ServerHeader.GetReadonlyRef().Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff");
+            TimestampText.Text = Context.GetLatestMarketDataTimestamp().ToString("yyyy-MM-dd HH:mm:ss.fff");
             RemoteClient? remoteClient = ManualClient as RemoteClient;
             // Why: a restarted server is a new run (client ids, instrument ids) and a restarted Remote Mirror serves no old session, so a remote desk rebuilds every Workspace on either (see Spec.md "Remote workspaces")
             bool isSessionEnded = _isConnected && remoteClient != null && remoteClient.IsSessionEnded;
