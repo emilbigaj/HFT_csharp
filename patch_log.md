@@ -4,6 +4,29 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-23 — Simulator: a target reaches the exchange at its own time, not at the next market event
+
+- `Simulator/ServerSimulator.cs` — `ExchangeSimulator.FromClientToExchange_OrderTarget` offers each target's exchange time to
+  the clock (`Clock.OnInterject`). Why: the server simulator reads a client's targets after the exchange simulator has
+  offered its queue head, so the clock jumped to the next event and the exchange applied that event's market data before
+  the target (Simulator/spec.txt "A Target Wakes the Clock at Its Exchange Time"). Before, on the MicroOutright MES run of
+  2026-10-22: 18.4% of targets handled over 1 ms late (up to 999 ms), 5 of 801 fills on orders a Replace should already
+  have moved, and the MLK-day `NotInSession` alert (a Replace sent 128 ms before the 18:00 UTC halt, judged after it).
+  1 line. Backtest results change: fewer fills that a cancel or replace would have escaped, better queue positions.
+- `Simulator/ServerSimulator.cs` — the once-a-minute reminder no longer writes `ServerHeader.Timestamp` (OnTickTock writes it
+  every pass, under the row lock; the reminder's unlocked write was a duplicate); it only guarantees a pass each simulated
+  minute, so a quiet market still moves the clock a simulated Workspace follows. Its local function is static (no closure).
+- Verified (scratch, MicroOutright MES/ES 2026-01-01 to 01-20, the same code with and without the line, temp roots,
+  Telegram stubbed): targets handled over 1 ms late 67,753 of 368,706 (18.4%, up to 999 ms) → 0 of 365,403 (every one at
+  exactly send + 10 us); fills on an order its Replace should already have moved 4 → 0; StateIsDone rejects 7 → 2; fills
+  325 → 311, realized profit 1,296.25 → 1,177.50 (the late handling did not only cost the strategy; paths diverge after
+  the first difference). The 10-22 MLK-day Replace did not recur in either run: the strategy has changed since.
+- Note for scratch runs: `Telegram` reads `S:\Telegram.json` whatever the run's root, and a simulation's LoggingServer
+  sends every alert, so a scratch backtest needs Telegram stubbed in its copy.
+- C++: nothing (the simulator is C# only).
+
+---
+
 ## 2026-10-22 — A hidden Mirror keeps its 1 ms timer on Windows 11
 
 - `Tools/LowLatency.cs` — `RaiseTimerResolution` first opts the process out of timer power throttling

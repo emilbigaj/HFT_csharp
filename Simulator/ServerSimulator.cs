@@ -1049,6 +1049,7 @@ public class ExchangeSimulator
         ref OrderTarget orderTargetCopy = ref MemoryMarshal.AsRef<OrderTarget>(dst);
         exchangeTimestamp = orderTargetCopy.OrderHeader.NicTimestamp.AddMicroseconds(ServerSimulator.FromExchangeToNicToClientLatency);
         orderTargetCopy.OrderHeader.ExchangeTimestamp = exchangeTimestamp;
+        Clock.OnInterject(exchangeTimestamp);   // Why: the server reads targets after this end offered its queue head, so the clock would skip to the next market event (see spec.txt)
     }
 
 
@@ -1227,13 +1228,10 @@ public class ServerSimulator
         Clock.Interject += OnInterject;
         Clock.TickTock += OnTickTock;
 
-        void ensureInterjectionForClockUpdate()
+        // Why: a pass at least every simulated minute, so a quiet market still moves the header's clock that a simulated Workspace follows
+        static void ensureInterjectionForClockUpdate()
         {
-            Clock.AddReminder(new Reminder(Clock.Now.AddMinutes(1), ts =>
-            {
-                _server.Context.ServerHeader.GetRef().Timestamp = Clock.Now;
-                ensureInterjectionForClockUpdate();
-            }));
+            Clock.AddReminder(new Reminder(Clock.Now.AddMinutes(1), ts => ensureInterjectionForClockUpdate()));
         }
 
         ensureInterjectionForClockUpdate();

@@ -1351,6 +1351,9 @@ listed.
   file in place (same or longer length) is copied wrongly until it shrinks: keep audits, fills, series and logs
   append-only, as they are. On Windows only, `LowLatency.RaiseTimerResolution` (`timeBeginPeriod(1)` plus the Windows 11
   `PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION` opt-out) keeps a hidden Mirror's 1 ms loop at 1 ms; Linux needs nothing.
+- **C25. 2026-10-23, the simulator hands a target to the exchange at its own time** (C# only, nothing to port; the
+  simulator is not ported): `ExchangeSimulator.FromClientToExchange_OrderTarget` offers each target's exchange time to the
+  clock, so a target is no longer judged after the next market event (Simulator/spec.txt).
 
 ---
 
