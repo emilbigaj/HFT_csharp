@@ -26,6 +26,7 @@ public sealed class WidgetRateLimit : INotifyPropertyChanged
     // The row's id is a CoreGroupId; the name comes from the server's CoreGroups array.
     public string CoreGroup => _coreGroupName;
     public string Duration => _rollingRateLimit.RateLimit.Duration.TotalSeconds.ToString("0.###") + " s";
+    public double DurationSeconds => _rollingRateLimit.RateLimit.Duration.TotalSeconds;   // the Duration column's sort key: "10 s" would sort before "2 s"
     public string Limit => _rollingRateLimit.RateLimit.Limit.ToString("N0");
     public string Count => _count.ToString("N0");
 

@@ -11,6 +11,9 @@ using Tools;
 string mirrorConfigPath = args.Length > 0 ? args[0] : MirrorConfig.s_fileName;
 MirrorConfig mirrorConfig = MirrorConfig.LoadOrCreate(mirrorConfigPath);
 mirrorConfig.ThrowIfInvalid(mirrorConfigPath);
+// Why first, once valid: the console opens with which end this is and the config this run uses, defaults included
+Console.WriteLine($"################### {mirrorConfig.MirrorRole.ToString().ToUpperInvariant()} MIRROR ###################");
+Console.WriteLine($"{Path.GetFullPath(mirrorConfigPath)}{Environment.NewLine}{Json.Serialize(mirrorConfig)}");
 // Why after the checks: a config that cannot work still shows its error in the console it was started from
 if (!mirrorConfig.IsConsoleVisible)
     Application.DetachConsole(Path.Combine(AppContext.BaseDirectory, "Mirror.log"));

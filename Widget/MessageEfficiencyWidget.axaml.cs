@@ -29,8 +29,10 @@ public sealed class WidgetMessageEfficiency : INotifyPropertyChanged
     public string WeightedMessages => _messageEfficiency.WeightedMessages.ToString("N2");
     public string QuantityTraded => _messageEfficiency.QuantityTraded.ToString("N0");
     public string Efficiency => _messageEfficiency.Efficiency.ToString("N2");
+    public double EfficiencyRatio => _messageEfficiency.Efficiency;   // the Efficiency column's sort key: its "N2" text would sort 1,234 before 987
     public string EMTWeightedMessages => _messageEfficiency.EMTWeightedMessages.ToString("N2");
     public string EMTEfficiency => _messageEfficiency.EMTEfficiency.ToString("N2");
+    public double EMTEfficiencyRatio => _messageEfficiency.EMTEfficiency;   // the EMTEfficiency column's sort key, as EfficiencyRatio
 
     public string TierEMT => _messageEfficiency.TierEMT.DailyRawMessages.ToString("N0");
     public string EMTBenchmark => _messageEfficiency.TierEMT.Benchmark.ToString("N0");

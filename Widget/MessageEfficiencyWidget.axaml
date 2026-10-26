@@ -34,13 +34,13 @@
 		</DataGrid.ContextMenu>
 
 		<DataGrid.Columns>
-			<DataGridTextColumn Header="ProductGroupRoot" Binding="{Binding ProductGroupRoot}"           Width="Auto"/>
-			<DataGridTextColumn Header="TradeDate"      Binding="{Binding TradeDate}"            Width="Auto"/>
-			<DataGridTextColumn Header="TradeTime"      Binding="{Binding TradeTime}"            Width="Auto" IsVisible ="false"/>
-			<DataGridTextColumn Header="RawMessages"      Binding="{Binding RawMessages}"            Width="Auto"/>
-			<DataGridTextColumn Header="WeightedMessages" Binding="{Binding WeightedMessages}"       Width="Auto"/>
-			<DataGridTextColumn Header="QuantityTraded"   Binding="{Binding QuantityTraded}"         Width="Auto"/>
-			<DataGridTemplateColumn Header="Efficiency" Width="Auto">
+			<DataGridTextColumn Header="ProductGroupRoot" Binding="{Binding ProductGroupRoot}" SortMemberPath="ProductGroupRoot"           Width="Auto"/>
+			<DataGridTextColumn Header="TradeDate"      Binding="{Binding TradeDate}" SortMemberPath="TradeDate"            Width="Auto"/>
+			<DataGridTextColumn Header="TradeTime"      Binding="{Binding TradeTime}" SortMemberPath="TradeTime"            Width="Auto" IsVisible ="false"/>
+			<DataGridTextColumn Header="RawMessages"      Binding="{Binding RawMessages}" SortMemberPath="RawMessages"            Width="Auto"/>
+			<DataGridTextColumn Header="WeightedMessages" Binding="{Binding WeightedMessages}" SortMemberPath="WeightedMessages"       Width="Auto"/>
+			<DataGridTextColumn Header="QuantityTraded"   Binding="{Binding QuantityTraded}" SortMemberPath="QuantityTraded"         Width="Auto"/>
+			<DataGridTemplateColumn Header="Efficiency" SortMemberPath="EfficiencyRatio" Width="Auto">
 				<DataGridTemplateColumn.CellTemplate>
 					<DataTemplate x:DataType="local:WidgetMessageEfficiency">
 						<Border Background="{Binding EfficiencyBrush}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
@@ -49,8 +49,8 @@
 					</DataTemplate>
 				</DataGridTemplateColumn.CellTemplate>
 			</DataGridTemplateColumn>
-			<DataGridTextColumn Header="EMTWeightedMessages" Binding="{Binding EMTWeightedMessages}" Width="Auto"/>
-			<DataGridTemplateColumn Header="EMTEfficiency" Width="Auto">
+			<DataGridTextColumn Header="EMTWeightedMessages" Binding="{Binding EMTWeightedMessages}" SortMemberPath="EMTWeightedMessages" Width="Auto"/>
+			<DataGridTemplateColumn Header="EMTEfficiency" SortMemberPath="EMTEfficiencyRatio" Width="Auto">
 				<DataGridTemplateColumn.CellTemplate>
 					<DataTemplate x:DataType="local:WidgetMessageEfficiency">
 						<Border Background="{Binding EMTEfficiencyBrush}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
@@ -60,14 +60,14 @@
 				</DataGridTemplateColumn.CellTemplate>
 			</DataGridTemplateColumn>
 
-			<DataGridTextColumn Header="Tier3"           Binding="{Binding Tier3}"                     Width="Auto"/>
-			<DataGridTextColumn Header="Tier3Benchmark"   Binding="{Binding Tier3Benchmark}"           Width="Auto"/>
-			<DataGridTextColumn Header="Tier2"            Binding="{Binding Tier2}"                     Width="Auto"/>
-			<DataGridTextColumn Header="Tier2Benchmark"   Binding="{Binding Tier2Benchmark}"           Width="Auto"/>
-			<DataGridTextColumn Header="Tier1"		      Binding="{Binding Tier1}"                     Width="Auto"/>
-			<DataGridTextColumn Header="Tier1Benchmark"   Binding="{Binding Tier1Benchmark}"           Width="Auto"/>
-			<DataGridTextColumn Header="TierEMT"		  Binding="{Binding TierEMT}"                   Width="Auto"/>
-			<DataGridTextColumn Header="EMTBenchmark"     Binding="{Binding EMTBenchmark}"             Width="Auto"/>
+			<DataGridTextColumn Header="Tier3"           Binding="{Binding Tier3}" SortMemberPath="Tier3"                     Width="Auto"/>
+			<DataGridTextColumn Header="Tier3Benchmark"   Binding="{Binding Tier3Benchmark}" SortMemberPath="Tier3Benchmark"           Width="Auto"/>
+			<DataGridTextColumn Header="Tier2"            Binding="{Binding Tier2}" SortMemberPath="Tier2"                     Width="Auto"/>
+			<DataGridTextColumn Header="Tier2Benchmark"   Binding="{Binding Tier2Benchmark}" SortMemberPath="Tier2Benchmark"           Width="Auto"/>
+			<DataGridTextColumn Header="Tier1"		      Binding="{Binding Tier1}" SortMemberPath="Tier1"                     Width="Auto"/>
+			<DataGridTextColumn Header="Tier1Benchmark"   Binding="{Binding Tier1Benchmark}" SortMemberPath="Tier1Benchmark"           Width="Auto"/>
+			<DataGridTextColumn Header="TierEMT"		  Binding="{Binding TierEMT}" SortMemberPath="TierEMT"                   Width="Auto"/>
+			<DataGridTextColumn Header="EMTBenchmark"     Binding="{Binding EMTBenchmark}" SortMemberPath="EMTBenchmark"             Width="Auto"/>
 		</DataGrid.Columns>
 	</DataGrid>
 </UserControl>

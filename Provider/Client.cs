@@ -270,6 +270,11 @@ public abstract class Client
 
     public ClientContext Context { get; }
     protected readonly ClientSocket _socket;
+    private readonly int _serverProcessId;   // the server this client connected to; a restarted server posts another
+
+    /// True while the server this client connected to is running and still owns the header; false once it has stopped or been replaced (see Spec.md "A strategy ends when its server goes").
+    public bool IsServerAlive => ProcessId.IsAlive(_serverProcessId) && Context.ServerHeader.GetReadonlyRef().ServerProcessId == _serverProcessId;
+
     // CoreGroupIds of the instruments this client has allocated => which execution channels ReadSocket drains.
     private Bitset64 _coreGroupIds = new Bitset64();
 
@@ -317,6 +322,7 @@ public abstract class Client
         try
         {
             Context = new ClientContext(ClientName, ServerName, Access.Write);
+            _serverProcessId = Context.ServerHeader.GetReadonlyRef().ServerProcessId;
 
             _instrumentData = new ReadOnlySocket?[Context.ServerHeader.GetReadonlyRef().InstrumentIds.Length];
 

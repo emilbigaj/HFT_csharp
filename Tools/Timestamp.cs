@@ -241,7 +241,7 @@ public readonly struct Duration : IComparable<Duration>, IEquatable<Duration>
 
 // =============================== Timestamp (with Duration ops) ===============================
 [StructLayout(LayoutKind.Sequential)]
-public readonly struct Timestamp : IComparable<Timestamp>, IEquatable<Timestamp>
+public readonly struct Timestamp : IComparable<Timestamp>, IComparable, IEquatable<Timestamp>
 {
     public readonly long NanosSinceEpoch;
 
@@ -410,6 +410,7 @@ public readonly struct Timestamp : IComparable<Timestamp>, IEquatable<Timestamp>
 
     // Comparisons & equality
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public int CompareTo(Timestamp other) => NanosSinceEpoch.CompareTo(other.NanosSinceEpoch);
+    public int CompareTo(object? other) => other is Timestamp timestamp ? CompareTo(timestamp) : 1;   // Why: grids compare cell values as objects (a sortable time column)
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public bool Equals(Timestamp other) => NanosSinceEpoch == other.NanosSinceEpoch;
     public override bool Equals(object? obj) => obj is Timestamp ts && Equals(ts);
     public override int GetHashCode() => NanosSinceEpoch.GetHashCode();

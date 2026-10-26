@@ -21,7 +21,7 @@ using ChartPanel = Chart.Chart;
 namespace Widget;
 
 [RegisterJson]
-public sealed class ChartWidgetState { public List<ChartPanelState> Panels { get; set; } = new(); }
+public sealed class ChartWidgetState { public List<ChartPanelState> Panels { get; set; } = new(); public List<string> Sessions { get; set; } = new(); }
 [RegisterJson]
 public sealed class ChartPanelState { public string Name { get; set; } = ""; public List<ChartSeriesState> Series { get; set; } = new(); }
 [RegisterJson]
@@ -40,6 +40,7 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
 
     private static readonly IBrush[] s_seriesColors = Palette.ChartSeriesColors;
     private readonly Dictionary<ChartPanel, int> _panelColorIndices = new();   // per panel, the colour index of its next point series
+    private readonly List<SessionShading> _sessionShadings = new();          // the sessions shaded, in the order ticked; the stack draws this list
 
     public ChartWidget()
     {
@@ -53,6 +54,9 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
         InitializeComponent();
 
         ChartControlHost.PointerPressed += OnChartPointerPressed;
+        // One tick-box per session under Add Session, each with its own pale shade
+        for (int sessionIndex = 0; sessionIndex < Session.AllWithHours.Length; sessionIndex++)
+            AddSessionMenuItem.Items.Add(NewSessionMenuItem(new SessionShading(Session.AllWithHours[sessionIndex], Palette.GetRowBackground(s_seriesColors[sessionIndex % s_seriesColors.Length], 0.15))));
 
         AddChartPanel();
     }
@@ -254,6 +258,26 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
         }
     }
 
+    /// A tick-box, ticked while its session is shaded, that shades it or stops shading it.
+    private MenuItem NewSessionMenuItem(SessionShading sessionShading)
+    {
+        MenuItem menuItem = new() { Header = sessionShading.Session.Name, ToggleType = MenuItemToggleType.CheckBox, Tag = sessionShading };
+        menuItem.Click += (_, _) => SetSessionShaded(sessionShading, isShaded: !_sessionShadings.Contains(sessionShading));
+        return menuItem;
+    }
+
+    /// Shades the session behind every panel, or stops, and ticks the menu to match.
+    private void SetSessionShaded(SessionShading sessionShading, bool isShaded)
+    {
+        _sessionShadings.Remove(sessionShading);
+        if (isShaded)
+            _sessionShadings.Add(sessionShading);
+        foreach (MenuItem menuItem in AddSessionMenuItem.Items.OfType<MenuItem>())
+            menuItem.IsChecked = _sessionShadings.Contains((SessionShading)menuItem.Tag!);
+        // Why the same stack again: setting it redraws the plot (ChartControl.Stack)
+        ChartControlHost.Stack = _chartStack;
+    }
+
     /// Disposes and drops the bindings that match: a removed panel's, a removed series', or all of them.
     private void RemoveSeriesBindings(Predicate<SeriesBinding> isRemoved)
     {
@@ -271,7 +295,7 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
         if (_chartStack != null)
             return;
 
-        _chartStack = new ChartStack();
+        _chartStack = new ChartStack { Sessions = _sessionShadings };
         foreach (ChartPanel chartPanel in _chartPanels)
             _chartStack.AddPanel(chartPanel);
         ChartControlHost.Stack = _chartStack;
@@ -300,6 +324,7 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
             }
             chartWidgetState.Panels.Add(chartPanelState);
         }
+        chartWidgetState.Sessions = _sessionShadings.Select(sessionShading => sessionShading.Session.Name).ToList();
         return chartWidgetState.Panels.Count == 0 ? null : Json.Serialize(chartWidgetState);
     }
 
@@ -310,6 +335,7 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
         RemoveSeriesBindings(_ => true);
         _chartPanels.Clear();
         _panelColorIndices.Clear();
+        _sessionShadings.Clear();
         _chartStack = null;
         ChartControlHost.Stack = null;
 
@@ -342,6 +368,13 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
 
         EnsureStackExists();
         UpdateEmptyState();
+
+        // Step 4: the sessions it shaded
+        foreach (MenuItem menuItem in AddSessionMenuItem.Items.OfType<MenuItem>())
+        {
+            SessionShading sessionShading = (SessionShading)menuItem.Tag!;
+            SetSessionShaded(sessionShading, isShaded: chartWidgetState.Sessions.Contains(sessionShading.Session.Name));
+        }
     }
 
     public void Dispose() => RemoveSeriesBindings(_ => true);

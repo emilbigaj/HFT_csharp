@@ -234,18 +234,6 @@ public struct RollingRateLimit
         return count;
     }
 
-    public readonly bool CanSendOrder(Timestamp timestamp)
-    {
-        // Step 1: the window is full
-        if (GetCount(timestamp) >= RateLimit.Limit)
-            return false;
-
-        // Step 2: the send would land in the newest bucket and that bucket is at its burst cap
-        long elapsedNanoseconds = timestamp.NanosSinceEpoch - BucketTimestamp.NanosSinceEpoch;
-        bool isNewestBucketCurrent = elapsedNanoseconds >= 0 && elapsedNanoseconds < BucketNanoseconds;
-        return !isNewestBucketCurrent || Counts[BucketIndex] < byte.MaxValue;
-    }
-
     public bool TrySendOrder(Timestamp timestamp)
     {
         // Step 1: roll the ring up to now, so nothing in it is expired and Total is the count
@@ -315,39 +303,5 @@ public struct RollingRateLimit
     }
 
     public override readonly string ToString() => Json.Serialize(this);
-}
-
-public sealed class SessionRateLimit
-{
-    private readonly int _limit;
-
-    // Messages sent since the last Reset, which the session roll calls.
-    public int Count { get; private set; }
-
-    public SessionRateLimit(int limit)
-    {
-        _limit = limit;
-        Count = 0;
-    }
-
-    public bool CanSendOrder(Timestamp timestamp)
-    {
-        return Count < _limit;
-    }
-
-    public bool TrySendOrder(Timestamp timestamp)
-    {
-        if (!CanSendOrder(timestamp))
-        {
-            return false;
-        }
-        Count++;
-        return true;
-    }
-
-    public void Reset()
-    {
-        Count = 0;
-    }
 }
 

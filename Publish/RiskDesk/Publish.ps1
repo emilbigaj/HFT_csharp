@@ -1,12 +1,12 @@
-# Builds the risk-desk packages, one per server flavour (NewRelease, Production): the Remote Mirror and the Workspace as standalone
-# exes for any x64 Windows PC, with Start.bat, the flavour's folder (its two configs and its Data folder template: the server's folder
-# and default layout) and the short guide beside them, into Staging\BigajRiskDesk_<flavour> beside this script, each zipped to
-# Staging\BigajRiskDesk_<flavour>.zip (see Spec.md "Risk desk package"). Sends nothing anywhere. Run from anywhere: .\Publish\RiskDesk\Publish.ps1
+# Builds the risk-desk packages, one per folder in Templates (Adrian, NewRelease, Production, ...): the Remote Mirror and the Workspace as
+# standalone exes for any x64 Windows PC, with Start.bat, the template's files (its two configs and its Data folder: the server's folder
+# and default layouts) and the short guide beside them, into Staging\BigajRiskDesk_<template> beside this script, each zipped to
+# Staging\BigajRiskDesk_<template>.zip (see Spec.md "Risk desk package"). Sends nothing anywhere. Run from anywhere: .\Publish\RiskDesk\Publish.ps1
 $ErrorActionPreference = 'Stop'
 $solutionDirectory = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $stageDirectory = Join-Path $PSScriptRoot 'Staging'
 $buildDirectory = Join-Path $stageDirectory 'Build'   # the exes, built once and copied into every package
-$flavourNames = 'NewRelease', 'Production'            # each a folder beside this script: MirrorConfig.json, WorkspaceConfig.json, Data\
+$templateDirectories = Get-ChildItem (Join-Path $PSScriptRoot 'Templates') -Directory   # each: MirrorConfig.json, WorkspaceConfig.json, Data\
 
 # Step 1: an empty build folder, so nothing from an earlier build ships
 if (Test-Path $buildDirectory) { Remove-Item -Recurse -Force $buildDirectory }
@@ -27,17 +27,17 @@ $guideSourceDirectory = Join-Path $PSScriptRoot 'Guide'
 $guideHtml = [System.IO.File]::ReadAllText((Join-Path $guideSourceDirectory 'RiskDeskGuide.html'))
 $guideImagePaths = [regex]::Matches($guideHtml, 'images/[^"]+\.png') | ForEach-Object { $_.Value } | Sort-Object -Unique
 
-foreach ($flavourName in $flavourNames) {
-    # Step 5: an empty package folder per flavour, named so its zip unzips to BigajRiskDesk_<flavour>
-    $packageDirectory = Join-Path $stageDirectory "BigajRiskDesk_$flavourName"
+foreach ($templateDirectory in $templateDirectories) {
+    # Step 5: an empty package folder per template, named so its zip unzips to BigajRiskDesk_<template>
+    $packageDirectory = Join-Path $stageDirectory "BigajRiskDesk_$($templateDirectory.Name)"
     $zipPath = "$packageDirectory.zip"
     if (Test-Path $packageDirectory) { Remove-Item -Recurse -Force $packageDirectory }
     New-Item -ItemType Directory -Force $packageDirectory | Out-Null
 
-    # Step 6: the exes, the launcher, the flavour's configs and Data folder, and the guide
+    # Step 6: the exes, the launcher, the template's configs and Data folder, and the guide
     Copy-Item (Join-Path $buildDirectory '*') $packageDirectory -Recurse
     Copy-Item (Join-Path $PSScriptRoot 'Start.bat') $packageDirectory
-    Copy-Item (Join-Path $PSScriptRoot "$flavourName\*") $packageDirectory -Recurse
+    Copy-Item (Join-Path $templateDirectory.FullName '*') $packageDirectory -Recurse
     New-Item -ItemType Directory -Force (Join-Path $packageDirectory 'images') | Out-Null
     foreach ($imagePath in $guideImagePaths) {
         Copy-Item (Join-Path $guideSourceDirectory $imagePath) (Join-Path $packageDirectory $imagePath)

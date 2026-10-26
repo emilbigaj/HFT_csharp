@@ -25,6 +25,7 @@ public sealed class WidgetPosition : INotifyPropertyChanged
     public int StrategyId => _position.PositionHeader.GetReadonlyRef().OrderHeader.OrderId.StrategyId;
     public AlgoStatus AlgoStatus => _position.AlgoStatus;
     public string AvgPriceStr => _profit.AvgPrice.ToString(_avgPriceFormat);
+    public double AvgPrice => _profit.AvgPrice;   // the AvgPrice column's sort key: its text would sort 10,000 before 9,000
     public double Profit => _profit.Total;
     public double Floating => _profit.Floating;
     public Side Side => (Side)Math.Sign(_profit.Quantity);

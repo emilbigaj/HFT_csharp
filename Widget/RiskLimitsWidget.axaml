@@ -34,22 +34,22 @@
 		</DataGrid.ContextMenu>
 
 		<DataGrid.Columns>
-			<DataGridTextColumn Header="ShortSymbol"     Binding="{Binding ShortSymbol}"           Width="Auto"/>
-			<DataGridTextColumn Header="Symbol"          Binding="{Binding Symbol}"                Width="Auto" IsVisible="False"/>
-			<DataGridTextColumn Header="InstrumentId"    Binding="{Binding InstrumentId}"          Width="Auto" IsVisible="False"/>
-			<DataGridTextColumn Header="MaxOrderQuantity"     Binding="{Binding MaxOrderQuantity}"   Width="Auto"/>
-			<DataGridTextColumn Header="MaxPositionQuantity"  Binding="{Binding MaxPositionQuantity}" Width="Auto"/>
-			<DataGridTextColumn Header="MaxFillsPerSession"   Binding="{Binding MaxFillsPerSession}"  Width="Auto"/>
-			<DataGridTextColumn Header="Position"                     Binding="{Binding PositionQuantity}"             Width="Auto"/>
-			<DataGridTextColumn Header="FillsThisSession"             Binding="{Binding FillsThisSession}"             Width="Auto"/>
-			<DataGridTextColumn Header="WorstWorkingLongQuantity"     Binding="{Binding WorstWorkingLongQuantity}"     Width="Auto" IsVisible="False"/>
-			<DataGridTextColumn Header="WorstWorkingLongPosition"     Binding="{Binding WorstWorkingLongPosition}"     Width="Auto"/>
-			<DataGridTextColumn Header="WorstWorkingShortQuantity"    Binding="{Binding WorstWorkingShortQuantity}"    Width="Auto" IsVisible="False"/>
-			<DataGridTextColumn Header="WorstWorkingShortPosition"    Binding="{Binding WorstWorkingShortPosition}"    Width="Auto"/>
-			<DataGridTextColumn Header="WorstWorkingFills"            Binding="{Binding WorstWorkingFills}"            Width="Auto" IsVisible="False"/>
-			<DataGridTextColumn Header="WorstWorkingFillsThisSession" Binding="{Binding WorstWorkingFillsThisSession}" Width="Auto"/>
-			<DataGridTextColumn Header="Timestamp"       Binding="{Binding Timestamp}"             Width="Auto"/>
-			<DataGridTextColumn Header="File"            Binding="{Binding RiskLimitFileName}"     Width="*" IsVisible="False"/>
+			<DataGridTextColumn Header="ShortSymbol"     Binding="{Binding ShortSymbol}" SortMemberPath="ShortSymbol"           Width="Auto"/>
+			<DataGridTextColumn Header="Symbol"          Binding="{Binding Symbol}" SortMemberPath="Symbol"                Width="Auto" IsVisible="False"/>
+			<DataGridTextColumn Header="InstrumentId"    Binding="{Binding InstrumentId}" SortMemberPath="InstrumentId"          Width="Auto" IsVisible="False"/>
+			<DataGridTextColumn Header="MaxOrderQuantity"     Binding="{Binding MaxOrderQuantity}" SortMemberPath="MaxOrderQuantity"   Width="Auto"/>
+			<DataGridTextColumn Header="MaxPositionQuantity"  Binding="{Binding MaxPositionQuantity}" SortMemberPath="MaxPositionQuantity" Width="Auto"/>
+			<DataGridTextColumn Header="MaxFillsPerSession"   Binding="{Binding MaxFillsPerSession}" SortMemberPath="MaxFillsPerSession"  Width="Auto"/>
+			<DataGridTextColumn Header="Position"                     Binding="{Binding PositionQuantity}" SortMemberPath="PositionQuantity"             Width="Auto"/>
+			<DataGridTextColumn Header="FillsThisSession"             Binding="{Binding FillsThisSession}" SortMemberPath="FillsThisSession"             Width="Auto"/>
+			<DataGridTextColumn Header="WorstWorkingLongQuantity"     Binding="{Binding WorstWorkingLongQuantity}" SortMemberPath="WorstWorkingLongQuantity"     Width="Auto" IsVisible="False"/>
+			<DataGridTextColumn Header="WorstWorkingLongPosition"     Binding="{Binding WorstWorkingLongPosition}" SortMemberPath="WorstWorkingLongPosition"     Width="Auto"/>
+			<DataGridTextColumn Header="WorstWorkingShortQuantity"    Binding="{Binding WorstWorkingShortQuantity}" SortMemberPath="WorstWorkingShortQuantity"    Width="Auto" IsVisible="False"/>
+			<DataGridTextColumn Header="WorstWorkingShortPosition"    Binding="{Binding WorstWorkingShortPosition}" SortMemberPath="WorstWorkingShortPosition"    Width="Auto"/>
+			<DataGridTextColumn Header="WorstWorkingFills"            Binding="{Binding WorstWorkingFills}" SortMemberPath="WorstWorkingFills"            Width="Auto" IsVisible="False"/>
+			<DataGridTextColumn Header="WorstWorkingFillsThisSession" Binding="{Binding WorstWorkingFillsThisSession}" SortMemberPath="WorstWorkingFillsThisSession" Width="Auto"/>
+			<DataGridTextColumn Header="Timestamp"       Binding="{Binding Timestamp}" SortMemberPath="Timestamp"             Width="Auto"/>
+			<DataGridTextColumn Header="File"            Binding="{Binding RiskLimitFileName}" SortMemberPath="RiskLimitFileName"     Width="*" IsVisible="False"/>
 		</DataGrid.Columns>
 	</DataGrid>
 </UserControl>

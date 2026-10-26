@@ -73,6 +73,22 @@ here; the reasoning lives here.
   own orders need no such wait: its cancel follows its Create on the same channel. Hiding the order, rather than guarding
   each action (context menu, Cancel All, amend, ladder), means no widget can act on it too early. The cost: another
   client's order is invisible for the microseconds before the server reads it (longer in a paused simulation).
+- **Every grid column sorts (2026-10-26).** A header click sorts its column, a second click reverses it. Each column names
+  its key (`SortMemberPath`): the grids use compiled bindings, from which the DataGrid infers none. A column that shows
+  formatted text sorts by the number behind it (prices by ticks or price, `AvgPrice`, `EfficiencyRatio`,
+  `DurationSeconds`), since "10,000" sorts before "9,000" as text. The DataGrid finds the key by name (reflection), which
+  AOT trimming strips, so `Workspace.csproj` roots the `Widget` assembly (`TrimmerRootAssembly`); before, no column sorted
+  in a published desk Workspace (a sort by name left the rows as they were, without an error), though it did under the
+  debugger. `Timestamp` implements `IComparable` because the grid compares cell values as objects. Avalonia has no
+  unsorted state: a widget's own order (Orders by symbol and price, Fills newest first) returns when it is reopened. A row
+  whose value changes in place keeps its place until the next click; added and removed rows land in order. Fills and the
+  Audit Trail sort the rows loaded so far (older pages load as the grid scrolls).
+- **Chart sessions (2026-10-24).** A chart's right-click menu has *Add Session* with a tick-box per `Session.AllWithHours`
+  (every coded session but Perpetual, which is always open). A ticked session is shaded in its own pale colour across
+  every panel, behind the series, from each open to its close (`Session.EnumerateOpenIntervals`: the session's time
+  zone with its daylight saving, and its weekend close); the shading runs past the data to the session's next close, so the
+  session open now shows. A saved layout keeps the ticked sessions by name. The hours are `Session`'s weekly schedule: no
+  holidays or early closes, and most non-US sessions are coded 10:00-16:00 local as placeholders.
 
 ## The era rule (algo tick consistency)
 
@@ -749,6 +765,27 @@ not from the action byte. An exchange adapter maps Reduce to the venue's quantit
 - Accepted residual (unchanged): a manual order booked to this strategy carries another client's id; if it fills during
   the client's startup its fill can be counted twice (operating rule: no manual orders on an algo while it starts).
 
+### A strategy ends when its server goes (2026-10-23)
+
+- **Why:** a server that shuts down clears every client's instrument allocations (`ServerSocket.Dispose` → `DeallocateClient`),
+  which is right, but nothing told the strategy. Its timers kept reading books no longer allocated: MicroOutright's
+  once-a-second Profit series raised "instrumentId has not been allocated" every second until someone stopped it, and after
+  a restart the strategy carried on with state from before it.
+- **The rule:** `Client.IsServerAlive` is false once the server the client connected to has exited, or its header names
+  another process (a restarted server); the same test `RemoteClient.IsSessionEnded` makes for a desk, inverted. In realtime a
+  `Scenario` checks it once a second on the clock thread (a `TickTocker` made before the strategies', so it runs ahead of
+  their timers); when it turns true, one alert ("server … has stopped or restarted; … ends") and a flag the strategy thread's
+  loop ends on. The loop then disposes the `AlertManager` (sending that alert) and runs the exit actions. The strategy is
+  started again by hand once the server is up, so every start is fresh; after a server restart its algos come back paused.
+- **Why a flag, not an exit from the clock thread:** the exit actions include stopping the clock, which waits for the clock
+  thread to end; only the strategy thread may run them.
+- **Cost:** one `volatile bool` read per pass of the strategy loop (never written until the end); one process-alive system
+  call a second on the clock thread; nothing allocated until the alert.
+- **Not built:** reconnecting in place (every strategy would need a teardown of its timers and series, and its own state
+  reconciled with the new server). An unattended restart, if wanted, is the same end plus an exit code and a restart loop
+  around the process; MicroOutright would then take its environment and CoreGroup as arguments instead of console prompts.
+- **Residual:** a strategy timer that fires in the same second, before the check, can still raise one last error.
+
 ## Algo: Target and TryTarget
 
 ### Strict Target fails loudly; TryTarget never sends a refusal it can see
@@ -983,6 +1020,31 @@ Nothing refuses on a client's behalf after it sent an order: a remote desk's ord
 the server, and a call clicked on a stale screen is dropped by the Local Mirror before it reaches one (see "Remote
 workspaces"). A refusal of an amend or a cancel never deallocates: its order may be working at the server, whose state
 rows still decide its end.
+
+## NIC timestamps (2026-10-24)
+
+`OrderHeader.NicTimestamp` is when a message reached this machine, or, for a message the server or a client makes, when
+it was made. Each stamp has one owner: whoever receives or creates the message.
+
+- **From the exchange** (order states, fills, rejects): stamped where it is received. Live (C++): the router's NIC
+  hardware stamp when it has one, else the kernel-socket read stamps `Clock::UtcNow()` as it reads the message; zero never
+  reaches the server. Simulation: `ServerSimulator` stamps each at its arrival time (exchange time + latency). The server
+  keeps the stamp: `OnOrderState`, `OnOrderRejected` and `OnFill` write none. A fill's state and its fills share the one
+  stamp of their execution report, which keeps ring order (state, fill, position) in the audit.
+- **Made by the server**: stamped `Clock.Now` where it is made: its own refusal (`OnOrderTarget`, after
+  `NewOrderRejected`, whose header is the target's and so carries the client's send time), the InFlight state, the cancels
+  it sends, position rows. A refused Create's Done takes its reject's stamp (`NewRejected`), so the two match whichever
+  side refused.
+- **Made by a client**: its targets, stamped `Clock.Now` as sent (`Client.Send`).
+- **Why not "stamp when zero":** the server's own refusal arrives at `OnOrderRejected` already stamped (the client's send
+  time), so a zero test would keep it, and the reject would sort before the InFlight state it answers. Until 2026-10-24
+  the server overwrote every exchange message's stamp with its own clock, so a hardware stamp never reached the row.
+- **Clock:** a hardware stamp must be on the same clock as `Clock::UtcNow()` (the NIC's clock disciplined to the system
+  clock); Logging sorts each audit by `NicTimestamp`, and strategy latency compares `TriggerTimestamp` with send stamps.
+- Checked (scratch MicroOutright backtest, 2026-01-01 to 01-20, before and after): every audit record's stamps identical;
+  the server's audit identical record for record. The strategy audit's record order differed, as it does between any two
+  runs: Logging writes a few dozen records per run out of stamp order (22 to 39 in three runs), so sort by
+  `NicTimestamp` before reading cause and effect.
 
 ## Process guards aligned with C++ (2026-10-05)
 
@@ -1494,7 +1556,8 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   - *Off unless the desk asks (2026-10-22).* `MirrorConfig.IsFolderSyncOn` (default `false`): a desk syncs only when its
     config says `true`; otherwise `RunRemote` builds no `FileSyncRemote`, the desk's GuiList says `IsFolderSyncOn = false`,
     and the box sends it nothing (its Audit Trail, Fills and Charts stay empty; rows and orders are unchanged). The
-    risk-desk packages leave it out, so they are off. It is the desk's preference, not access control: a desk that edits
+    risk team's package (the Production template) leaves it out, so it is off; our own desks' templates (NewRelease,
+    Adrian) turn it on (2026-10-23: the risk team no longer gets NewRelease). It is the desk's preference, not access control: a desk that edits
     its config to `true` is served, so keeping files from a desk needs a box-side rule (not built).
   - *No subscription message (2026-10-22).* The GuiList a desk already sends every second carries one byte,
     `MirrorGuiList.IsFolderSyncOn`, and the box derives the folders from the listed GUI names itself
@@ -1702,15 +1765,16 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
 Both deploy scripts live under `Publish\`, each building into a `Staging` folder beside itself (ignored by git):
 `Publish\CME\PublishAndDeploy.ps1` publishes the solution for Linux into `Publish\CME\Staging` and sends it to the CME box
 (rsync plus a dated snapshot there); `Publish\RiskDesk\Publish.ps1` builds the exes once into
-`Publish\RiskDesk\Staging\Build`, then one desk package per server flavour, `Staging\BigajRiskDesk_NewRelease` and
-`Staging\BigajRiskDesk_Production`, each zipped beside its folder, sending nothing (2026-10-20; before, one
-`BigajRiskDesk` package).
+`Publish\RiskDesk\Staging\Build`, then one desk package per folder in `Publish\RiskDesk\Templates` (Adrian,
+NewRelease, Production, ...), `Staging\BigajRiskDesk_<template>`, each zipped beside its folder, sending nothing
+(2026-10-23; from 2026-10-20 two fixed flavour folders beside the script; before, one `BigajRiskDesk` package). A new
+desk is a new template folder; the script needs no edit.
 
-A desk gets the zip for the server it watches. It unzips to a
-`BigajRiskDesk_<flavour>` folder holding `Mirror.exe`, `Workspace.exe` (NativeAOT, no .NET install, built for `x86-64-v3` (AVX2):
+A desk gets the zip it is set up for. It unzips to a
+`BigajRiskDesk_<template>` folder holding `Mirror.exe`, `Workspace.exe` (NativeAOT, no .NET install, built for `x86-64-v3` (AVX2):
 the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs), Avalonia's three native libraries,
-`Start.bat`, the short guide, and everything in `Publish\RiskDesk\<flavour>\`: that flavour's `MirrorConfig.json` and
-`WorkspaceConfig.json` and its `Data` folder template (the server's folder with a default layout).
+`Start.bat`, the short guide, and everything in `Publish\RiskDesk\Templates\<template>\`: its `MirrorConfig.json` and
+`WorkspaceConfig.json` and its `Data` folder (the server's folder, and any strategy's, with default layouts).
 - **`Start.bat`**, the double-click: starts this folder's `Mirror.exe` unless one runs from this folder (matched by full
   path, so a Mirror run from elsewhere on the same PC does not count), with the folder as its working directory, so it
   reads `MirrorConfig.json` there; then starts `Workspace.exe`. Both can start at once: the Workspace waits for the

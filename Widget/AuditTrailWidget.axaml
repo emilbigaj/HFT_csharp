@@ -27,7 +27,7 @@
                   ScrollViewer.AllowAutoHide="False"
 				  VerticalScroll="OnScrollChanged"
                   AutoGenerateColumns="False"
-                  CanUserSortColumns="False"
+                  CanUserSortColumns="True"
                   CanUserResizeColumns="True"
                   CanUserReorderColumns="True"
                   IsReadOnly="True"
@@ -40,24 +40,24 @@
 			</DataGrid.ContextMenu>
 
 			<DataGrid.Columns>
-				<DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" Width="Auto"/>
-				<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" Width="Auto" IsVisible="False"/>
-				<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentId}" IsVisible="False" Width="Auto"/>
-				<DataGridTextColumn Header="ClientOrderId" Binding="{Binding ClientOrderId}" Width="Auto"/>
-				<DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="Auto"/>
-				<DataGridTextColumn Header="Seq" Binding="{Binding Seq}" Width="Auto"/>
-				<DataGridTextColumn Header="Reason" Binding="{Binding Reason}" Width="Auto"/>
-				<DataGridTextColumn Header="Type" Binding="{Binding OrderTypeName}" Width="Auto"/>
-				<DataGridTextColumn Header="Action" Binding="{Binding ActionName}" Width="Auto"/>
-				<DataGridTextColumn Header="Side" Binding="{Binding Side}" Width="Auto"  IsVisible="False"/>
-				<DataGridTextColumn Header="Price" Binding="{Binding PriceStr}" Width="Auto"/>
-				<DataGridTextColumn Header="Ticks" Binding="{Binding Ticks}" Width="Auto"  IsVisible="False"/>
-				<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity}" Width="Auto"/>
-				<DataGridTextColumn Header="Working" Binding="{Binding WorkingQuantity}" Width="Auto"/>
-				<DataGridTextColumn Header="Filled" Binding="{Binding QuantityFilled}" Width="Auto"/>
-				<DataGridTextColumn Header="Timestamp" Binding="{Binding Timestamp}" Width="Auto"/>
-				<DataGridTextColumn Header="ExchangeTimestamp" Binding="{Binding ExchangeTimestamp}" Width="Auto"/>
-				<DataGridTextColumn Header="NicTimestamp" Binding="{Binding NicTimestamp}" Width="Auto"/>
+				<DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" SortMemberPath="ShortSymbol" Width="Auto"/>
+				<DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" SortMemberPath="Symbol" Width="Auto" IsVisible="False"/>
+				<DataGridTextColumn Header="InstrumentId" Binding="{Binding InstrumentId}" SortMemberPath="InstrumentId" IsVisible="False" Width="Auto"/>
+				<DataGridTextColumn Header="ClientOrderId" Binding="{Binding ClientOrderId}" SortMemberPath="ClientOrderId" Width="Auto"/>
+				<DataGridTextColumn Header="Source" Binding="{Binding Source}" SortMemberPath="Source" Width="Auto"/>
+				<DataGridTextColumn Header="Seq" Binding="{Binding Seq}" SortMemberPath="Seq" Width="Auto"/>
+				<DataGridTextColumn Header="Reason" Binding="{Binding Reason}" SortMemberPath="Reason" Width="Auto"/>
+				<DataGridTextColumn Header="Type" Binding="{Binding OrderTypeName}" SortMemberPath="OrderTypeName" Width="Auto"/>
+				<DataGridTextColumn Header="Action" Binding="{Binding ActionName}" SortMemberPath="ActionName" Width="Auto"/>
+				<DataGridTextColumn Header="Side" Binding="{Binding Side}" SortMemberPath="Side" Width="Auto"  IsVisible="False"/>
+				<DataGridTextColumn Header="Price" Binding="{Binding PriceStr}" SortMemberPath="Price" Width="Auto"/>
+				<DataGridTextColumn Header="Ticks" Binding="{Binding Ticks}" SortMemberPath="Ticks" Width="Auto"  IsVisible="False"/>
+				<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity}" SortMemberPath="Quantity" Width="Auto"/>
+				<DataGridTextColumn Header="Working" Binding="{Binding WorkingQuantity}" SortMemberPath="WorkingQuantity" Width="Auto"/>
+				<DataGridTextColumn Header="Filled" Binding="{Binding QuantityFilled}" SortMemberPath="QuantityFilled" Width="Auto"/>
+				<DataGridTextColumn Header="Timestamp" Binding="{Binding Timestamp}" SortMemberPath="Timestamp" Width="Auto"/>
+				<DataGridTextColumn Header="ExchangeTimestamp" Binding="{Binding ExchangeTimestamp}" SortMemberPath="ExchangeTimestamp" Width="Auto"/>
+				<DataGridTextColumn Header="NicTimestamp" Binding="{Binding NicTimestamp}" SortMemberPath="NicTimestamp" Width="Auto"/>
 			</DataGrid.Columns>
 		</DataGrid>
 	</Grid>

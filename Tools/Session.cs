@@ -138,6 +138,9 @@ public struct Session
         new TimeSpan(16, 0, 0),
         true
     );
+    // Every session above with opening hours, in this order (the chart's Add Session menu); Perpetual, open all day, is left out. Why after them: static fields initialise in order
+    public static Session[] AllWithHours { get; } = [Europe, NewYork, CME, Chicago, IdealPro, Australia, NewZealand, Singapore, London, China, Japan, SouthAfrica, Russia];
+
     public Session(string name, TimeZoneInfo timeZoneInfo, TimeSpan open, TimeSpan close, bool doesCloseForWeekend)
     {
         Name = name;
@@ -307,6 +310,18 @@ public struct Session
     {
         DateTime dt = GetNextOpen(timestamp.ToDateTime, TimeZoneInfo.Utc);
         return Timestamp.FromDateTime(dt);
+    }
+
+    /// Each stretch the session is open that overlaps [start, end): from its open (start itself when already open) to its close.
+    public IEnumerable<(Timestamp Open, Timestamp Close)> EnumerateOpenIntervals(Timestamp start, Timestamp end)
+    {
+        Timestamp _open = Contains(start) ? start : GetNextOpen(start);
+        while (_open < end)
+        {
+            Timestamp close = GetNextClose(_open);
+            yield return (_open, close);
+            _open = GetNextOpen(close);
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -28,6 +28,7 @@ public class Scenario
     public Timestamp SimulationBegin { get; set; } = Timestamp.MinValue;
     public Timestamp SimulationEnd { get; set; } = Timestamp.MaxValue;
     public ServerSimulator? ServerSimulator { get; private set; }
+    private volatile bool _isServerAlive = true;   // cleared once by the clock thread when the server goes; the strategy thread's loop ends on it
 
     public virtual FileSystemPath DefaultTickHistoryDirectoryPath { get; } = $"Z:\\TickHistory\\Databento\\";
     public virtual FileSystemPath DefaultInstrumentDetailsDirectoryPath { get; } = $"Z:\\InstrumentDetails\\Databento\\";
@@ -166,6 +167,9 @@ public class Scenario
         AlertManager = new AlertManager(Client.Context);
         Clock.Exception += AlertManager.OnException;
         Client.OrderRejected += (in orderRejected) => AlertManager.OnOrderRejected(orderRejected, "");
+        // Why before the strategies: at each second this check runs ahead of their timers, which would read a server that is gone
+        if (Clock.Mode == ClockMode.Realtime)
+            new TickTocker("Server", (int)Frequency.Second, PollServerProcessId);
 
         BuildStrategies();
 
@@ -179,7 +183,7 @@ public class Scenario
             GC.TryStartNoGCRegion(64 * 1024 * 1024, true);
 
             Thread.CurrentThread.Name = Client.ClientName;
-            while (!Application.IsExiting)
+            while (!Application.IsExiting && _isServerAlive)
             {
                 try
                 {
@@ -192,6 +196,8 @@ public class Scenario
                 X86BaseWrapper.Pause();
             }
 
+            // Why dispose first: it sends the queued alert (the server's end) before the exit actions tear the process down
+            AlertManager.Dispose();
             // IsExiting means the exit chain has STARTED on another thread (Ctrl+C handler); join it
             // so Main doesn't return and let CLR shutdown kill that thread mid-action.
             Application.OnExit(null, null);
@@ -201,6 +207,15 @@ public class Scenario
             Thread.CurrentThread.Name = "Clock";
             Clock.Start();
         }
+    }
+
+    // Once a second on the clock thread: when the server this strategy connected to has stopped or been replaced, one alert and the strategy ends (see Spec.md "A strategy ends when its server goes").
+    private void PollServerProcessId(Timestamp timestamp)
+    {
+        if (!_isServerAlive || Client.IsServerAlive)
+            return;
+        AlertManager.OnException(new InvalidOperationException($"Scenario.PollServerProcessId: server {ServerName} has stopped or restarted; {Client.ClientName} ends: start it again once the server is up"));
+        _isServerAlive = false;
     }
 
     public virtual void BuildStrategies()

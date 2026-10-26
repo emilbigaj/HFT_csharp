@@ -34,10 +34,10 @@
 		</DataGrid.ContextMenu>
 
 		<DataGrid.Columns>
-			<DataGridTextColumn Header="CoreGroup" Binding="{Binding CoreGroup}" Width="Auto"/>
-			<DataGridTextColumn Header="Duration"  Binding="{Binding Duration}"  Width="Auto"/>
-			<DataGridTextColumn Header="Limit"     Binding="{Binding Limit}"     Width="Auto"/>
-			<DataGridTextColumn Header="Count"     Binding="{Binding Count}"     Width="Auto"/>
+			<DataGridTextColumn Header="CoreGroup" Binding="{Binding CoreGroup}" SortMemberPath="CoreGroup" Width="Auto"/>
+			<DataGridTextColumn Header="Duration"  Binding="{Binding Duration}" SortMemberPath="DurationSeconds"  Width="Auto"/>
+			<DataGridTextColumn Header="Limit"     Binding="{Binding Limit}" SortMemberPath="Limit"     Width="Auto"/>
+			<DataGridTextColumn Header="Count"     Binding="{Binding Count}" SortMemberPath="Count"     Width="Auto"/>
 		</DataGrid.Columns>
 	</DataGrid>
 </UserControl>

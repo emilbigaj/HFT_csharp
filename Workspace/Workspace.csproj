@@ -12,6 +12,8 @@
     <ProjectReference Include="..\Chart\Chart.csproj" />
     <ProjectReference Include="..\Widget\Widget.csproj" />
     <ProjectReference Include="..\Provider\Provider.csproj" />
+    <!-- Why: grids sort by a column's property name (reflection), which AOT trimming strips from the widgets' row classes (see Spec.md "Workspaces") -->
+    <TrimmerRootAssembly Include="Widget" />
 </ItemGroup>
 
 

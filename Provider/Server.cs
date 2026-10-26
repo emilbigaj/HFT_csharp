@@ -445,9 +445,9 @@ public class Server : IDisposable
         }
     }
 
+    // Keeps the state's NIC stamp: whoever received it from the exchange stamped it (see Spec.md "NIC timestamps")
     public OrderState OnOrderState(ref OrderState orderState)
     {
-        orderState.OrderHeader.NicTimestamp = Clock.Now;
         ref OrderState existingOrderState = ref WriteOrderState(ref orderState);
         WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
         OrderState?.Invoke(in existingOrderState);
@@ -501,7 +501,6 @@ public class Server : IDisposable
                 orderState.NewRejected(in orderRejected, out OrderState rejectedState);
                 OnOrderState(ref rejectedState);
             }
-            orderRejected.OrderHeader.NicTimestamp = Clock.Now;
             _riskLayer.OnOrderRejected(in orderRejected);
             Reject(in orderRejected, message);
             return orderRejected;
@@ -550,6 +549,7 @@ public class Server : IDisposable
         else
         {
             orderTarget.NewOrderRejected(orderRejectedReasons, OrderRejectedSource.Server, out OrderRejected orderRejected);
+            orderRejected.OrderHeader.NicTimestamp = Clock.Now;   // Why: the server's own refusal is made now; the header it copied carries the client's send time
             OnOrderRejected(ref orderRejected, "Rejected by Server Risk Layer");
         }
     }
@@ -642,15 +642,13 @@ public class Server : IDisposable
         if (Math.Abs(orderState.QuantityFilled) <= Math.Abs(existingOrderState.QuantityFilled))
             return;
 
-        Timestamp now = Clock.Now;
-        orderState.OrderHeader.NicTimestamp = now;   // same stamp as its fills: equal NIC keeps ring order (state, fill, position) in the audit
-        foreach (ref Fill fill in fills)
+        // Why no stamp here: the receiver gave the state and its fills one NIC stamp, which keeps ring order (state, fill, position) in the audit
+        foreach (ref readonly Fill fill in fills)
         {
             // Leg ids differ from the order's only in the InstrumentId bits, so GlobalIndex (client +
             // local slot) is the belongs-to-this-order check plain id equality can no longer be.
             if (fill.OrderHeader.OrderId.GlobalIndex != orderState.OrderHeader.OrderId.GlobalIndex)
                 throw new ArgumentOutOfRangeException(nameof(fills), "Server.OnFill: fill does not belong to the order");
-            fill.OrderHeader.NicTimestamp = now;
         }
 
         int strategyId = orderState.OrderHeader.OrderId.StrategyId;

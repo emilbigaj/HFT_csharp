@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using Avalonia.Media;
 using Tools;
 
 namespace Chart;
@@ -33,6 +34,9 @@ public sealed class Chart
     public YAxis GetAxis(YAxisSide side) => side == YAxisSide.Left ? LeftAxis : RightAxis;
 }
 
+/// A session the chart shades while it is open, and the brush it shades with.
+public readonly record struct SessionShading(Session Session, IBrush Brush);
+
 public sealed class ChartStack
 {
     private readonly List<Chart> _stack;
@@ -49,6 +53,7 @@ public sealed class ChartStack
     public double DomainStart => _hasDomain ? _domainStart : 0.0;
     public double DomainEnd => _hasDomain ? _domainEnd : 0.0;
     public double MinimumViewSpanNs { get; set; } = Duration.NanosecondsPerSecond;
+    public List<SessionShading> Sessions { get; set; } = new();   // shaded behind every panel while open; the widget's list
 
     public ChartStack()
     {

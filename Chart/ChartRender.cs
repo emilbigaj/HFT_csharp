@@ -6,6 +6,7 @@ using System.Linq;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
+using Tools;
 
 namespace Chart;
 
@@ -84,6 +85,10 @@ public sealed class ChartRender : Control
             // Draw Vertical Grid
             if (globalHasData && range.Span > 0)
                 DrawVerticalGrid(ctx, ticks, chartRect.Top, chartRect.Bottom, xScale, xOffset);
+
+            // Draw Session hours, behind every panel's series
+            if (globalHasData && range.Span > 0)
+                DrawSessions(ctx, Stack.Sessions, range, chartRect, xScale, xOffset);
 
             // Render Panels
             foreach (var p in panels)
@@ -180,6 +185,22 @@ public sealed class ChartRender : Control
         }
     }
 
+
+    // Shades each session's open hours from its open to its close, across every panel, clipped to the visible range.
+    private static void DrawSessions(DrawingContext ctx, List<SessionShading> sessionShadings, TimeRange range, Rect chartRect, double xScale, double xOffset)
+    {
+        Timestamp start = new Timestamp((long)range.Start);
+        Timestamp end = new Timestamp((long)range.End);
+        foreach (SessionShading sessionShading in sessionShadings)
+        {
+            foreach ((Timestamp open, Timestamp close) in sessionShading.Session.EnumerateOpenIntervals(start, end))
+            {
+                double left = Math.Max(chartRect.Left, open.NanosSinceEpoch * xScale + xOffset);
+                double right = Math.Min(chartRect.Right, close.NanosSinceEpoch * xScale + xOffset);
+                ctx.FillRectangle(sessionShading.Brush, new Rect(left, chartRect.Top, right - left, chartRect.Height));
+            }
+        }
+    }
 
     private void DrawVerticalGrid(DrawingContext ctx, ChartTimeUtils.TimeTicks ticks, double top, double bottom, double scale, double offset)
     {

@@ -44,28 +44,28 @@
             </DataGrid.ContextMenu>
 
             <DataGrid.Columns>
-                <DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" Width="Auto"/>
-                <DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" Width="Auto" IsVisible="False"/>
-                <DataGridTextColumn Header="ClientOrderId" Binding="{Binding ClientOrderId}" Width="Auto"/>
-                <DataGridTextColumn Header="Side" Binding="{Binding Side}" Width="Auto"/>
+                <DataGridTextColumn Header="ShortSymbol" Binding="{Binding ShortSymbol}" SortMemberPath="ShortSymbol" Width="Auto"/>
+                <DataGridTextColumn Header="Symbol" Binding="{Binding Symbol}" SortMemberPath="Symbol" Width="Auto" IsVisible="False"/>
+                <DataGridTextColumn Header="ClientOrderId" Binding="{Binding ClientOrderId}" SortMemberPath="ClientOrderId" Width="Auto"/>
+                <DataGridTextColumn Header="Side" Binding="{Binding Side}" SortMemberPath="Side" Width="Auto"/>
 
-                <DataGridTextColumn Header="StateStatus" Binding="{Binding StateStatus}" Width="Auto"/>
-                <DataGridTextColumn Header="StateReason" Binding="{Binding StateReason}" Width="Auto"/>
-                <DataGridTextColumn Header="StateSeq" Binding="{Binding StateSeq}" Width="Auto"/>
-                <DataGridTextColumn Header="StatePrice" Binding="{Binding StatePriceStr}" Width="Auto"/>
-                <DataGridTextColumn Header="StateTicks" Binding="{Binding StateTicks}" IsVisible="False" Width="Auto"/>
-				<DataGridTextColumn Header="StateQuantity" Binding="{Binding StateQuantity}" Width="Auto"/>
-				<DataGridTextColumn Header="StateQuantityAhead" Binding="{Binding StateQuantityAhead}" Width="Auto"/>
-				<DataGridTextColumn Header="StateQuantityBehind" Binding="{Binding StateQuantityBehind}" Width="Auto"/>
-                <DataGridTextColumn Header="StateFilled" Binding="{Binding StateFilled}" Width="Auto"/>
-                <DataGridTextColumn Header="StateWorking" Binding="{Binding StateWorking}" Width="Auto"/>
+                <DataGridTextColumn Header="StateStatus" Binding="{Binding StateStatus}" SortMemberPath="StateStatus" Width="Auto"/>
+                <DataGridTextColumn Header="StateReason" Binding="{Binding StateReason}" SortMemberPath="StateReason" Width="Auto"/>
+                <DataGridTextColumn Header="StateSeq" Binding="{Binding StateSeq}" SortMemberPath="StateSeq" Width="Auto"/>
+                <DataGridTextColumn Header="StatePrice" Binding="{Binding StatePriceStr}" SortMemberPath="StateTicks" Width="Auto"/>
+                <DataGridTextColumn Header="StateTicks" Binding="{Binding StateTicks}" SortMemberPath="StateTicks" IsVisible="False" Width="Auto"/>
+				<DataGridTextColumn Header="StateQuantity" Binding="{Binding StateQuantity}" SortMemberPath="StateQuantity" Width="Auto"/>
+				<DataGridTextColumn Header="StateQuantityAhead" Binding="{Binding StateQuantityAhead}" SortMemberPath="StateQuantityAhead" Width="Auto"/>
+				<DataGridTextColumn Header="StateQuantityBehind" Binding="{Binding StateQuantityBehind}" SortMemberPath="StateQuantityBehind" Width="Auto"/>
+                <DataGridTextColumn Header="StateFilled" Binding="{Binding StateFilled}" SortMemberPath="StateFilled" Width="Auto"/>
+                <DataGridTextColumn Header="StateWorking" Binding="{Binding StateWorking}" SortMemberPath="StateWorking" Width="Auto"/>
 
-                <DataGridTextColumn Header="TargetAction" Binding="{Binding TargetAction}" Width="Auto"/>
-				<DataGridTextColumn Header="TargetStatus" Binding="{Binding TargetStatus}" Width="Auto"/>
-				<DataGridTextColumn Header="TargetSeq" Binding="{Binding TargetSeq}" Width="Auto"/>
-                <DataGridTextColumn Header="TargetPrice" Binding="{Binding TargetPriceStr}"  Width="Auto"/>
-                <DataGridTextColumn Header="TargetTicks" Binding="{Binding TargetTicks}" IsVisible="False" Width="Auto"/>
-                <DataGridTextColumn Header="TargetQuantity" Binding="{Binding TargetQuantity}" Width="Auto"/>
+                <DataGridTextColumn Header="TargetAction" Binding="{Binding TargetAction}" SortMemberPath="TargetAction" Width="Auto"/>
+				<DataGridTextColumn Header="TargetStatus" Binding="{Binding TargetStatus}" SortMemberPath="TargetStatus" Width="Auto"/>
+				<DataGridTextColumn Header="TargetSeq" Binding="{Binding TargetSeq}" SortMemberPath="TargetSeq" Width="Auto"/>
+                <DataGridTextColumn Header="TargetPrice" Binding="{Binding TargetPriceStr}" SortMemberPath="TargetTicks"  Width="Auto"/>
+                <DataGridTextColumn Header="TargetTicks" Binding="{Binding TargetTicks}" SortMemberPath="TargetTicks" IsVisible="False" Width="Auto"/>
+                <DataGridTextColumn Header="TargetQuantity" Binding="{Binding TargetQuantity}" SortMemberPath="TargetQuantity" Width="Auto"/>
 
             </DataGrid.Columns>
         </DataGrid>

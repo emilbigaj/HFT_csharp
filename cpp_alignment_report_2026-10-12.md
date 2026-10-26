@@ -1198,6 +1198,35 @@ before a close was refused `NotInSession` and paused the algo. Now:
   symmetry; a client posting a second request meanwhile waits in its store loop, as before.
 - **Deploy:** no lockstep.
 
+### P37. PORT-IF: `SessionRateLimit` and `RollingRateLimit.CanSendOrder` are deleted (C# `Execution/RateLimit.cs`; 2026-10-23)
+
+- **Look for:** a `SessionRateLimit` (a per-session message count against a fixed limit, `CanSendOrder`/`TrySendOrder`/
+  `Reset`) in the C++ execution or risk code, and `RollingRateLimit::CanSendOrder` (the read-only check: window full, or
+  the newest bucket at its 255 burst cap).
+- **Change:** delete both, and any reset hook that calls the first; keep `RollingRateLimit::TrySendOrder` and `GetCount`
+  unchanged. In C# nothing built or called either: the per-second throttle is
+  `RollingRateLimit` (loaded from `<server>/RateLimits/<CoreGroup>.ratelimit`) and the daily message budget is the server's `MessageEfficiency` (P24, P32).
+- **Deploy:** no lockstep (no layout or wire change).
+
+### P38. MUST PORT: the server keeps an exchange message's NIC stamp (C# `Provider/Server.cs`; 2026-10-24)
+
+The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp only when zero"). C# took a different shape:
+
+- **Server:** at those four places, delete the store of `Clock::UtcNow()` into `OrderHeader.NicTimestamp` (OnOrderState;
+  OnOrderRejected; OnFill's state and each fill). No zero test.
+- **The server's own refusal:** where the risk check refuses a target and builds the reject from it (C#
+  `Server.OnOrderTarget`, right after `NewOrderRejected`), stamp `Clock::UtcNow()` before calling OnOrderRejected. Why:
+  that reject's header is copied from the target, so it carries the client's send time, not zero; a zero test would keep
+  it and the reject would sort before its InFlight state in the audit. A refused Create's Done is built from the reject
+  (`NewRejected`), so it takes the same stamp.
+- **Receive paths:** the router fills `NicTimestamp` with the hardware stamp of the segment the report arrived in (one
+  stamp for a report's state and all its fills, as today's single `now`). The kernel-socket iLink path stamps
+  `Clock::UtcNow()` as it reads each message, so zero never reaches the server.
+- **Clock:** the hardware stamp must be on `Clock::UtcNow()`'s clock (NIC clock disciplined to the system clock), or the
+  audit's sort by `NicTimestamp` and the strategy latency series mix two clocks. Please confirm on the box.
+- **Unchanged:** the stamps on what the server makes itself (InFlight state, injected cancels, position rows).
+- **Deploy:** no lockstep (no layout or wire change). A C++ server without this keeps overwriting, as today.
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -1354,6 +1383,10 @@ listed.
 - **C25. 2026-10-23, the simulator hands a target to the exchange at its own time** (C# only, nothing to port; the
   simulator is not ported): `ExchangeSimulator.FromClientToExchange_OrderTarget` offers each target's exchange time to the
   clock, so a target is no longer judged after the next market event (Simulator/spec.txt).
+- **C26. 2026-10-23, a strategy ends when its server goes** (C# only, nothing to port; strategies are C#): a realtime
+  `Scenario` checks once a second whether its server's process has exited or the header names another one
+  (`Client.IsServerAlive` false), then alerts once and ends. It relies on what P22 already requires of the C++ server: post its
+  own `ServerProcessId` in the header at startup, and a restarted server posts its new one.
 
 ---
 

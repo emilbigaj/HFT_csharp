@@ -4,6 +4,102 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-26 — Every grid column sorts, in the published desk build too
+
+- `Workspace/Workspace.csproj` — `TrimmerRootAssembly Include="Widget"`. Why: the DataGrid sorts by a column's property
+  name (reflection); AOT trimming stripped the row classes' property metadata, so in a published Workspace no column
+  sorted (Instrument Headers, the one grid with sort keys, sorted only under the debugger). Measured in scratch: a sort
+  by path under AOT left the rows in place; with the assembly rooted it sorted real `WidgetFill` rows by price and time.
+- Widgets' `.axaml` — a `SortMemberPath` on every column of Orders, Positions, Risk Limits, Message Efficiency, Rate
+  Limit, Fills and Audit Trail (compiled bindings give the grid no key; only Instrument Headers and three Positions
+  columns had one); Fills and the Audit Trail have sorting switched on (`CanUserSortColumns`, off since the first commit
+  with no reason). Text columns sort by their number: Orders' prices by ticks, Audit Trail's by `Price`, and new
+  `WidgetPosition.AvgPrice`, `WidgetMessageEfficiency.EfficiencyRatio` / `EMTEfficiencyRatio`,
+  `WidgetRateLimit.DurationSeconds`.
+- `Tools/Timestamp.cs` — non-generic `IComparable` (the grid compares cells as objects; a time column would have thrown).
+- About 95 attributes on existing lines, +8 lines. GUI only (Timestamp's new overload is not on the hot path). Spec.md
+  "Workspaces". A desk sees it after new packages (`Publish.ps1`).
+
+---
+
+## 2026-10-24 — Charts shade session hours
+
+- `Widget/ChartWidget.axaml(.cs)` — right-click *Add Session* lists a tick-box per session; a ticked one is shaded behind
+  every panel in its own pale colour (the series palette at 15%), and a saved layout keeps them (`ChartWidgetState.Sessions`,
+  by name). `Chart/ChartModel.cs` — `ChartStack.Sessions`, `SessionShading(Session, Brush)`. `Chart/ChartRender.cs` —
+  `DrawSessions`, after the grid, before the series. `Tools/Session.cs` — `AllWithHours` (every session but Perpetual) and
+  `EnumerateOpenIntervals(start, end)`. Why: to see which session is open and performance against session hours (user
+  request). +76 lines. GUI only.
+- Checked in scratch: CME over 2026-01-04 to 01-11 gives Sun 17:00 to Fri 16:00 Chicago with the daily 16:00-17:00 gap and
+  no weekend; London Mon-Fri; across the US daylight-saving change (2026-03-08) the UTC times move from 23:00 to 22:00.
+  Not yet seen on screen.
+- C++: nothing (GUI).
+
+---
+
+## 2026-10-24 — The server keeps an exchange message's NIC stamp
+
+- `Provider/Server.cs` — `OnOrderState`, `OnOrderRejected` and `OnFill` no longer overwrite `OrderHeader.NicTimestamp`
+  with `Clock.Now`: the receiver stamps it (the C++ router's hardware stamp, else its kernel-socket read; the simulator
+  already stamps arrival). The server's own refusal is stamped where it is made, in `OnOrderTarget` after
+  `NewOrderRejected` (its header is the target's: the client's send time). Why: the CME side will stamp order events with
+  the NIC's hardware time, which the overwrite discarded. Their proposal, "stamp only when zero", would have kept the
+  client's send time on the server's own refusals, sorting the reject before its InFlight state (Spec.md "NIC
+  timestamps"). −6 / +4 lines; 3-4 fewer clock reads per execution report.
+- Verified (scratch backtest, MicroOutright MES/ES 2026-01-01 to 01-20, before and after): all 732,137 strategy audit
+  records carry identical stamps; the server audit is identical; only Logging's run-to-run write order differs.
+- C++: MUST PORT, cpp_alignment_report_2026-10-12.md P38.
+
+---
+
+## 2026-10-23 — Risk-desk packages: one per template folder
+
+- `Publish/RiskDesk/Publish.ps1` — builds one package per folder in `Publish/RiskDesk/Templates` (the user's reorganisation:
+  Adrian, NewRelease, Production) instead of the two fixed flavour folders beside it; a new desk is a new template folder.
+  "Flavour" renamed "template" throughout. Spec.md "Risk desk package" updated.
+- Templates: Production (the risk team's) has folder sync off; NewRelease and Adrian (our own desks) have it on, since
+  the risk team no longer gets NewRelease (Spec.md "Folder sync").
+- Published 2026-10-23: `Staging/BigajRiskDesk_{Adrian,NewRelease,Production}.zip` (26 MB each), from the current working
+  tree (including the uncommitted Mirror banner).
+
+---
+
+## 2026-10-23 — The Mirror opens its console with its end and its config
+
+- `Mirror/Program.cs` — once the config passes `ThrowIfInvalid`, the first lines printed are a banner
+  (`################### REMOTE MIRROR ###################`, or LOCAL) and the config's full path and JSON as parsed:
+  defaults included (an absent `IsFolderSyncOn` shows `false`), fields no longer read left out (`ClockMode`). An invalid
+  config prints only its error. Why: what a desk runs with was invisible. +3 lines. Checked in scratch: a valid config
+  printed banner, path and JSON before the first thread line; an empty `ServerName` printed only its error.
+- Residual: a desk with `IsConsoleVisible: false` prints this to the console it then detaches, not to `Mirror.log`.
+
+---
+
+## 2026-10-23 — A strategy ends when its server goes
+
+- `Provider/Client.cs` — `IsServerAlive`: false once the server this client connected to has exited, or its header names another
+  process (`RemoteClient.IsSessionEnded`, inverted). `Strategy/Scenario.cs` — in realtime a once-a-second `TickTocker` (made before
+  the strategies' timers) checks it on the clock thread; on the first false: one alert, and `_isServerAlive` cleared, which ends the strategy loop;
+  the loop disposes the `AlertManager` (the alert is sent) and runs the exit actions. Why: after a server shutdown the
+  strategy ran on against wiped allocations, one "instrumentId has not been allocated" alert a second (Spec.md "A strategy
+  ends when its server goes"). Hot path: one never-written `volatile bool` read per loop pass; nothing allocated. +22 lines.
+- Not built: reconnect in place, or an automatic restart (option 2b: exit code + restart loop), both in Spec.md.
+- Not yet tested against a real server stop (needs a scratch realtime server and strategy).
+- C++: nothing to port (strategies are C#); it relies on the C++ server posting its `ServerProcessId` (P22).
+
+---
+
+## 2026-10-23 — `SessionRateLimit` and `RollingRateLimit.CanSendOrder` deleted
+
+- `Execution/RateLimit.cs` — the `SessionRateLimit` class (a per-session message counter with a fixed limit) is gone: nothing
+  built or called it since the risk layer moved to `RollingRateLimit` and the server-owned `MessageEfficiency`. So is
+  `RollingRateLimit.CanSendOrder`, the read-only check beside `TrySendOrder`: the risk layer only commits
+  (`TrySendOrder`), and the Rate Limit widget reads `GetCount`. −46 lines.
+  `RiskLayerRefactorPlan.md` still names it; that plan is historical.
+- C++: PORT-IF, cpp_alignment_report_2026-10-12.md P37.
+
+---
+
 ## 2026-10-23 — Simulator: a target reaches the exchange at its own time, not at the next market event
 
 - `Simulator/ServerSimulator.cs` — `ExchangeSimulator.FromClientToExchange_OrderTarget` offers each target's exchange time to

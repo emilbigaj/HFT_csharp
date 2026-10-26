@@ -10,6 +10,8 @@
             <Separator/>
             <MenuItem Header="Add Series..." Click="OnAddSeriesClick"/>
             <MenuItem Header="Remove Series..." Click="OnRemoveSeriesClick"/>
+            <Separator/>
+            <MenuItem x:Name="AddSessionMenuItem" Header="Add Session"/>
         </ContextMenu>
     </UserControl.ContextMenu>
 
