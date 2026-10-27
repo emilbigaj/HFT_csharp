@@ -4,6 +4,18 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-27 — Json finds a context Mono has not registered yet
+
+- `Tools/Json.cs` — `MutableResolver.GetTypeInfo` looks twice: when no registered context knows the type, it runs the type's
+  module initializer (`RuntimeHelpers.RunModuleConstructor`, a no-op where it already ran) and looks again. Why: Mono (the
+  phone) runs a module's initializer, which registers its generated context, only once a method of that module runs, not when
+  a type is first named; the phone's Release app read its built-in config with `Json.Deserialize<MirrorConfig>` before any
+  Mirror method ran and failed `NoMetadataForType, Mirror.MirrorConfig` (the Debug app read it through
+  `MirrorConfig.LoadOrCreate`, a Mirror method). Verified: the NativeAOT desk Workspace still restores its layout and ladders.
+  +12 lines.
+
+---
+
 ## 2026-10-27 — The publish builds the phone app, its config built in
 
 - `Phone/MirrorConfig.json` (new): the phone's config, dialling the Threadripper's relay `100.86.63.127:27794`, built into the

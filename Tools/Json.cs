@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -55,6 +56,17 @@ public static class Json
         }
 
         public JsonTypeInfo? GetTypeInfo(Type type, JsonSerializerOptions options)
+        {
+            // Why the second look: Mono (the phone) runs a module's initializer, which registers its context, only once a method of
+            // that module runs, not when one of its types is first named; running it here registers it (a no-op where it already ran)
+            JsonTypeInfo? typeInfo = FindTypeInfo(type, options);
+            if (typeInfo != null)
+                return typeInfo;
+            RuntimeHelpers.RunModuleConstructor(type.Module.ModuleHandle);
+            return FindTypeInfo(type, options);
+        }
+
+        private JsonTypeInfo? FindTypeInfo(Type type, JsonSerializerOptions options)
         {
             lock (_lock)
             {
