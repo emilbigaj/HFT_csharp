@@ -1461,7 +1461,12 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   `IPWhitelist` (the box: each risk desk's address; a desk: the box's), and refuses to start with it empty: links are
   unauthenticated, so whoever reached a listening Local end would get full order entry. Until 2026-10-14 a Local end
   refused to listen at all; it may now, behind the whitelist and a firewall rule to the same addresses, inside a VPN.
-- **Rows down.** The Local end attaches read-only and publishes on the pass a remote connects (its snapshot: a new Remote pings only once it has the server header, so waiting for its ping would deadlock), on the pass a remote's ping arrives (every 100 ms, so at least that often while a remote is connected; with none connected nothing is published, and there is no timer), or when a stand-in ManualClient reads an order state from the server (a fill's too: `Server.OnFill` writes the state and position rows before it sends the stand-in the state, and the fills themselves go to the strategy's channel) or a GUI waits on its `AllocatedClientId` (`LocalMirror.IsPublishDue`; still one publish per pass, so the server pays one extra row scan per pass with news, not one per message), sends each remote
+- **Rows down.** The Local end attaches read-only and publishes every 100 ms on its own clock while a remote is connected
+  (`LocalMirror.IsPublishDue`; with none connected nothing is published). One cadence, however many desks: each pass
+  reads every row (the cost below), so passes must not scale with desks. Until 2026-10-27 a publish ran on the pass any
+  remote's ping arrived (every 100 ms on that remote's clock) and on every order state a stand-in read, so three desks
+  made about 30 passes a second plus one per remote trader's order; now 10 a second flat, a remote's own order shows
+  within 100 ms instead of on the next pass, and a new remote's snapshot comes on the next tick. A pass sends each remote
   every row whose bytes changed since the last pass; a remote that just connected gets every row. Bytes, not seqs: the
   server writes TradingStatus, Timestamp, QuantityAhead and the rate limits in place without moving the seq. A pass sends
   the server header, then rows, then `AllocatedClientId`s, then a heartbeat, so no GUI gets its id before the rows that hold it.
@@ -1519,14 +1524,15 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
 - **The latency display.** One link per remote machine, so one number, kept in the copy for every Workspace there:
   `Context.GetLatency(coreGroupId)`, a `Tools.Duration` per CoreGroup (the shared array `<server>/Latency`), below 0
   while disconnected; on a remote copy, index 0 is the Mirror link. The Remote Mirror sends a `Ping` every 100 ms carrying
-  its own monotonic clock (`Timestamp.StopwatchNow`, the machine's `Stopwatch` as a `Timestamp`); the Local end queues it back as a `Pong`, so it goes out after the publish it triggers on that same pass (rows, then the pong): the round trip then covers the Local loop and a publish too, and a Local end that answers but no longer publishes reads as a stall, not as a healthy number over a frozen screen; the
+  its own monotonic clock (`Timestamp.StopwatchNow`, the machine's `Stopwatch` as a `Timestamp`); the Local end answers it at once as a `Pong` (2026-10-27; until then after the publish it triggered, which made publishes scale with desks), so the round trip is the Local loop and the link; the
   Remote times it on that same clock (no clocks need to agree) and writes `Latency[0]` every pass: the worst of the last
   10 round trips, or, when longer, the age of the oldest unanswered ping (the newest answered one's age less one interval),
   so it climbs through a stall (a new link starts afresh, 2026-10-14: its round trips cleared, its unanswered age counted
   from when it connects, its first ping sent at once; before, the old link's last pong made a Local Mirror restart read as
   a latency of the whole outage, climbing until the new link's first pong); -1 ns at
-  once when the link drops, and from 10 s without a pong (`RemoteClient.s_silenceTimeout`, also `TcpLink`'s silence
-  limit). A remote Workspace shows it beside its clock exactly as written, to the microsecond (`232.417 ms`, so a steady
+  once when the link drops, and from 10 s without a heartbeat (`RemoteClient.s_silenceTimeout`, also `TcpLink`'s silence
+  limit): a Local end that answers pings but no longer publishes reads as broken, not as a healthy number over a frozen
+  screen. A remote Workspace shows it beside its clock exactly as written, to the microsecond (`232.417 ms`, so a steady
   link visibly ticks), and below 0 as "Connection broken – reconnecting…": the number only ever comes from the Remote
   Mirror (2026-10-14; before, the Workspace showed the row's age when longer, so a closed Remote Mirror read as a latency
   climbing for 10 s). Two states come from the Workspace itself: "Remote Mirror offline" once the Remote Mirror its
@@ -1804,6 +1810,39 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
 - The templates carry the box's address and the server name, so a release changes them in one place. In JSON a backslash
   is doubled (`"C:\\Desk\\Data"`).
 
+### Relay: a desk serves its copy onward (2026-10-27)
+
+A Remote whose config sets `RelayListenPort` (with `RelayIPWhitelist`) also serves its copy to further Remotes that dial
+that port: a phone, which cannot reach the box's network, dials the desk it can reach (over a personal tunnel that gives
+it a fixed address to whitelist). `Program.RunRelay` runs a `LocalMirror` over the copy on its own thread: the same
+class as beside the server, with the copy as its `ServerContext`, publishing every 100 ms, answering pings, serving the
+desk's synced files. Each GUI a phone lists stands in as a `RemoteClient` of the relay desk (the class a desk Workspace
+uses), attached to the relay's own ServerSocket under the phone GUI's name: the relay's `RemoteMirror` lists it to the
+box as one of this desk's GUIs, the box starts the real stand-in `ManualClient`, and its id comes back through the usual
+`AllocatedClientId` path. A phone's call travels phone `RemoteClient` → phone `RemoteMirror` → `Message` → relay
+`LocalMirror.ApplyMessage` → relay `RemoteClient` → relay `RemoteMirror` → `Message` → box stand-in → server. Each hop
+has one representative per GUI, as the box has.
+- **To the box the phone is one more Workspace window on the relay desk**: the same session, the same 10 publishes a
+  second, one more stand-in (what a second window costs). The box never knows the phone; nothing on it is configured.
+  Declined (2026-10-27): the phone as a second session of the box through a port forward on the desk, which would have
+  cost the box a session, a stand-in and a forward to an address it cannot reach, for no gain.
+- **Why its own thread:** the Remote's listen thread answers a GUI's connect by waiting for the main thread to deliver
+  the box's `AllocatedClientId`; a stand-in built on the main thread would wait on itself. The relay thread is to the
+  main thread what a desk's Workspace process is to its Mirror.exe: it reads the copy with `TryCopy` and its stand-ins
+  write their rings, which the main thread reads.
+- **Server restart:** the relay's `RemoteMirror` wipes and refills the copy; at the new server's first heartbeat the copy's
+  header carries the new process id, and the relay thread ends every phone's session (`LocalMirror.Dispose`: stand-ins
+  closed, links dropped) and starts afresh with an empty published cache, so each phone redials and takes a full snapshot
+  of the new server, header first, as a desk does when the Local Mirror beside a restarted server restarts. Until the
+  relay's own first snapshot is complete (its `RemoteMirrorProcessId` letterbox posted) it serves nobody.
+- **Relay restart:** the phones redial; their stand-ins restart on the box through the relay's next `GuiList`.
+- **The `Latency` array never travels** (`LocalMirror.PublishRows` skips it): each end's row is its own link's. A phone's
+  number is phone ↔ relay; the relay's link health shows on the relay's own Workspace.
+- The folder sync chains: the relay serves what it has synced. The box's rule is unchanged: a desk's own `IsFolderSyncOn`.
+- Residuals: a phone's call crosses two Mirror loops (about 2 ms more than a desk's); the relay thread blocks for a
+  round trip to the box while it starts a phone GUI's stand-in (other phones' packets wait those milliseconds); GUI names
+  stay unique per machine name, so a relay desk and its phones must have different names (a phone's is its device's).
+
 ### Setting up a remote desk
 
 - The usual way is the risk desk package above. By hand: ship the Build output folder (Mirror, Workspace and their libraries; Logging is not run there) with a `MirrorConfig.json`,
@@ -1819,6 +1858,8 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
 - Reversed, when the networks make a desk dialling the box easier: the box's config has `"ListenPort": 7400,
   "IPWhitelist": ["<each risk desk's IP>"]` and no `ConnectAddresses`; each desk's has `"ConnectAddresses": ["<CME box
   IP>:7400"]` and no `ListenPort` or `IPWhitelist`. One box listener serves every desk (each link is its own session).
+- A relay desk adds `"RelayListenPort": 47801, "RelayIPWhitelist": ["<each phone's tunnel address>"]`; a phone's config is a
+  desk's with `"ConnectAddresses": ["<relay desk's tunnel address>:47801"]`.
 - A listening end accepts only `IPWhitelist`, each entry one address or a CIDR range (`"10.10.0.0/16"` admits 10.10.*.*, for desks whose VPN address changes; keep the range as small as the VPN pool) (`TcpLinkConnector.AcceptTcpLinks` closes any other connection at once; `MirrorConfig.ThrowIfInvalid` refuses to start a listener with the list empty). Why: on a Remote any new link replaces the live one, and the Local end then closes that desk's stand-ins, so the server cancels every remote order; an internet scanner touching the port would do that several times a day. Firewall the port to the same address too: links are still plain TCP, unauthenticated and
   unencrypted for now.
 
@@ -1853,10 +1894,8 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
   error means the desk's shared memory is failing anyway; nothing is sent wrongly. A GUI that dies while connecting is not
   this case: the Remote's listen thread opens its socket regardless (`OpenClient` needs nothing from the GUI) and
   `PollPids` then closes it as dead.
-- Publishes have no minimum gap (declined 2026-10-12): besides each desk's ping (10 a second), every order state a
-  stand-in reads triggers one on the next pass, and each publish reads every server row (a hot row read costs the server's
-  next write to it about 330 ns). Only remote-desk orders trigger them, so the rate is a few tens a second while a remote
-  trader is active; a 10 ms gap would cap it at 100 a second if a measurement on the CME box ever shows it matters.
+- Publishes have no minimum gap (declined 2026-10-12; superseded 2026-10-27 by the one 100 ms cadence, see "Rows down":
+  the declined reasoning missed that each desk's pings added their own passes).
 - The Local Mirror alerts every exception its loop catches, unthrottled: one that recurs every pass (1 ms) floods
   Telegram, and a name that does not fit 256 characters under the Local root alerts once per `GuiList` (each second).
 - Links are not encrypted or authenticated yet.

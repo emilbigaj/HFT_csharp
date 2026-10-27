@@ -6,5 +6,5 @@
   "ConnectAddresses": ["10.172.13.228:27793"],
   "DirectoriesRoot": "Data",
   "IsConsoleVisible": true,
-  "IsFolderSynchOn": true
+  "IsFolderSyncOn": true
 }

@@ -1383,6 +1383,10 @@ listed.
 - **C25. 2026-10-23, the simulator hands a target to the exchange at its own time** (C# only, nothing to port; the
   simulator is not ported): `ExchangeSimulator.FromClientToExchange_OrderTarget` offers each target's exchange time to the
   clock, so a target is no longer judged after the next market event (Simulator/spec.txt).
+- **C27. 2026-10-27, the Local Mirror's one publish cadence, and the relay** (C# only, nothing to port; the Local Mirror on
+  the box is the C# one): the box's Local Mirror now reads every server row 10 times a second whatever the number of
+  desks (it was 10 per desk plus one per remote trader's order), so the server's per-pass reader cost (P-series "+330 ns
+  per hot line") is fixed, not per desk. A desk may relay its copy to a phone; the box sees one more GUI of that desk.
 - **C26. 2026-10-23, a strategy ends when its server goes** (C# only, nothing to port; strategies are C#): a realtime
   `Scenario` checks once a second whether its server's process has exited or the header names another one
   (`Client.IsServerAlive` false), then alerts once and ends. It relies on what P22 already requires of the C++ server: post its

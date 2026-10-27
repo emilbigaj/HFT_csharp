@@ -9,6 +9,7 @@ namespace Provider;
 public interface IManualClient : IDisposable
 {
     ClientContext Context { get; }
+    int ClientId();
     bool OnOrderTarget(ref OrderTarget orderTarget);
     void OnAllocateInstrument(int instrumentHeaderId);
     void OnControlAlgoStatus(in ControlAlgoStatus controlAlgoStatus);
@@ -26,11 +27,14 @@ public sealed class RemoteClient : IManualClient
     public static readonly Duration s_silenceTimeout = Duration.FromSeconds(10);   // a link silent this long is broken: the Mirrors' TcpLink and the latency display
 
     private readonly ClientSocket _clientSocket;   // admin channel only: calls up to the Remote Mirror
+    private readonly int _clientId;                // the stand-in's id beside the server, which the Remote Mirror's answer to the connect carried
     private readonly int _serverProcessId;         // the server the name was opened on; after a restart the copy's header names another
     private readonly LetterBox<int> _remoteMirrorProcessIdBox = null!;   // the Remote Mirror serving this desk; a restarted one posts its own
     private readonly int _remoteMirrorProcessId;   // the Remote Mirror the name was opened on
 
     public ClientContext Context { get; }
+
+    public int ClientId() => _clientId;
 
     /// The letterbox where the Remote Mirror posts its process id once it listens: <server>/RemoteMirrorProcessId.
     public static FileSystemPath GetRemoteMirrorProcessIdPath(FileSystemPath serverName) => serverName / "RemoteMirrorProcessId";
@@ -44,7 +48,7 @@ public sealed class RemoteClient : IManualClient
     public RemoteClient(string guiName, string serverName)
     {
         _clientSocket = new ClientSocket(guiName, serverName, [SocketChannel.AdminChannelLength], [SocketChannel.AdminChannelLength]);
-        _clientSocket.Connect();
+        _clientId = _clientSocket.Connect();
         // Why: as in Client: once connected the name is held until the socket closes, so a throw below must close it
         try
         {

@@ -42,6 +42,7 @@ public sealed class RemoteMirror : IDisposable
     private readonly Duration[] _roundTrips = new Duration[10];   // the last 10 pongs' round trips, round-robin by _pongCount
     private uint _pongCount;
     private Timestamp _pongedPingTimestamp = Timestamp.StopwatchNow;   // the newest answered ping (the start, before the first pong)
+    private Timestamp _heartbeatTimestamp = Timestamp.StopwatchNow;    // when the last heartbeat arrived: the Local end's last completed publish (the start, before the first)
     private volatile bool _isGuiListDue;
     private volatile bool _isDisposed;                      // read by the listen thread's AllocateClientId wait
     private bool _isListening;
@@ -100,6 +101,7 @@ public sealed class RemoteMirror : IDisposable
             // Why: latency is the link's; the old link's pongs say nothing about this one, and the first ping goes now
             Array.Clear(_roundTrips);
             _pongedPingTimestamp = Timestamp.StopwatchNow;
+            _heartbeatTimestamp = Timestamp.StopwatchNow;
             _pingTimestamp = default;
         }
 
@@ -192,6 +194,7 @@ public sealed class RemoteMirror : IDisposable
                     ApplyAllocatedClientId(MirrorPacket.ReadMirrorGuis<Header<MirrorPacketType>>(packet)[0]);
                     break;
                 case MirrorPacketType.Heartbeat:
+                    _heartbeatTimestamp = Timestamp.StopwatchNow;
                     ApplyHeartbeat();
                     break;
                 case MirrorPacketType.FileAnnounce:
@@ -205,11 +208,12 @@ public sealed class RemoteMirror : IDisposable
     }
 
     // The worst of the last 10 round trips, or the age of the oldest unanswered ping (sent one interval after the newest answered
-    // one) when longer, so it climbs through a stall; below 0 once the link is down or nothing has answered for its silence timeout.
+    // one) when longer, so it climbs through a stall; below 0 once the link is down or no publish has closed with a heartbeat for
+    // the silence timeout (a Local end that still answers pings but no longer publishes).
     private Duration GetLatency()
     {
         Duration latency = _roundTrips.Append(Timestamp.StopwatchNow - _pongedPingTimestamp - s_pingInterval).Max();
-        return _tcpLink.IsConnected && latency < RemoteClient.s_silenceTimeout ? latency : Duration.FromNanoseconds(-1);
+        return _tcpLink.IsConnected && Timestamp.StopwatchNow - _heartbeatTimestamp < RemoteClient.s_silenceTimeout ? latency : Duration.FromNanoseconds(-1);
     }
 
     // The Local end's answer for a GUI waiting in AllocateClientId: its id, or a negative ConnectRefusal saying why not.

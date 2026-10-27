@@ -4,6 +4,43 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-27 — Mirror relay: a desk serves its copy onward to a phone
+
+- `Mirror/LocalMirror.cs` — takes a stand-in factory `(clientName, principalName) => IManualClient` instead of building
+  a `ManualClient` and taking an `AlertManager`; `GuiStandIn` holds an `IManualClient` and its name; `Dispose` ends every
+  session (a relay's server restart). `Mirror/Program.cs` — `NewStandIn` (the box's factory: the `ManualClient`, its
+  instruments, its rejects to the alerts) and `RunRelay`, a thread running a `LocalMirror` over the copy whose stand-ins
+  are `RemoteClient`s of this desk, restarted when the copy's header names a new server. `Mirror/MirrorConfig.cs` —
+  `RelayListenPort`, `RelayIPWhitelist`. `Mirror/TcpLink.cs` — `TcpLinkConnector(listenPort, ipWhitelist, connectAddresses)`.
+  `Provider/RemoteClient.cs` — `IManualClient.ClientId()`, which `RemoteClient` keeps from its connect. `LocalMirror.PublishRows`
+  skips the `Latency` array (each end's is its own link's). Why: a phone off the box's network reaches the desk; to the box
+  the phone is one more window of that desk (Spec.md "Relay"). About +60 lines net.
+- Verified (scratch `relaytest/run_relay.ps1`, loopback: harness server + Local Mirror → relay Mirror.exe → phone-desk
+  Mirror.exe + the harness GUI and compare roles): the phone-desk GUI connected through the chain in 158 ms (a
+  `RemoteClient` on the phone-desk, a `RemoteClient` stand-in on the relay, a `ManualClient` stand-in on the box, all
+  `MLTest_GUI0@THREADRIPPER`); its allocate + risk-limit probe went through in 136 ms, 123 ms after a relay restart and
+  92 ms after a server restart (the GUI rebuilt on the new server's id in 113 ms); rows byte-equal box vs phone-desk each
+  time. The lifecycle harness (21 scenarios) passes on the same build.
+- C++: nothing (the Mirror is C#-only; the box's Local Mirror is the C# one).
+
+---
+
+## 2026-10-27 — The Local Mirror publishes on one 100 ms cadence, however many desks
+
+- `Mirror/LocalMirror.cs` — `IsPublishDue` is a 100 ms timer while a remote is connected; a ping is answered at once
+  (`TcpLink.Write`), not queued behind the publish it used to trigger; the stand-in's order-state trigger is gone.
+  `Mirror/RemoteMirror.cs` — the silence rule (`Latency[0]` = -1 after 10 s) reads heartbeats, not pongs: a Local end
+  that answers but no longer publishes still reads as broken. Why: a publish ran on every remote's ping and on every
+  order state a stand-in read, so the server's row scans (330 ns per hot line written since) scaled with desks: about
+  30 passes a second with Production's three desks, 40 with a phone; now 10 flat. Supersedes the declined 2026-10-12
+  "no minimum gap" item (Spec.md "Rows down"). −3 lines. A remote trader's own order shows within 100 ms (was next pass);
+  the latency number no longer includes a publish.
+- Measured (scratch `relaytest/measure_rate.ps1`: heartbeats per second at a fake remote, loopback): the 10-23 build
+  published 9-10 a second with one remote and 18-20 with two (each remote's pings adding passes); this build 9-11 with
+  one or two. The lifecycle harness (21 scenarios) passes.
+
+---
+
 ## 2026-10-26 — Every grid column sorts, in the published desk build too
 
 - `Workspace/Workspace.csproj` — `TrimmerRootAssembly Include="Widget"`. Why: the DataGrid sorts by a column's property

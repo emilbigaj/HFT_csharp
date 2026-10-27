@@ -133,28 +133,22 @@ public sealed class TcpLink : IDisposable
     }
 }
 
-/// Makes TcpLinks in whichever directions the config sets: listens on ListenPort for a peer that dials in, and dials each
-/// of ConnectAddresses every second until it has a live link to it. New links queue for the owner's thread. Cold path:
-/// one listen thread and one dial thread.
-public sealed class TcpLinkConnector
+/// Makes TcpLinks in whichever directions it is given: listens on listenPort for a peer in ipWhitelist that dials in, and
+/// dials each of connectAddresses every second until it has a live link to it. New links queue for the owner's thread.
+/// Cold path: one listen thread and one dial thread.
+public sealed class TcpLinkConnector(int listenPort, string[] ipWhitelist, string[] connectAddresses)
 {
     private const int s_dialIntervalMilliseconds = 1_000;
     private const int s_connectTimeoutMilliseconds = 2_000;
 
-    private readonly MirrorConfig _mirrorConfig;
     private readonly ConcurrentQueue<TcpLink> _newTcpLinks = new();
-
-    public TcpLinkConnector(MirrorConfig mirrorConfig)
-    {
-        _mirrorConfig = mirrorConfig;
-    }
 
     /// Starts the listen thread when a port is configured, and the dial thread when addresses are.
     public void Start()
     {
-        if (_mirrorConfig.ListenPort > 0)
-            LowLatency.StartBackgroundThread($"TcpLinkConnector.Listen({_mirrorConfig.ListenPort})", AcceptTcpLinks);
-        if (_mirrorConfig.ConnectAddresses.Length > 0)
+        if (listenPort > 0)
+            LowLatency.StartBackgroundThread($"TcpLinkConnector.Listen({listenPort})", AcceptTcpLinks);
+        if (connectAddresses.Length > 0)
             LowLatency.StartBackgroundThread("TcpLinkConnector.Dial", DialTcpLinks);
     }
 
@@ -165,8 +159,8 @@ public sealed class TcpLinkConnector
     // a failure is logged, never fatal.
     private void AcceptTcpLinks()
     {
-        IPNetwork[] ipWhitelist = Array.ConvertAll(_mirrorConfig.IPWhitelist, entry => MirrorConfig.TryParseIPNetwork(entry, out IPNetwork ipNetwork) ? ipNetwork : throw new InvalidDataException($"TcpLinkConnector: IPWhitelist entry {entry} is no address or range"));
-        TcpListener tcpListener = new(IPAddress.Any, _mirrorConfig.ListenPort);
+        IPNetwork[] ipNetworks = Array.ConvertAll(ipWhitelist, entry => MirrorConfig.TryParseIPNetwork(entry, out IPNetwork ipNetwork) ? ipNetwork : throw new InvalidDataException($"TcpLinkConnector: IPWhitelist entry {entry} is no address or range"));
+        TcpListener tcpListener = new(IPAddress.Any, listenPort);
         tcpListener.Start();
         while (true)
         {
@@ -174,7 +168,7 @@ public sealed class TcpLinkConnector
             {
                 TcpClient tcpClient = tcpListener.AcceptTcpClient();
                 IPAddress peerAddress = ((IPEndPoint)tcpClient.Client.RemoteEndPoint!).Address;
-                if (!Array.Exists(ipWhitelist, ipNetwork => ipNetwork.Contains(peerAddress)))
+                if (!Array.Exists(ipNetworks, ipNetwork => ipNetwork.Contains(peerAddress)))
                 {
                     Console.WriteLine($"TcpLinkConnector: refused {peerAddress}, not in IPWhitelist");
                     tcpClient.Dispose();
@@ -192,15 +186,15 @@ public sealed class TcpLinkConnector
     // Dial thread: every second, redials each address with no live link; a failure is logged once until it recovers.
     private void DialTcpLinks()
     {
-        TcpLink?[] _dialedTcpLinks = new TcpLink?[_mirrorConfig.ConnectAddresses.Length];
-        bool[] _isFailureLogged = new bool[_mirrorConfig.ConnectAddresses.Length];
+        TcpLink?[] _dialedTcpLinks = new TcpLink?[connectAddresses.Length];
+        bool[] _isFailureLogged = new bool[connectAddresses.Length];
         while (true)
         {
             for (int addressIndex = 0; addressIndex < _dialedTcpLinks.Length; addressIndex++)
             {
                 if (_dialedTcpLinks[addressIndex] is { IsConnected: true })
                     continue;
-                string connectAddress = _mirrorConfig.ConnectAddresses[addressIndex];
+                string connectAddress = connectAddresses[addressIndex];
                 try
                 {
                     _dialedTcpLinks[addressIndex] = DialTcpLink(connectAddress);

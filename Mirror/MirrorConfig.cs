@@ -29,6 +29,8 @@ public sealed class MirrorConfig
     public string DirectoriesRoot = "";                 // "" keeps S:\ (/mnt/S/); a relative folder is beside the executable ("Data" on a risk desk)
     public bool IsConsoleVisible = true;                // false: this end closes its console window at startup and writes Mirror.log beside the executable
     public bool IsFolderSyncOn = false;                 // a Remote: true copies the box's files for the Workspaces open here (Audit, Fills, Series...; see Spec.md "Folder sync"); off by default
+    public int RelayListenPort;                         // a Remote: > 0 also serves its copy to further Remotes (a phone) that dial this port, as a Local end would (see Spec.md "Relay")
+    public string[] RelayIPWhitelist = [];              // the only further Remotes the relay port accepts (each a phone's tunnel address)
 
     /// The MirrorConfig at this path; a missing one is written with the defaults, to be filled in.
     public static MirrorConfig LoadOrCreate(string mirrorConfigPath)
@@ -52,6 +54,8 @@ public sealed class MirrorConfig
         // and on a Remote a new link replaces the live one, which cancels every remote order
         if (ListenPort > 0 && (IPWhitelist.Length == 0 || !Array.TrueForAll(IPWhitelist, entry => TryParseIPNetwork(entry, out _))))
             throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: IPWhitelist is [{string.Join(", ", IPWhitelist)}], must list the addresses or ranges allowed to connect (\"10.172.13.228\", or \"10.10.0.0/16\" for 10.10.*.*; on a Remote the CME box's, on a Local each risk desk's); fill it in {mirrorConfigFullPath}");
+        if (RelayListenPort > 0 && (MirrorRole != MirrorRole.Remote || RelayIPWhitelist.Length == 0 || !Array.TrueForAll(RelayIPWhitelist, entry => TryParseIPNetwork(entry, out _))))
+            throw new InvalidDataException($"MirrorConfig.ThrowIfInvalid: RelayListenPort {RelayListenPort} needs MirrorRole Remote and a RelayIPWhitelist of the addresses allowed to connect to it (each phone's tunnel address); fill it in {mirrorConfigFullPath}");
     }
 
     // An IPWhitelist entry: one address (exactly that address) or a range in CIDR notation ("10.10.0.0/16" admits 10.10.*.*).
