@@ -69,6 +69,16 @@ namespace Tools
 
         static Application()
         {
+            // Cross-Platform: Handles AppDomain unload / normal exit / SIGTERM (Linux)
+            AppDomain.CurrentDomain.ProcessExit += (s, e) =>
+            {
+                // Unhandled exceptions and standard framework exits trigger this
+                OnExit(null, null);
+            };
+
+            // Why: a phone has no terminal, and its runtime refuses the signal registrations below (PlatformNotSupportedException)
+            if (OperatingSystem.IsAndroid()) return;
+
             // Windows-specific: Handles X button, logoff, etc.
             // We guard this so it does not crash on Linux.
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -99,12 +109,6 @@ namespace Tools
                 e.Cancel = false;
             };
 
-            // Cross-Platform: Handles AppDomain unload / normal exit / SIGTERM (Linux)
-            AppDomain.CurrentDomain.ProcessExit += (s, e) =>
-            {
-                // Unhandled exceptions and standard framework exits trigger this
-                OnExit(null, null);
-            };
         }
 
         /// Leaves this process's console, whose window then closes on Windows (Windows Terminal or the classic console alike),

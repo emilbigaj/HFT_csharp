@@ -43,13 +43,16 @@ public partial class WidgetContainer : UserControl
         InitializeComponent();
 
         PART_ContentPresenter.Content = widget;
-        TitleText.Text = widget.Title;
+        ShowTitle();
 
         HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left;
         VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top;
 
         RootEvents();
     }
+
+    /// Shows the widget's title (a ladder's follows its instrument).
+    public void ShowTitle() => TitleText.Text = Widget.Title;
 
     /// Where the container sits on its canvas (an unset position as 0) and its size: as laid out, else as set.
     public Rect GetLayoutRect()

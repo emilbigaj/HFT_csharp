@@ -44,8 +44,7 @@ public partial class Workspace : Window, IWidgetHost
     private Thread _clientThread = null!;
     private volatile bool _isClientStopping;                                  // tells the client thread to end (Disconnect)
     private bool _isConnected;                                                // a client is open and its thread runs (UI thread); Disconnect does nothing otherwise
-    private ulong _latencySeq;                                                // the Latency[0] row's seq when last seen to change (UI thread)
-    private Timestamp _latencyTimestamp = Timestamp.StopwatchNow;             // when it last changed; unchanged for the silence timeout is a hung Remote Mirror
+    private readonly LatencyText _latencyText = new();                        // the link's latency beside the clock on a remote desk (UI thread)
     private int _guiNumber;                                                   // this window's GUI number on a remote desk; a rebuild asks for the same one first
     private static readonly List<Workspace> s_openWorkspaces = new();         // this process's open Workspace windows (UI thread). Why our own: Avalonia 12's desktop.Windows misses one opened before the lifetime starts
 
@@ -172,7 +171,7 @@ public partial class Workspace : Window, IWidgetHost
             }
             // A remote desk shows its Mirror link's latency beside the clock, a Workspace beside the server whether the server's process has exited (see Spec.md "Remote workspaces")
             if (remoteClient != null)
-                TimestampText.Text = GetLatencyText(remoteClient) + "    " + TimestampText.Text;
+                TimestampText.Text = _latencyText.GetText(Context, remoteClient) + "    " + TimestampText.Text;
             else if (!ProcessId.IsAlive(Context.ServerHeader.GetReadonlyRef().ServerProcessId))
                 TimestampText.Text = "Disconnected – server stopped, close this Workspace    " + TimestampText.Text;
             if (SimulationSpeedButton.IsVisible)
@@ -183,24 +182,6 @@ public partial class Workspace : Window, IWidgetHost
                     SimulationSpeedButton.Content = simulationSpeedText;
             }
         });
-    }
-
-    // Latency[0] exactly as the Remote Mirror writes it (below 0 while its link is down); offline once its process has exited, not
-    // responding once it has stopped rewriting the row for the silence timeout (a hung Remote Mirror).
-    private string GetLatencyText(RemoteClient remoteClient)
-    {
-        // Step 1: the Remote Mirror itself: alive, and still rewriting the row every pass
-        if (!remoteClient.IsRemoteMirrorAlive)
-            return "Remote Mirror offline";
-        ref SharedArrayEntry<Duration> latencyEntry = ref Context.GetLatency(0);
-        if (latencyEntry.GetSeq() != _latencySeq)
-            (_latencySeq, _latencyTimestamp) = (latencyEntry.GetSeq(), Timestamp.StopwatchNow);
-        if (Timestamp.StopwatchNow - _latencyTimestamp >= RemoteClient.s_silenceTimeout)
-            return "Remote Mirror not responding";
-
-        // Step 2: its number, to the microsecond so a steady link visibly ticks. Why a plain read: one aligned 8-byte Duration cannot tear, and Read would spin forever on a row a killed Remote Mirror left mid-write
-        Duration latency = latencyEntry.GetReadonlyRef();
-        return latency < Duration.Zero ? "Connection broken – reconnecting…" : $"{latency.TotalMilliseconds:0.000} ms";
     }
 
     private static string FormatSimulationSpeed(double simulationSpeed)
@@ -519,7 +500,7 @@ public partial class Workspace : Window, IWidgetHost
 
         foreach (WidgetLayout widgetLayout in layout.Widgets)
         {
-            IWidget? widget = NewWidget(widgetLayout.TypeKey);
+            IWidget? widget = Widgets.NewWidget(widgetLayout.TypeKey, WorkspaceContext);
             if (widget == null)
                 continue;
             widget.LoadStateJson(widgetLayout.StateJson);
@@ -558,28 +539,10 @@ public partial class Workspace : Window, IWidgetHost
         }
     }
 
-    /// A new widget of this type key (its class name, as a saved layout and the Widgets menu name it), on this window's context;
-    /// null for a key no widget has.
-    private IWidget? NewWidget(string typeKey) => typeKey switch
-    {
-        nameof(ChartWidget) => new ChartWidget(Context),
-        nameof(FillsWidget) => new FillsWidget(Context),
-        nameof(PositionsWidget) => new PositionsWidget(WorkspaceContext),
-        nameof(OrdersWidget) => new OrdersWidget(WorkspaceContext),
-        nameof(LadderWidget) => new LadderWidget(WorkspaceContext),
-        nameof(AuditTrailWidget) => new AuditTrailWidget(WorkspaceContext),
-        nameof(SendOrderWidget) => new SendOrderWidget(WorkspaceContext),
-        nameof(InstrumentHeadersWidget) => new InstrumentHeadersWidget(WorkspaceContext),
-        nameof(RiskLimitsWidget) => new RiskLimitsWidget(WorkspaceContext),
-        nameof(MessageEfficiencyWidget) => new MessageEfficiencyWidget(WorkspaceContext),
-        nameof(RateLimitWidget) => new RateLimitWidget(WorkspaceContext),
-        _ => null
-    };
-
     /// Adds the widget the clicked Widgets menu item's Tag names.
     private void OnAddWidgetClick(object? sender, RoutedEventArgs e)
     {
-        if (sender is MenuItem { Tag: string typeKey } && NewWidget(typeKey) is IWidget widget)
+        if (sender is MenuItem { Tag: string typeKey } && Widgets.NewWidget(typeKey, WorkspaceContext) is IWidget widget)
             AddWidget(widget);
     }
 

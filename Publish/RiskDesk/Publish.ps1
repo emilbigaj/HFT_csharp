@@ -1,7 +1,8 @@
-# Builds the risk-desk packages, one per folder in Templates (Adrian, NewRelease, Production, ...): the Remote Mirror and the Workspace as
+# Builds the risk-desk packages, one per folder in Templates (Adrian, NewRelease, THREADRIPPER, ...): the Remote Mirror and the Workspace as
 # standalone exes for any x64 Windows PC, with Start.bat, the template's files (its two configs and its Data folder: the server's folder
 # and default layouts) and the short guide beside them, into Staging\BigajRiskDesk_<template> beside this script, each zipped to
-# Staging\BigajRiskDesk_<template>.zip (see Spec.md "Risk desk package"). Sends nothing anywhere. Run from anywhere: .\Publish\RiskDesk\Publish.ps1
+# Staging\BigajRiskDesk_<template>.zip (see Spec.md "Risk desk package"), and the phone app every phone installs, Staging\HFT.apk (see
+# Spec.md "The phone"). Sends nothing anywhere. Run from anywhere: .\Publish\RiskDesk\Publish.ps1
 $ErrorActionPreference = 'Stop'
 $solutionDirectory = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $stageDirectory = Join-Path $PSScriptRoot 'Staging'
@@ -49,3 +50,11 @@ foreach ($templateDirectory in $templateDirectories) {
     Compress-Archive -Path $packageDirectory -DestinationPath $zipPath
     Write-Host "Publish.ps1: $zipPath"
 }
+
+# Step 8: the phone app once, its config built in (Phone\MirrorConfig.json: every phone dials the Threadripper's relay). Why this PC's
+# debug key, which a Release build signs with by default: a phone installs a newer APK over the old one only under the same key
+$phonePublishDirectory = Join-Path $stageDirectory 'Phone'
+dotnet publish (Join-Path $solutionDirectory 'Phone\Phone.csproj') -f net10.0-android -c Release -o $phonePublishDirectory -p:JavaSdkDirectory="$env:LOCALAPPDATA\Android\Jdk" -p:AndroidSdkDirectory="$env:LOCALAPPDATA\Android\Sdk"
+if ($LASTEXITCODE -ne 0) { throw "Publish.ps1: dotnet publish Phone failed with exit code $LASTEXITCODE; see the output above" }
+Copy-Item (Join-Path $phonePublishDirectory 'com.bigaj.hft-Signed.apk') (Join-Path $stageDirectory 'HFT.apk') -Force
+Write-Host "Publish.ps1: $(Join-Path $stageDirectory 'HFT.apk')"

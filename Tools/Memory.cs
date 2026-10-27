@@ -123,6 +123,12 @@ public sealed class Memory : IDisposable
     private FileStream? _backingFs;      // Linux file-backed regions only (holds the LOCK_SH fd)
     private IntPtr _anonPtr;             // anonymous Windows allocations (NativeMemory) / Linux mmap base
     private bool _disposed;
+    private bool _isInProcess;           // a block from s_inProcessByName: shared by every opener in this process, never freed
+
+    /// True in a process whose writers and readers of every region are its own threads (a phone: its Mirror and its GUI in one
+    /// process): a region is then a plain block in this process, found by name, with no mapping, lock, mlock or orphan reclaim.
+    public static bool IsInProcess { get; set; }
+    private static readonly Dictionary<string, Memory> s_inProcessByName = new();   // Why by name: the same name gives the same block, as the OS gives two processes the same mapping
 
     public Memory() { }
 
@@ -176,14 +182,30 @@ public sealed class Memory : IDisposable
 
     public static unsafe Memory CreateOrOpenShared(string name, long length)
     {
+        string lockName = name.Sanitize();
+        if (lockName.StartsWith(LockInfix, StringComparison.Ordinal))
+            throw new ArgumentException($"Memory.CreateOrOpenShared: region name must not start with '{LockInfix}' (reserved): {name}", nameof(name));
+
+        if (IsInProcess)
+        {
+            lock (s_inProcessByName)
+            {
+                if (!s_inProcessByName.TryGetValue(lockName, out Memory? memory))
+                {
+                    long alignedLength = AlignLengthForPage(length, useHugePages: false);
+                    byte* p = (byte*)NativeMemory.AlignedAlloc((nuint)alignedLength, CacheLine);
+                    if (p == null) throw new OutOfMemoryException();
+                    NativeMemory.Clear(p, (nuint)alignedLength);   // Why: a new mapping reads as zero, and every row protocol starts from zero
+                    s_inProcessByName[lockName] = memory = new Memory { Ptr = p, Length = alignedLength, Name = lockName, _isInProcess = true };
+                }
+                return memory;
+            }
+        }
+
         EnsureMLocked();
 
         bool useHugePages = length >= HugePageLength;
         length = AlignLengthForPage(length, useHugePages);
-
-        string lockName = name.Sanitize();
-        if (lockName.StartsWith(LockInfix, StringComparison.Ordinal))
-            throw new ArgumentException($"Memory.CreateOrOpenShared: region name must not start with '{LockInfix}' (reserved): {name}", nameof(name));
 
         if (OperatingSystem.IsWindows())
             return CreateOrOpenSharedWindows(lockName, length);
@@ -302,7 +324,8 @@ public sealed class Memory : IDisposable
 
     public unsafe void Dispose()
     {
-        if (_disposed) return;
+        // Why: an in-process block is every opener's and lives with the process, as the OS keeps a named mapping while any opener holds it
+        if (_disposed || _isInProcess) return;
         _disposed = true;
 
         string path = Path;

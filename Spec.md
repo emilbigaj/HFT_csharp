@@ -1499,7 +1499,7 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   The Remote Mirror's `ServerSocket` refuses every name that is not a remote desk's (`ConnectRefusal.RemoteDesk`), and
   Open then opens the same number as a `RemoteClient`; the real server never gives that answer. Why not a marker file or a
   flag: a file outlives the Mirror that wrote it, and a Workspace that once saw it beside a real server would send nothing
-  that server reads. A remote desk's GUI names end `@<machine>` (`ManualClient.GetGuiName`): no Workspace on the CME box or
+  that server reads. A remote desk's GUI names end `@<machine>` (`Client.GetGuiName`): no Workspace on the CME box or
   on another desk can hold one, so after a link loss nobody else can take a remote GUI's name, and with it its client id,
   before its stand-in is started again. The Local end reads the principal from the name before `_GUI<n>@`
   (`ManualClient.TryParseRemoteGuiName`). Names still fit 256 characters, folder included (see "Setting up a remote desk").
@@ -1772,7 +1772,7 @@ Both deploy scripts live under `Publish\`, each building into a `Staging` folder
 `Publish\CME\PublishAndDeploy.ps1` publishes the solution for Linux into `Publish\CME\Staging` and sends it to the CME box
 (rsync plus a dated snapshot there); `Publish\RiskDesk\Publish.ps1` builds the exes once into
 `Publish\RiskDesk\Staging\Build`, then one desk package per folder in `Publish\RiskDesk\Templates` (Adrian,
-NewRelease, Production, ...), `Staging\BigajRiskDesk_<template>`, each zipped beside its folder, sending nothing
+NewRelease, THREADRIPPER, ...), `Staging\BigajRiskDesk_<template>`, each zipped beside its folder, sending nothing
 (2026-10-23; from 2026-10-20 two fixed flavour folders beside the script; before, one `BigajRiskDesk` package). A new
 desk is a new template folder; the script needs no edit.
 
@@ -1843,6 +1843,53 @@ has one representative per GUI, as the box has.
   round trip to the box while it starts a phone GUI's stand-in (other phones' packets wait those milliseconds); GUI names
   stay unique per machine name, so a relay desk and its phones must have different names (a phone's is its device's).
 
+### The phone: a desk in one process (2026-10-27)
+
+The Android app (`Phone/`) is a remote desk whose Mirror and GUI share one process. Nothing in it is new to the box or the
+relay: it dials a relay desk (see "Relay") exactly as a desk dials, and to the box it is one more GUI of that desk.
+- **One process.** `PhoneView` starts the Remote end's loop (`MirrorRunner.RunRemote`, the code `Mirror.exe` runs on a
+  desk, moved verbatim into a callable class) on a thread, with `Memory.IsInProcess = true`: every region (the copy of the
+  server's arrays, the letterboxes, the GUI client's rings) is a plain zeroed block in process memory found by name, so
+  `Context`, `SharedArray`, `LetterBox` and the sockets run unchanged, and no mapping, lock, `mlockall` or `/dev/shm`
+  exists (Android has none). The GUI is the desk's: `ManualClient.Open` is answered `RemoteDesk` by the in-process Remote
+  Mirror and opens a `RemoteClient`, and the widgets are the desk's over the same `WorkspaceContext`.
+- **One view, one widget at a time** (a phone has no windows): the bar shows the clock and the link's latency (the desk's
+  rule, `Widget.LatencyText`), a picker names the row-fed widgets (Orders, Positions, Instrument Headers, Risk Limits,
+  Message Efficiency, Rate Limits; built by `Widgets.NewWidget`, the desk's table) and the Ladder, which picks its
+  instrument as every ladder does (a picker in its header lists the primary client's instruments, refreshed when opened:
+  `LadderWidget.FillInstrumentPicker`), and a server workspace is shown: every order and position. A ladder also opens from Instrument Headers' menu (a long press is the phone's right-click; the ladder's own menu answers
+  the Holding gesture too) and Send Order from either, as on a desk: `PhoneView` is the `IWidgetHost` (`AddToHost` finds the nearest host above a widget, a desk's
+  Window or the phone's view), and the opened widget replaces the one shown. The phone's orders are a desk GUI's: the box
+  cancels them when its session ends (the link silent 10 s). Charts, Fills and the Audit Trail tail synced files; the phone
+  syncs none.
+- **Connect off the UI thread.** The copy's header and the box's `AllocatedClientId` can take seconds over a mobile link,
+  and Android stops an app whose UI thread blocks for 5 s. A server restart rebuilds the view as a desk Workspace does
+  (`RemoteClient.IsSessionEnded`: renew the contexts, close the client, connect anew under the same GUI number).
+- **Config built in** (2026-10-27): `Phone/MirrorConfig.json` is an Android asset of the APK, read at start, because every
+  phone dials the one relay (the Threadripper, which is always on: `100.86.63.127:27794`) and Android gives a phone's owner
+  no way into the app's folder without USB debugging. A phone is admitted by its Tailscale address in the THREADRIPPER
+  template's `RelayIPWhitelist`, so a new phone needs no new APK, and a new relay address needs one for every phone. `Data`
+  (`DirectoriesRoot`) is under the app's external files folder.
+- **Names.** `Platform.Name` is the device model (Android reports "localhost" as the machine name), so the phone's GUIs
+  are `<principal>_GUI<n>@<model>` (`Client.GetGuiName`), unique beside the relay desk's own.
+- **Pace.** The Mirror and client loops pass every 20 ms (a desk's 1 ms would drain the battery); rows still arrive every
+  100 ms. ARM64 runs none of the x86 intrinsics: `X86BaseWrapper.Pause` spins instead (the x64 code is unchanged,
+  benchmarked), and `ProcessId.IsAlive` answers for this process without the OS. `Application` registers only `ProcessExit`:
+  the phone has no terminal, and its runtime refuses the SIGHUP and Ctrl+C hooks (`PlatformNotSupportedException`).
+- **Backgrounding.** Android freezes a backgrounded app: its link falls silent, the relay closes the phone GUI's stand-in
+  after 10 s (cancelling its orders, as any GUI's), and on resume the app redials and takes a fresh snapshot. No foreground
+  service in this version.
+- **Build.** `Publish\RiskDesk\Publish.ps1` publishes the Release `Staging\HFT.apk` (trimmed, 48 MB) that every phone
+  installs by tapping the file (once allowing "install unknown apps"); a newer one installs over it because every build signs
+  with this PC's Android debug key (lose it and phones must uninstall first). `dotnet build Phone\Phone.csproj -f
+  net10.0-android` builds a Debug one for adb. Both need the Android workload and SDK; the project is not in
+  `HFT.slnx`, so the desktop builds need neither. It references every library explicitly without the Android runtime
+  identifiers (`HFT.targets` makes each an executable, which a self-contained app would otherwise rebuild per identifier).
+  The APK runs on Mono, not NativeAOT; `Widget` is rooted for the grids' sorting as on a desk. A box deploy that changes
+  any shared array needs a new APK (the layout hash refuses a mismatch, as a desk's does).
+- Not built: a settings page, folder sync, a foreground service, several widgets at once,
+  an emulator path (a device over USB).
+
 ### Setting up a remote desk
 
 - The usual way is the risk desk package above. By hand: ship the Build output folder (Mirror, Workspace and their libraries; Logging is not run there) with a `MirrorConfig.json`,
@@ -1858,8 +1905,9 @@ has one representative per GUI, as the box has.
 - Reversed, when the networks make a desk dialling the box easier: the box's config has `"ListenPort": 7400,
   "IPWhitelist": ["<each risk desk's IP>"]` and no `ConnectAddresses`; each desk's has `"ConnectAddresses": ["<CME box
   IP>:7400"]` and no `ListenPort` or `IPWhitelist`. One box listener serves every desk (each link is its own session).
-- A relay desk adds `"RelayListenPort": 47801, "RelayIPWhitelist": ["<each phone's tunnel address>"]`; a phone's config is a
-  desk's with `"ConnectAddresses": ["<relay desk's tunnel address>:47801"]`.
+- A relay desk adds `"RelayListenPort": 27794, "RelayIPWhitelist": ["<each phone's tunnel address>"]` (the THREADRIPPER template,
+  this PC's desk: Tailscale, the S22+ at 100.99.246.93); a phone's config is a desk's with `"ConnectAddresses":
+  ["<relay desk's tunnel address>:27794"]` (the Threadripper is 100.86.63.127), and no folder sync.
 - A listening end accepts only `IPWhitelist`, each entry one address or a CIDR range (`"10.10.0.0/16"` admits 10.10.*.*, for desks whose VPN address changes; keep the range as small as the VPN pool) (`TcpLinkConnector.AcceptTcpLinks` closes any other connection at once; `MirrorConfig.ThrowIfInvalid` refuses to start a listener with the list empty). Why: on a Remote any new link replaces the live one, and the Local end then closes that desk's stand-ins, so the server cancels every remote order; an internet scanner touching the port would do that several times a day. Firewall the port to the same address too: links are still plain TCP, unauthenticated and
   unencrypted for now.
 

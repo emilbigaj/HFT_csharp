@@ -19,15 +19,8 @@ namespace Tools
         {
             get
             {
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                {
-                    return OSType.Windows;
-                }
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-                {
-                    return OSType.Linux;
-                }
-                throw new Exception("Unsupported OS platform.");
+                // Why not a Linux check: Android is not Linux to .NET, and every non-Windows system writes paths the Linux way
+                return RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? OSType.Windows : OSType.Linux;
             }
         }
         public FileSystemPath(string path)

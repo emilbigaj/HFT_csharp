@@ -1,0 +1,10 @@
+{
+  "MirrorRole": "Remote",
+  "ServerName": "CME_Production",
+  "ListenPort": 0,
+  "IPWhitelist": [],
+  "ConnectAddresses": ["100.86.63.127:27794"],
+  "DirectoriesRoot": "",
+  "IsConsoleVisible": false,
+  "IsFolderSyncOn": false
+}

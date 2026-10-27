@@ -1383,6 +1383,11 @@ listed.
 - **C25. 2026-10-23, the simulator hands a target to the exchange at its own time** (C# only, nothing to port; the
   simulator is not ported): `ExchangeSimulator.FromClientToExchange_OrderTarget` offers each target's exchange time to the
   clock, so a target is no longer judged after the next market event (Simulator/spec.txt).
+- **C28. 2026-10-27, the phone app and the ladder's instrument picker** (C# only, nothing to port; the GUI, the Mirror's Remote
+  end and the phone are C#): `Phone/` runs a desk's Remote Mirror and GUI in one Android process over `Memory.IsInProcess`
+  (plain blocks found by name, no shared memory), dialling the Threadripper desk's relay; ARM64 and Android guards in Tools
+  (`Pause`, `ProcessId.IsAlive`, `Application`'s signal hooks, `FileSystemPath.OSType`). Every ladder picks its instrument in
+  its header. The box and the C++ server see the phone as one more GUI of a desk (`<principal>_GUI<n>@<model>`).
 - **C27. 2026-10-27, the Local Mirror's one publish cadence, and the relay** (C# only, nothing to port; the Local Mirror on
   the box is the C# one): the box's Local Mirror now reads every server row 10 times a second whatever the number of
   desks (it was 10 per desk plus one per remote trader's order), so the server's per-pass reader cost (P-series "+330 ns

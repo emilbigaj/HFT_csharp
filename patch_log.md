@@ -4,6 +4,90 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-27 — The publish builds the phone app, its config built in
+
+- `Phone/MirrorConfig.json` (new): the phone's config, dialling the Threadripper's relay `100.86.63.127:27794`, built into the
+  APK as an Android asset (`Phone.csproj`); `PhoneView.Start` reads it from the assets instead of the external files folder.
+  Why: every phone (mine, Adrian's) dials the one always-on relay, and Android gives no way to hand a phone a file in the
+  app's folder without USB debugging. A phone is admitted by its Tailscale address in the THREADRIPPER template.
+- `Publish/RiskDesk/Publish.ps1` step 8: publishes the Release APK once, `Staging\HFT.apk`, signed with this PC's Android
+  debug key (the Debug builds' key too, checked: same SHA-256), so a newer APK installs over the old one. Installing: send the
+  file to the phone, tap it, allow "install unknown apps" once. `TrimmerRootAssembly Widget` takes `RootMode="All"` (the
+  Android trimmer requires it). Verified: the Release APK builds (48 MB). +8 lines.
+
+---
+
+## 2026-10-27 — The THREADRIPPER desk template relays to the phone
+
+- `Publish/RiskDesk/Templates/Production` renamed `THREADRIPPER` (by hand: the desk that runs on this PC); its `MirrorConfig.json`
+  adds `"RelayListenPort": 27794, "RelayIPWhitelist": ["100.99.246.93"]` (the S22+'s Tailscale address). The phone's config
+  dials `100.86.63.127:27794` (the Threadripper's). Spec.md "Setting up a remote desk".
+
+---
+
+## 2026-10-27 — Every ladder picks its instrument in its header
+
+- `Widget/LadderWidget.axaml(.cs)` — a ComboBox in the header lists the primary client's instruments (the server's `Instrument`
+  objects, so the pick is the ladder's own `Instrument`; the ones not listed yet are added each time it opens, so one allocated
+  since is there) and `SetInstrument` selects the ladder's. A ladder added without an instrument (a desk's Add Widget, the
+  phone's picker) shows one once picked; Instrument Headers' Open Ladder and a restored layout preselect it. The header is one
+  row split 5:3:5 that follows the widget's width: the picker on the left, Pos and PnL each centred in
+  its share, PnL's the larger (its value is the longer). The picker draws its symbol by a compiled binding (`x:DataType`
+  Instrument): a reflection binding showed blank in the published, trimmed desk. Its symbol may run to 18 px from the picker's edge and the
+  arrow sits 4 px from it (two styles on the Fluent template's named parts: the theme reserves a fixed 32 px arrow column and
+  has no setting for it). All three shrink with the widget (no minimum: a very narrow one ends the symbol in "…"). The frame's title is the instrument's symbol and follows a pick
+  (`WidgetContainer.ShowTitle`). The centre-lock toggle is gone (`_isCenterLocked`, `OnLockCenterChanged`, its styles): a ladder centres once
+  when it shows. Desk and phone alike. Net −8 lines; the phone's own instrument picker of the same day is gone again (−20).
+
+---
+
+## 2026-10-27 — The phone app: `Phone/`, a desk in one process on Android
+
+- `Phone/` (new, not in `HFT.slnx`): `Phone.csproj` (net10.0-android, Avalonia.Android 12.0.1, every library referenced
+  without the Android runtime identifiers), `MainActivity.cs` (Avalonia 12's `AvaloniaAndroidApplication<App>` and a
+  plain `AvaloniaMainActivity`), `App.axaml` (the desk's light Fluent theme), `PhoneView.axaml(.cs)`: the Mirror loop on a
+  thread over in-process memory, the GUI client opened off the UI thread, one widget at a time from a picker, the clock
+  and latency bar, the server-restart rebuild. `Widget/Widgets.cs` (new): `Widgets.NewWidget` (the widget table) and
+  `LatencyText` (the latency rule), moved out of `Workspace.axaml.cs` so both heads share them (−27 lines there).
+  Spec.md "The phone". About +190 lines plus 55 moved.
+- The phone hosts the widgets a menu opens: `PhoneView : IWidgetHost` (`AddWidget` shows the widget in place of the one shown)
+  and `Widget.AddToHost` finds the nearest `IWidgetHost` above a widget (was: the Window, which a phone has none of, so the
+  menu items did nothing there). Instrument Headers' long-press menu opens a ladder and Send Order on the phone as on a desk;
+  its orders are a desk GUI's, cancelled by the box when the session ends. `FastLadderControl` opens its right-click menu on
+  Avalonia's Holding gesture too (a touch has no right button; a tap only selects a tick). The Ladder is in the widget picker
+  too. Supersedes "no Send Order, no Ladder". +33 lines.
+- Toolchain on this PC: the .NET Android workload, the Android SDK and JDK under `%LOCALAPPDATA%\Android`.
+- Verified on a Samsung S22+ (SM-S906E, Android 16, arm64) over USB (`adb reverse tcp:47890`, config pushed to the app's files
+  folder) against the loopback rig (harness server + Local Mirror → relay `Mirror.exe`, scratch `relaytest/run_relay_for_phone.ps1`):
+  the phone's Mirror dialled the relay, the GUI connected as `MLTest_GUI0@SM-S906E` (relay client id 3), the box opened its
+  stand-in, and the screen showed the desk's bar (link latency 20–40 ms) and the Positions grid's row from the box. Two Android faults found on the device and fixed in the foundations entry below (`Application`'s signal hooks,
+  `FileSystemPath.OSType`); `PhoneView` shows an exception's base message (a type initializer's wrapper names no cause).
+
+---
+
+## 2026-10-27 — The phone's foundations: in-process memory, the Remote loop as a library call, ARM64 guards
+
+- `Tools/Memory.cs` — `Memory.IsInProcess`: a process whose writers and readers of every region are its own threads (a
+  phone: Mirror and GUI in one process) gets each region as a plain zeroed block found by name (`s_inProcessByName`),
+  never freed; no mapping, lock, mlock or orphan reclaim. `Context`, `SharedArray`, `LetterBox` and the socket rings
+  are unchanged: they only ever hold the pointer.
+- `Mirror/MirrorRunner.cs` (new) — `RunRemote`, `RunRelay` and `ReadServerHeader` moved verbatim out of `Mirror/Program.cs`
+  so a phone app can run the Remote loop on a thread; `RunRemote` takes the pass interval (1 ms on a desk).
+- `Tools/Tools.cs` — `X86BaseWrapper.Pause` checks `X86Base.IsSupported` (it throws on ARM64): benchmarked, the x64 code is
+  byte-identical (`pause; dec; jne`, 12 B; 1.404 vs 1.393 us per 100 spins). `Platform.Name` is settable: Android reports
+  "localhost" and remote GUI names carry it. `Tools/ProcessId.cs` — `IsAlive` is true for this process's own id (Android is
+  neither Windows nor Linux to it), and `FileSystemPath.OSType` is Windows else Linux (it threw "Unsupported OS platform").
+  `Tools/Application.cs` — the static constructor registers only `ProcessExit` on Android: the SIGHUP hook and
+  `Console.CancelKeyPress` each create a `PosixSignalRegistration`, which Android's runtime refuses
+  (`PlatformNotSupportedException`, surfacing as "the type initializer for Tools.Clock threw": `Clock` adds its exit action).
+  `Provider/Client.cs` — `GetGuiName` names a remote desk's machine by `Platform.Name` (was `Environment.MachineName`: the
+  phone announced itself as `@localhost`).
+- Verified (scratch `oneprocessdesk`: `Memory.IsInProcess = true`, `MirrorRunner.RunRemote` on a thread and the lifecycle
+  harness's GUI role in one process, against the harness box): GUI connected in 183 ms, probe 74 ms; server restart →
+  rebuilt in 109 ms, probe 154 ms; Local Mirror restart → probe 124 ms. +45 lines, 122 moved.
+
+---
+
 ## 2026-10-27 — Mirror relay: a desk serves its copy onward to a phone
 
 - `Mirror/LocalMirror.cs` — takes a stand-in factory `(clientName, principalName) => IManualClient` instead of building

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -7,6 +8,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Data;
 using Execution;
 using Provider;
@@ -46,10 +48,10 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
     private readonly WidgetRefreshTimer _refreshTimer;
 
     public Instrument Instrument { get; private set; } = null!;
+    private readonly ObservableCollection<Instrument> _pickerInstruments = new();   // the header picker's items: the primary client's instruments
     public Position Position { get; private set; } = null!;
     private bool _isShowingMyOrders = true;
     private bool _isAutoScrollPending;   // re-center once the rows overflow the view, then clear
-    private bool _isCenterLocked;   // re-center on every refresh instead of once
 
     private readonly List<RenderedLadderRow> _renderedLadderRows = new();   // this pass's rows, handed to LadderControl by the UI post
     // Why two caches: LadderControl keeps drawing the last pass's rows while this pass rewrites the other cache
@@ -84,6 +86,29 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         InitializeComponent();
         _refreshTimer = new WidgetRefreshTimer(nameof(LadderWidget), 100, Refresh, isStarted: false);
         LadderControl.RightClick += OnLadderRightClick;
+        InstrumentPicker.ItemsSource = _pickerInstruments;
+        FillInstrumentPicker();
+    }
+
+    /// Adds the primary client's instruments the picker does not list yet (one allocated since it last opened). Why the server's
+    /// Instrument objects: they are the ladder's own, so the pick and the ladder's Instrument are one object.
+    private void FillInstrumentPicker()
+    {
+        foreach (int instrumentId in _context.Primary.InstrumentIds)
+        {
+            Instrument instrument = ContextManager.ServerContext.GetInstrument(instrumentId);
+            if (!_pickerInstruments.Contains(instrument))
+                _pickerInstruments.Add(instrument);
+        }
+    }
+
+    private void OnInstrumentPickerOpened(object? sender, EventArgs e) => FillInstrumentPicker();
+
+    /// The picked instrument becomes the ladder's (the pick SetInstrument itself made already is).
+    private void OnInstrumentPicked(object? sender, SelectionChangedEventArgs e)
+    {
+        if (InstrumentPicker.SelectedItem is Instrument instrument && instrument != Instrument)
+            SetInstrument(instrument.InstrumentId);
     }
 
     /// A ladder on this instrument (shown only if it is allocated to the workspace's principal).
@@ -94,7 +119,7 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         return ladderWidget;
     }
 
-    /// Shows this instrument and starts refreshing, if it is allocated to the workspace's primary client; otherwise does nothing.
+    /// Shows this instrument (selected in the header picker) and starts refreshing, if it is allocated to the workspace's primary client; otherwise does nothing.
     public void SetInstrument(int instrumentId)
     {
         if (!_context.Primary.InstrumentIds[instrumentId])
@@ -104,6 +129,9 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         Instrument = ContextManager.ServerContext.GetInstrument(instrumentId);
         Position = _context.Primary.GetPosition(instrumentId);
         Title = Instrument.ShortSymbol;
+        this.FindAncestorOfType<WidgetContainer>()?.ShowTitle();   // a desk's frame; none on the phone
+        FillInstrumentPicker();
+        InstrumentPicker.SelectedItem = Instrument;
         _isAutoScrollPending = true;
         _refreshTimer.Start();
     }
@@ -114,13 +142,6 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         MenuItem showMyOrdersMenuItem = new() { Header = "Show My Orders", ToggleType = MenuItemToggleType.CheckBox, IsChecked = _isShowingMyOrders };
         showMyOrdersMenuItem.Click += (_, _) => _isShowingMyOrders = !_isShowingMyOrders;
         yield return showMyOrdersMenuItem;
-    }
-
-    private void OnLockCenterChanged(object? sender, RoutedEventArgs e)
-    {
-        _isCenterLocked = (sender as ToggleButton)?.IsChecked == true;
-        if (_isCenterLocked)
-            _isAutoScrollPending = true;   // snap to center immediately when the lock is engaged
     }
 
     /// Opens the title bar's menu on a right-click on the header.
@@ -230,7 +251,7 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
             LadderControl.IsCompactMode = !_isShowingMyOrders;
             LadderControl.UpdateRows(_renderedLadderRows);
 
-            if (_isAutoScrollPending || _isCenterLocked)
+            if (_isAutoScrollPending)
                 Dispatcher.UIThread.Post(CenterLadder, DispatcherPriority.Input);
         });
     }
@@ -238,14 +259,14 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
     /// Scrolls the ladder to its middle once its rows overflow the view, clearing the one-time request when it does.
     private void CenterLadder()
     {
-        if (_refreshTimer.IsDisposed || (!_isAutoScrollPending && !_isCenterLocked))
+        if (_refreshTimer.IsDisposed || !_isAutoScrollPending)
             return;
 
         if (LadderScroller.Extent.Height > LadderScroller.Bounds.Height)
         {
             double scrollCenter = (LadderControl.Bounds.Height - LadderScroller.Bounds.Height) / 2.0;
             LadderScroller.Offset = new Vector(0, Math.Max(0, scrollCenter));
-            _isAutoScrollPending = false;   // one-time flag cleared; the lock keeps re-centering each refresh
+            _isAutoScrollPending = false;
         }
     }
 

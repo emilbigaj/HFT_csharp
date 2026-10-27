@@ -26,7 +26,7 @@ namespace Tools
         public static readonly bool IsLinux = RuntimeInformation.IsOSPlatform(OSPlatform.Linux);
 
         public static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-        public static readonly string Name = System.Environment.MachineName;
+        public static string Name { get; set; } = System.Environment.MachineName;   // a phone sets its device's name at startup: Android reports "localhost", and remote GUI names carry it
     }
 
 
@@ -36,7 +36,11 @@ namespace Tools
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void Pause()
         {
-            System.Runtime.Intrinsics.X86.X86Base.Pause();
+            // Why the check: a JIT-time constant on x64 (the same single pause instruction, benchmarked); on ARM64 (a phone) X86Base.Pause throws
+            if (System.Runtime.Intrinsics.X86.X86Base.IsSupported)
+                System.Runtime.Intrinsics.X86.X86Base.Pause();
+            else
+                System.Threading.Thread.SpinWait(1);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -1,0 +1,9 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Phone.App"
+             RequestedThemeVariant="Light">
+    <!-- Light, as the desk Workspace: the widgets' colours are light ones. -->
+    <Application.Styles>
+        <FluentTheme />
+    </Application.Styles>
+</Application>

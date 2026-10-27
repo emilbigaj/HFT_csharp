@@ -148,6 +148,8 @@ public sealed class FastLadderControl : Control
         _tlBuyChevron = CreateChevronLayout(">", _columns[0]);
         _tlSellChevron = CreateChevronLayout("<", _columns[4]);
         _chevronColumnWidth = Math.Max(_tlBuyChevron.Width, _tlSellChevron.Width) + 4 * CellPadding;
+        // Why: a touch has no right button; a hold (Avalonia's Holding gesture, the phone's right-click) opens the same menu
+        Holding += (_, holdingEventArgs) => { if (holdingEventArgs.HoldingState == HoldingState.Started) HandleRightClick(holdingEventArgs.Position); };
     }
 
     protected override void OnPointerMoved(PointerEventArgs e)

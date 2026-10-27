@@ -94,6 +94,9 @@ public static class ProcessId
         // 0 and below are not process ids: kill(0|-1, 0) targets a process group and would read as alive, so a client that never set its pid would never be closed (see Spec.md).
         if (pid <= 0)
             return false;
+        // Why: a process is alive to itself: a phone's Mirror and GUI share one process, and Android is neither Windows nor Linux below
+        if (pid == Environment.ProcessId)
+            return true;
 
         if (OperatingSystem.IsWindows())
         {

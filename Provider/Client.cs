@@ -72,7 +72,7 @@ public sealed class ManualClient : Client, IManualClient
     }
 
     // GUI number n of a principal: "<principal>_GUI<n>"; on a remote desk "<principal>_GUI<n>@<machine>", a name no Workspace elsewhere can hold.
-    public static string GetGuiName(string principalName, int guiNumber, bool isRemoteDesk) => $"{principalName}_GUI{guiNumber}{(isRemoteDesk ? "@" + Environment.MachineName : "")}";
+    public static string GetGuiName(string principalName, int guiNumber, bool isRemoteDesk) => $"{principalName}_GUI{guiNumber}{(isRemoteDesk ? "@" + Platform.Name : "")}";
 
     // The principal a remote desk's GUI name serves (the name before its "_GUI<n>@<machine>") and its number n; false for a name
     // that is no remote GUI's.

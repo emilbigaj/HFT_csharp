@@ -76,13 +76,13 @@ public sealed class WidgetLayout
 /// Puts a widget into the Workspace window that holds a control: a widget opening another (order entry, a ladder).
 public static class WidgetHost
 {
-    /// Adds the widget to the IWidgetHost window holding this control; logs and drops it when there is none.
+    /// Adds the widget to the IWidgetHost holding this control (a desk's Window, the phone's view); logs and drops it when there is none.
     public static void AddToHost(this Control control, IWidget widget)
     {
-        if (control.FindAncestorOfType<Window>() is IWidgetHost widgetHost)
+        if (control.FindAncestorOfType<IWidgetHost>() is { } widgetHost)
             widgetHost.AddWidget(widget);
         else
-            Console.WriteLine($"{control.GetType().Name}: not inside a Workspace window, {widget.TypeKey} not opened");
+            Console.WriteLine($"{control.GetType().Name}: no IWidgetHost above it, {widget.TypeKey} not opened");
     }
 
     /// Opens a context menu of these items on the control (a title bar's right-click); nothing when there are none.

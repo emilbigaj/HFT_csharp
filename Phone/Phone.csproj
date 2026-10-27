@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<!-- The phone app: the desk in one process (Mirror and GUI over in-process memory), see Spec.md "The phone". Publish\RiskDesk\Publish.ps1
+	     builds the Release HFT.apk every phone installs; dotnet build Phone\Phone.csproj -f net10.0-android builds a Debug one for adb.
+	     Not in HFT.slnx: it needs the Android workload, which the desktop builds must not. -->
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0-android</TargetFramework>
+		<SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
+		<Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<LangVersion>preview</LangVersion>
+		<ApplicationId>com.bigaj.hft</ApplicationId>
+		<ApplicationVersion>1</ApplicationVersion>
+		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+		<AndroidPackageFormat>apk</AndroidPackageFormat>
+		<AndroidEnableProfiledAot>false</AndroidEnableProfiledAot>
+		<AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+		<!-- Why: HFT.targets makes every project an Exe, and a self-contained app may not reference one (NETSDK1150: an app-host concern, none on Android) -->
+		<ValidateExecutableReferencesMatchSelfContained>false</ValidateExecutableReferencesMatchSelfContained>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Avalonia.Android" Version="12.0.1" />
+		<!-- Why: grids sort by a column's property name (reflection), which trimming strips from the widgets' row classes (as Workspace.csproj) -->
+		<TrimmerRootAssembly Include="Widget" RootMode="All" />
+		<!-- Why baked in: every phone dials the one relay (the Threadripper), and a phone cannot be handed a file in the app's folder -->
+		<AndroidAsset Include="MirrorConfig.json" />
+	</ItemGroup>
+
+	<!-- Why every library, each with GlobalPropertiesToRemove: a self-contained app passes its Android runtime identifiers down to
+	     referenced "executables", which the repo's libraries are (HFT.targets), and adds the transitive ones itself without the removal;
+	     listed here and built plainly, they are the net10.0 assemblies they are on a desk -->
+	<PropertyGroup>
+		<DisableTransitiveProjectReferences>true</DisableTransitiveProjectReferences>
+	</PropertyGroup>
+	<ItemGroup>
+		<ProjectReference Include="..\Tools\Tools.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
+		<ProjectReference Include="..\Data\Data.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
+		<ProjectReference Include="..\Execution\Execution.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
+		<ProjectReference Include="..\Socket\Socket.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
+		<ProjectReference Include="..\Provider\Provider.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
+		<ProjectReference Include="..\Chart\Chart.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
+		<ProjectReference Include="..\Widget\Widget.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
+		<ProjectReference Include="..\Mirror\Mirror.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
+	</ItemGroup>
+
+</Project>

@@ -6,5 +6,7 @@
   "ConnectAddresses": ["10.172.13.228:27793"],
   "DirectoriesRoot": "Data",
   "IsConsoleVisible": true,
-  "IsFolderSyncOn": true
+  "IsFolderSyncOn": true,
+  "RelayListenPort": 27794,
+  "RelayIPWhitelist": ["100.99.246.93"]
 }

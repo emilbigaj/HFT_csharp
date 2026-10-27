@@ -1,0 +1,14 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Phone.PhoneView">
+    <DockPanel>
+        <!-- The bar: the clock and the link's latency, and the picker of the one widget shown -->
+        <Border x:Name="TopBar" DockPanel.Dock="Top" Padding="8,6">
+            <StackPanel Spacing="4">
+                <TextBlock x:Name="StatusText" FontSize="14" TextWrapping="Wrap" Text="starting…"/>
+                <ComboBox x:Name="WidgetPicker" HorizontalAlignment="Stretch"/>
+            </StackPanel>
+        </Border>
+        <ContentControl x:Name="WidgetHost"/>
+    </DockPanel>
+</UserControl>
