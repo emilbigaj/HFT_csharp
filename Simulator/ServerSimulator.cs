@@ -503,11 +503,16 @@ public class InstrumentSimulator
             Delete(ref orderState, orderManager);
         }
     }
-
+    double flat = 0;
     public void OnTrade(ref Trade trade)
     {
         if (TradingStatus != TradingStatus.Open)
             return;
+
+        if (trade.Direction == 0)
+        {
+            return;
+        }
 
         ref int mask = ref (trade.Direction > 0 ? ref _askMask : ref _bidMask);
         int oldMask = mask;

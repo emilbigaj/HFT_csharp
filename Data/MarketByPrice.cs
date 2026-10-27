@@ -461,6 +461,7 @@ namespace Data
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public struct MarketByPrice64
     {
+        public int Quantity => Bids.Quantity + Asks.Quantity;
         public SideByPrice64 Bids;
         public SideByPrice64 Asks;
 
