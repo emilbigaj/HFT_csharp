@@ -9,6 +9,11 @@
                 <ComboBox x:Name="WidgetPicker" HorizontalAlignment="Stretch"/>
             </StackPanel>
         </Border>
+        <!-- The widget's title bar: its buttons and readouts (Positions' Resume/Pause All and total PnL), on a desk title bar's
+             background so their colours read as there; hidden for a widget with none -->
+        <Border x:Name="TitleBarStrip" DockPanel.Dock="Top" Background="#F3F3F3" Padding="8,4" IsVisible="False">
+            <ContentControl x:Name="TitleBarHost"/>
+        </Border>
         <ContentControl x:Name="WidgetHost"/>
     </DockPanel>
 </UserControl>

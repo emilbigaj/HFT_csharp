@@ -171,7 +171,8 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
 
     public void OnResumeAllClick(object? sender, RoutedEventArgs e) => PerformChangeAllAlgoStatus(AlgoStatus.Live);
 
-    /// Adds a row for each instrument newly allocated to the primary client, refreshes every row and posts them to the grid. Timer thread.
+    /// Adds a row for each instrument newly allocated to the primary client, refreshes every row and posts them to the grid with
+    /// their total profit in the title bar. Timer thread.
     private void Refresh()
     {
         // Step 1: a row for each newly allocated instrument
@@ -182,17 +183,25 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
                 _widgetPositionsByInstrumentId.Add(instrumentId, new WidgetPosition(_context.Primary.GetPosition(instrumentId)));
         }
 
-        // Step 2: refresh every row and post them to the grid
+        // Step 2: refresh every row and add up their profit
         _activeWidgetPositions.Clear();
+        double _totalProfit = 0;
         foreach (WidgetPosition widgetPosition in _widgetPositionsByInstrumentId.Values)
         {
             widgetPosition.Refresh();
             _activeWidgetPositions.Add(widgetPosition);
+            _totalProfit += widgetPosition.Profit;
         }
+
+        // Step 3: post the rows to the grid and the total to the title bar, coloured by its sign as the ladder's PnL
+        double totalProfit = _totalProfit;
         Dispatcher.UIThread.Post(() =>
         {
-            if (!_refreshTimer.IsDisposed)
-                Rows.ReconcileRows(_activeWidgetPositions);
+            if (_refreshTimer.IsDisposed)
+                return;
+            Rows.ReconcileRows(_activeWidgetPositions);
+            TotalProfitValue.Text = $"{totalProfit:N2}";
+            TotalProfitValue.Foreground = Palette.GetSignBrush(totalProfit, Palette.ProfitGreen, Palette.LossRed);
         });
     }
 

@@ -14,8 +14,8 @@ public class PhoneApplication(IntPtr handle, JniHandleOwnership ownership) : Ava
     protected override AppBuilder CustomizeAppBuilder(AppBuilder builder) => base.CustomizeAppBuilder(builder).WithInterFont();
 }
 
-/// The app's one activity: Avalonia's. Portrait, and kept across rotation and size changes so the Mirror thread lives on.
-[Activity(Label = "HFT", Theme = "@style/HftTheme", MainLauncher = true, ScreenOrientation = ScreenOrientation.Portrait,
+/// The app's one activity: Avalonia's. Follows the phone's rotation, kept across rotation and size changes so the Mirror thread lives on.
+[Activity(Label = "HFT", Theme = "@style/HftTheme", MainLauncher = true,
     ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.UiMode)]
 public class MainActivity : AvaloniaMainActivity
 {

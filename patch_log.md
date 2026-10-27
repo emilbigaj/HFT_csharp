@@ -4,6 +4,30 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-27 — The phone shows a widget's title bar in a strip of its own
+
+- `Phone/PhoneView.axaml(.cs)` — under the green bar, a strip on a desk title bar's background (#F3F3F3) holds the shown
+  widget's `TitleBarContent` (Positions: Resume/Pause All and the total PnL), hidden for a widget with none. Why its own strip:
+  the PnL is green or red, unreadable on the green bar. Verified on the S22+: Positions shows "PnL: 77.63" in green. +8 lines.
+
+---
+
+## 2026-10-27 — Positions shows its total PnL in the title bar
+
+- `Widget/PositionsWidget.axaml(.cs)` — after the Resume/Pause All buttons, "PnL:" and every row's Profit added up, refreshed
+  with the rows (100 ms) and coloured by its sign as the ladder's PnL (`Palette.GetSignBrush`). A row whose Profit is NaN (no
+  price yet) makes the total NaN rather than hiding it. +12 lines.
+
+---
+
+## 2026-10-27 — The phone app turns with the phone
+
+- `Phone/MainActivity.cs` — no `ScreenOrientation = Portrait`: the app follows the phone's rotation (auto-rotate on). The
+  activity already kept itself across orientation and size changes (`ConfigurationChanges`), so a turn resizes the view and
+  the relay link stays up. −0 lines.
+
+---
+
 ## 2026-10-27 — Json finds a context Mono has not registered yet
 
 - `Tools/Json.cs` — `MutableResolver.GetTypeInfo` looks twice: when no registered context knows the type, it runs the type's

@@ -14,6 +14,8 @@
 			<Button Content="⏸" FontFamily="Segoe UI Emoji" FontSize="19" Width="28" Height="28" Padding="0"
 					HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
 					ToolTip.Tip="Pause All Algos" ToolTip.ShowDelay="1000" Click="OnPauseAllClick" />
+			<TextBlock Text="PnL:" Foreground="Black" Margin="12,0,0,0" VerticalAlignment="Center" ToolTip.Tip="Every row's Profit added up"/>
+			<TextBlock x:Name="TotalProfitValue" Text="0.00" FontWeight="Bold" VerticalAlignment="Center"/>
 		</StackPanel>
 		
 	</UserControl.Resources>

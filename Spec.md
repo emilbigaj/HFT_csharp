@@ -1862,6 +1862,10 @@ relay: it dials a relay desk (see "Relay") exactly as a desk dials, and to the b
   Window or the phone's view), and the opened widget replaces the one shown. The phone's orders are a desk GUI's: the box
   cancels them when its session ends (the link silent 10 s). Charts, Fills and the Audit Trail tail synced files; the phone
   syncs none.
+- **The widget's title bar** (Positions' Resume/Pause All and total PnL) shows in a light strip under the green bar, on a
+  desk title bar's background so its colours read as there; hidden for a widget with none.
+- **Rotation** follows the phone (its auto-rotate setting): the activity handles orientation and size changes itself
+  (`ConfigurationChanges`), so a turn only lays the view out again at the new size; the Mirror thread and the link carry on.
 - **Connect off the UI thread.** The copy's header and the box's `AllocatedClientId` can take seconds over a mobile link,
   and Android stops an app whose UI thread blocks for 5 s. A server restart rebuilds the view as a desk Workspace does
   (`RemoteClient.IsSessionEnded`: renew the contexts, close the client, connect anew under the same GUI number).

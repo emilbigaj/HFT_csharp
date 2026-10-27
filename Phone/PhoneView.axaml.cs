@@ -156,11 +156,13 @@ public partial class PhoneView : UserControl, IWidgetHost
         Show(widget);
     }
 
-    /// Shows this widget in the host, disposing the one shown.
+    /// Shows this widget in the host, disposing the one shown, with its title-bar content (if any) in the strip under the bar.
     private void Show(IWidget? widget)
     {
         (WidgetHost.Content as IDisposable)?.Dispose();
         WidgetHost.Content = widget;
+        TitleBarHost.Content = widget?.TitleBarContent;
+        TitleBarStrip.IsVisible = TitleBarHost.Content != null;
     }
 
     // Every 100 ms: the clock and the latency in the bar, and a rebuild once the server or the Remote Mirror this GUI was opened on is replaced.
