@@ -41,6 +41,7 @@ public class Server : IDisposable
     private readonly ServerContext _serverContext;
     private readonly ClientSocket _loggingServer;
     private readonly ClientSocket _audit;
+    private readonly ClientSocket _houseBookAudit;   // the house book's own record, which Logging files under ServerStrategyName as a strategy's tap files a strategy's; channel == CoreGroupId
     private readonly RiskLayer _riskLayer;
     private readonly WriteOnlySocket?[] _instrumentData;
 
@@ -124,6 +125,8 @@ public class Server : IDisposable
         _serverContext = new ServerContext(ServerName, Access.Write);
         _loggingServer = new ClientSocket(ServerName + ".server", _serverContext.LoggingServerName, [SocketChannel.AdminChannelLength], [SocketChannel.AdminChannelLength]);
         _audit = new ClientSocket(ServerName + ".audit", _serverContext.LoggingServerName, SocketChannel.BuildChannelLengths(serverHeader.CoreGroupIds), [SocketChannel.AdminChannelLength]);
+        // Why: the house book has no client, so nothing taps a channel of its own; this link is where its fills and rows are filed (see Spec.md "Strategy 0")
+        _houseBookAudit = new ClientSocket(_serverContext.ServerStrategyName + ".audit", _serverContext.LoggingServerName, SocketChannel.BuildChannelLengths(serverHeader.CoreGroupIds), [SocketChannel.AdminChannelLength]);
         _riskLayer = new RiskLayer(_serverContext, OrderRejectedSource.Server);
 
         // Before anything else: LoadClients() runs between construction and Connect(), and
@@ -154,6 +157,7 @@ public class Server : IDisposable
 
         _loggingServer.Connect();
         _audit.Connect();
+        _houseBookAudit.Connect();
     }
 
     private string[] _subDirectories = new string[] { "Alerts", "Audit", "Fills", "Positions", "Series", "Clients", "Instruments" };
@@ -394,8 +398,8 @@ public class Server : IDisposable
         int strategyId = fill.OrderHeader.OrderId.StrategyId;
         int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
         int coreGroupId = _serverContext.GetInstrument(instrumentId).Header.CoreGroupId;
-        WriteToExecution(strategyId, coreGroupId, in fill);
-        WriteToExecution(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, instrumentId).GetRef());
+        WriteToBook(strategyId, coreGroupId, in fill);
+        WriteToBook(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, instrumentId).GetRef());
         WriteToAudit(coreGroupId, in fill);
     }
 
@@ -623,7 +627,9 @@ public class Server : IDisposable
 
         OpenInstrumentData(instrumentId, allocateInstrument.Symbol.ToString());
 
+        // Why both: each link's writer names its files by the symbols this record carries
         WriteToAudit(SocketChannel.Admin, in allocateInstrument);
+        _houseBookAudit.Write(SocketChannel.Admin, in allocateInstrument);
 
         return instrumentId;
     }
@@ -741,8 +747,8 @@ public class Server : IDisposable
         WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
         foreach (ref readonly Fill fill in fills)
         {
-            WriteToExecution(strategyId, coreGroupId, in fill);
-            WriteToExecution(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, fill.OrderHeader.OrderId.InstrumentId).GetRef());
+            WriteToBook(strategyId, coreGroupId, in fill);
+            WriteToBook(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, fill.OrderHeader.OrderId.InstrumentId).GetRef());
         }
 
         foreach (ref readonly Fill fill in fills)
@@ -896,6 +902,18 @@ public class Server : IDisposable
         WriteToExecution(orderHeader.OrderId.ClientId, coreGroupId, in value);
     }
 
+    // A book's own fill or position row: a strategy's on its execution channel, where its client applies it and Logging's tap files it
+    // under the strategy; the house book's, which has no client, on its own audit link, which Logging files under ServerStrategyName.
+    // CoreGroup thread only, the channel's single writer. Hot path (OnFill): one compare more per write, no allocation.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void WriteToBook<T>(int strategyId, int coreGroupId, in T value) where T : unmanaged
+    {
+        if (strategyId == OrderIdAllocator.ServerStrategyId)
+            _houseBookAudit.Write(coreGroupId, in value);
+        else
+            WriteToExecution(strategyId, coreGroupId, in value);
+    }
+
     // Per-CoreGroup audit: channelId == CoreGroupId (0 = admin). Each CoreGroup thread owns its own
     // audit channel and admin owns channel 0, so every channel is single-writer => no lock and no
     // cross-CCD bounce on the fill path.
@@ -928,6 +946,7 @@ public class Server : IDisposable
         // Why after the server socket: its admin thread, the admin channel's only other writer, has stopped
         if (Clock.Mode == ClockMode.Realtime)
             PostMessageEfficiencies();
+        _houseBookAudit.Dispose();
         _audit.Dispose();
         _loggingServer.Dispose();
         _serverContext.Dispose();

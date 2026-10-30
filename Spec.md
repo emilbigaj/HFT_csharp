@@ -29,6 +29,14 @@ here; the reasoning lives here.
   `ClientContext.GetDirectoryPath(ServerName)` — the Strategies tree under the server's leaf name —
   exposed as `Context.ServerStrategyName`. Its position files therefore live alongside every other
   strategy's, and cannot collide with the server-wide aggregate rows in `<serverDir>\Positions`.
+- **Its records are filed like a strategy's (2026-10-30).** A strategy's fills and position rows reach its files through
+  Logging's tap of its client channel; strategy 0 has no client, so until 2026-10-30 the server's writes to its channel were
+  dropped, its position was never filed, and it started flat at every server start (a manual exit booked to it on 2026-10-29
+  vanished at the next restart). The server now opens a third link to Logging, `<ServerStrategyName>.audit`, beside `.server`
+  and `.audit`; Logging's `AuditWriter` files what arrives on it under `ServerStrategyName` (Fills, Positions, a daily audit),
+  as it files a strategy's. `Server.WriteToBook` sends a book's own fill and row to the strategy's execution channel, or for
+  strategy 0 to this link, channel == CoreGroupId (`OnFill` and position transfers); `OnAllocateInstrument` writes each
+  allocation to it too, which names the files. The server's own `.audit` still records every fill, house-book ones included.
 - **Name reservation:** because the house directory is named after the server, no client may take
   the server's leaf name — `AllocateClientId` refuses it (`ReservedClientName`). (`<serverName>_GUI<n>`
   workspaces are unaffected; only an exact leaf match is reserved.)
@@ -958,7 +966,8 @@ either way, while everything runs. For an exit booked to the house book by mista
 position to another strategy.
 
 - **GUI.** Positions widget, right-click a row, "Transfer Position…", offered in a server workspace only. The dialog
-  (`TransferPositionDialog`) has From and To side by side, each the house book (listed as "Server") or a strategy trading the instrument (never
+  (`TransferPositionDialog`, resizable) opens on the row's instrument, with a dropdown of every instrument the server trades
+  (picking another refills both books, the quantity and the price); then From and To side by side, each the house book (listed as "Server") or a strategy trading the instrument (never
   a GUI, which books to one of these: `ManualClient.IsGuiName`), each with its position below; then Quantity in lots, always
   in the direction of From's position, and Price with Avg (From's average price) and Mid (the book's). It previews both
   books after the transfer through `PositionHeader.OnFill`, the server's arithmetic, and re-reads the rows four times a
@@ -984,10 +993,8 @@ position to another strategy.
   shows no preview and its Transfer button does nothing; the server returns early, moving nothing, and only a race between
   two GUIs gets that far. A second click on a whole-position transfer finds nothing left to move and is dropped, so no record
   of past transfers is needed.
-- **House book records.** The house book has no socket, so the server's writes to its channel are dropped (as for every
-  house-book fill today): its Transfer fill reaches only the audit (the server's Fills file), and its row is not filed under
-  `ServerStrategyName`. The house book's row is therefore loaded from a file nothing writes, and starts flat at every server
-  start. Not changed here; noted because it means a house-book position never survives a server restart.
+- **House book records.** A transfer's house-book fill and row are filed under `ServerStrategyName` like any house-book
+  fill's (see "Strategy 0 — the house book"), so the house book's position survives a server restart.
 - **Verified 2026-10-30** (scratchpad `transferrig`: a Realtime server, two strategies and the house book seeded through
   their position files, the real Workspace as a server workspace): house book → strategy beside the server, and strategy →
   strategy from a remote desk through a Local and a Remote Mirror; rows, both strategies' own risk copies, the fills each

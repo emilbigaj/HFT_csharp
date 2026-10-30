@@ -1264,6 +1264,23 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
 - **Deploy in lockstep with the C# desks and the C# Logging server:** a C# GUI sends type 202, which an old C++ server ignores
   (its switch's default), so the dialog would close and nothing would move.
 
+### P41. MUST PORT: the house book's fills and position rows are filed (C# `Provider/Server.cs`; 2026-10-30)
+
+- **Why:** strategy 0 has no client, so the server's writes of its fills and rows to "its" execution channel were dropped. Its
+  position file under `ServerStrategyName` was never written, and the house book started flat at every server start: a
+  manual exit booked to it on 2026-10-29 vanished at the next restart, leaving the strategy it closed showing the position.
+- **Change:** open a third ClientSocket to the Logging server beside `.server` and `.audit`, named
+  `<ServerStrategyName>.audit` (`Strategies/<mode>/<server leaf>.audit`), with the same channel lengths as `.audit`
+  (`BuildChannelLengths(CoreGroupIds)`, admin channel), connected and disposed with `.audit`.
+- **Route:** wherever the server writes a book's own fill or position row to that book's execution channel (`OnFill`, and the
+  position transfer of P40), write it instead to this link, channel = CoreGroupId, when the book is strategy 0; any other
+  strategy is unchanged (C# `Server.WriteToBook`). The `.audit` writes (every fill, the firm's row) are unchanged.
+- **Symbols:** in `OnAllocateInstrument`, write the `AllocateInstrument` record to this link's admin channel as well as to
+  `.audit`; the Logging server names the files from it.
+- **Load:** nothing new: allocation already reads strategy 0's position file under `ServerStrategyName`, as for any strategy.
+- **Deploy:** no lockstep. The C# Logging server files any `*.audit` link it is offered; a server without this simply never
+  offers it.
+
 ---
 
 ## 8. Do not port (C#-only)

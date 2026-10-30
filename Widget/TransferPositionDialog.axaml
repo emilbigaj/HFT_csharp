@@ -1,22 +1,28 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:Widget"
+        xmlns:data="clr-namespace:Data;assembly=Data"
         x:Class="Widget.TransferPositionDialog"
         Title="Transfer Position"
         Width="460"
+        MinWidth="380"
         SizeToContent="Height"
         WindowStartupLocation="CenterOwner"
-        CanResize="False">
+        CanResize="True">
 
 	<Window.Resources>
+		<!-- Why compiled bindings: a published (trimmed, NativeAOT) desk strips the property a reflection binding looks up -->
 		<DataTemplate x:Key="TransferBookTemplate" x:DataType="local:TransferBook">
 			<TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
+		</DataTemplate>
+		<DataTemplate x:Key="InstrumentTemplate" x:DataType="data:Instrument">
+			<TextBlock Text="{Binding ShortSymbol}" FontWeight="Bold" TextTrimming="CharacterEllipsis"/>
 		</DataTemplate>
 	</Window.Resources>
 
 	<Grid Margin="12" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
 
-		<TextBlock x:Name="SymbolText" Grid.Row="0" FontWeight="Bold" Margin="0,0,0,10"/>
+		<ComboBox x:Name="InstrumentPicker" Grid.Row="0" MinWidth="200" HorizontalAlignment="Left" Margin="0,0,0,10" ItemTemplate="{StaticResource InstrumentTemplate}"/>
 
 		<Grid Grid.Row="1" ColumnDefinitions="*,12,*" Margin="0,0,0,12">
 			<StackPanel Grid.Column="0" Spacing="4">
@@ -40,7 +46,19 @@
 			<Button Grid.Column="6" x:Name="MidPriceButton" Content="Mid" Margin="4,0,0,0" ToolTip.Tip="The book's mid: the from book realizes its open profit"/>
 		</Grid>
 
-		<TextBlock x:Name="PreviewText" Grid.Row="3" FontFamily="Consolas,Menlo,monospace" Margin="0,0,0,8"/>
+		<!-- Why a grid: each column sizes to its widest cell, so the columns line up whatever the books' names -->
+		<Grid x:Name="PreviewGrid" Grid.Row="3" ColumnDefinitions="*,Auto,Auto,Auto,Auto" RowDefinitions="Auto,Auto" Margin="0,0,0,8">
+			<TextBlock x:Name="FromPreviewNameText" Grid.Row="0" Grid.Column="0" TextTrimming="CharacterEllipsis" Margin="0,0,12,0"/>
+			<TextBlock x:Name="FromPreviewBeforeText" Grid.Row="0" Grid.Column="1" HorizontalAlignment="Right"/>
+			<TextBlock Grid.Row="0" Grid.Column="2" Text="→" Margin="6,0"/>
+			<TextBlock x:Name="FromPreviewAfterText" Grid.Row="0" Grid.Column="3" Margin="0,0,16,0"/>
+			<TextBlock x:Name="FromPreviewRealizedText" Grid.Row="0" Grid.Column="4" HorizontalAlignment="Right"/>
+			<TextBlock x:Name="ToPreviewNameText" Grid.Row="1" Grid.Column="0" TextTrimming="CharacterEllipsis" Margin="0,0,12,0"/>
+			<TextBlock x:Name="ToPreviewBeforeText" Grid.Row="1" Grid.Column="1" HorizontalAlignment="Right"/>
+			<TextBlock Grid.Row="1" Grid.Column="2" Text="→" Margin="6,0"/>
+			<TextBlock x:Name="ToPreviewAfterText" Grid.Row="1" Grid.Column="3" Margin="0,0,16,0"/>
+			<TextBlock x:Name="ToPreviewRealizedText" Grid.Row="1" Grid.Column="4" HorizontalAlignment="Right"/>
+		</Grid>
 
 		<StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
 			<Button Content="Cancel" Click="OnCancelClick"/>

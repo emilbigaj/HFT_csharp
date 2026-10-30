@@ -4,6 +4,34 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-30 — The house book's fills and position are saved, so it survives a server restart
+
+- `Provider/Server.cs` — a third link to the Logging server, `<ServerStrategyName>.audit` (`_houseBookAudit`), which Logging's
+  `AuditWriter` files under strategy 0's directory as it files a strategy's tap. `WriteToBook` sends a book's own fill and
+  position row to the strategy's execution channel, or for strategy 0 to this link (`OnFill`, `WriteTransferFill`);
+  `OnAllocateInstrument` writes each allocation to it too, so the files carry their symbols. Hot path (`OnFill`): one more
+  compare per write, no allocation.
+- Why: strategy 0 has no client, so its writes were dropped and its position file never written; it started flat at every
+  server start. On 2026-10-29 three manual exits booked to it vanished at the next restart, leaving the strategy showing the
+  positions they closed. One-off restore for that: scratchpad `positionfix/restore_server_book.sh` writes strategy 0's three
+  positions and fills on the box, after which a server workspace transfers them to the strategy.
+- Verified in scratchpad `transferrig` (its stand-in Logging hands this link to the real `AuditWriter`): the link connects,
+  a transfer of 1 of the house book's 2 lots wrote its Transfer fill and its +1 row under strategy 0's directory, and a restart
+  on those files loaded the house book at +1 @ 6810.25. C++: P41, no lockstep. +19 lines.
+
+---
+
+## 2026-10-30 — The transfer dialog picks its instrument, resizes, and lines up its preview
+
+- `Widget/TransferPositionDialog.axaml(.cs)` — the instrument title is a dropdown of every instrument the server trades,
+  opening on the row's; picking another refills both books, the quantity and the price (`SetInstrument`). The window resizes
+  (`CanResize`, `MinWidth` 380). The preview is a grid (name, before, →, after, realizes) instead of space-padded text, so its
+  columns line up whatever the books' names: "Crypto_Testing_Production" (25 characters) overflowed the 22 the text padded to.
+  Verified in scratchpad `transferrig` with a second contract and a 27-character strategy name: switching to ES Mar27 refilled
+  the books, its transfer's four fills all carried Mar27's instrument id, and the dialog stretched to 680 × 420. +33 lines.
+
+---
+
 ## 2026-10-30 — A position transfer moves both books under both locks
 
 - `Provider/Server.cs` — `OnControlTransferPosition` locks the from row and the to row before moving either, applies both
