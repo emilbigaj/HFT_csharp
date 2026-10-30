@@ -95,7 +95,7 @@ public struct ControlTransferPosition()
     public readonly Header<ControlType> Header = new(ControlType.TransferPosition);
     public int ClientId = -1;          // the requesting GUI's: each Transfer fill's order id carries it, so neither counts as an algo's
     public int InstrumentId = -1;
-    public int FromStrategyId = -1;    // 0 the house book
+    public int FromStrategyId = -1;    // 0 the ServerStrategy
     public int ToStrategyId = -1;
     public int Quantity = 0;           // the part of the from book's position that moves, signed as that position
     public double Price = double.NaN;

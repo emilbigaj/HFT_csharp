@@ -7,20 +7,20 @@ here; the reasoning lives here.
 
 - A **strategy** is a book. Every strategy is backed by exactly one algo client — there is no
   strategy without an algo client, with one exception:
-- **Strategy 0** is the reserved **house book** (`OrderIdAllocator.ServerStrategyId`). It has no
+- **Strategy 0** is the reserved **ServerStrategy** (`OrderIdAllocator.ServerStrategyId`). It has no
   algo. Its client-id bit is pre-set at server startup so the allocator can never hand id 0 to a
   connecting client, and so the slot stays addressable (`ThrowIfClientIdOutOfRange`, RiskLayer's
   `StrategyIdNotAllocated`).
 - Manual orders always have `ClientId != StrategyId`, which is what `IsAlgoOrder()` keys on: no
   pause gate, no algo attribution. Algo orders have `ClientId == StrategyId`.
 
-## Strategy 0 — the house book
+## Strategy 0 — the ServerStrategy
 
 - **Allocation invariant:** strategy 0 is provisioned with the **union of every allocation — algo
   and GUI alike**. Whenever any client is allocated an instrument, strategy 0 is allocated it too
   (`Server.OnAllocateInstrument`).
 - **Why:** a server workspace can always trade whatever anyone can see, and `ValidateOrder` needs
-  no house special-case — a manual create with `StrategyId 0` passes the same
+  no ServerStrategy special-case — a manual create with `StrategyId 0` passes the same
   `InstrumentNotAllocated` check as any algo order. The invariant "every order's strategy is
   provisioned for its instrument" holds uniformly.
 - Strategy 0 gets no core-group poll bit (it has no socket; order states route on the sender's
@@ -32,12 +32,19 @@ here; the reasoning lives here.
 - **Its records are filed like a strategy's (2026-10-30).** A strategy's fills and position rows reach its files through
   Logging's tap of its client channel; strategy 0 has no client, so until 2026-10-30 the server's writes to its channel were
   dropped, its position was never filed, and it started flat at every server start (a manual exit booked to it on 2026-10-29
-  vanished at the next restart). The server now opens a third link to Logging, `<ServerStrategyName>.audit`, beside `.server`
-  and `.audit`; Logging's `AuditWriter` files what arrives on it under `ServerStrategyName` (Fills, Positions, a daily audit),
-  as it files a strategy's. `Server.WriteToBook` sends a book's own fill and row to the strategy's execution channel, or for
-  strategy 0 to this link, channel == CoreGroupId (`OnFill` and position transfers); `OnAllocateInstrument` writes each
-  allocation to it too, which names the files. The server's own `.audit` still records every fill, house-book ones included.
-- **Name reservation:** because the house directory is named after the server, no client may take
+  vanished at the next restart). The server now gives strategy 0 a client socket of its own at startup, named
+  `ServerStrategyName`, with a strategy's channel layout, built Detached as `LoadClients` rebuilds a restarted strategy's
+  (`ServerSocket.CreateDetatchedClient`), and announced to Logging on `.server`. So the server's ordinary writes to strategy
+  0's channel (`OnFill`, position transfers) land in it, and Logging taps it and files it under `ServerStrategyName` as it does
+  every strategy's. Strategy 0 is never asked to allocate, so the first allocation of each instrument sends it the admin reply
+  a strategy gets for its own request, from which the tap names its files. Why it is safe as a client: Detached is writable
+  and never Open, so the dead-client watcher (`PollPids`), the open-client set, `OnClientOpened`/`Closed`, close-out and drain
+  never see it; no process can attach to it (the name is reserved). It is announced to Logging directly, not through
+  `OnClientAllocated`, whose subscribers record real clients: it must never be saved to the clients file and reloaded as one.
+  At shutdown its close goes out without its name (its `ClientSocketHeaders` row is blank), which is harmless: Logging drops
+  every child of the `.server` link when that link closes. Replaced the same day a third Logging link
+  (`<ServerStrategyName>.audit`) and a `WriteToBook` routing helper: the socket needs no special case on the fill path.
+- **Name reservation:** because the ServerStrategy's directory is named after the server, no client may take
   the server's leaf name — `AllocateClientId` refuses it (`ReservedClientName`). (`<serverName>_GUI<n>`
   workspaces are unaffected; only an exact leaf match is reserved.)
 
@@ -53,7 +60,7 @@ here; the reasoning lives here.
   would use up the 64 ids; numbered names use only as many as the most GUIs ever open at once. Saved layouts live under
   the principal, so every number shares them.
 - A **server workspace** sends every OrderTarget with `StrategyId = 0`. It points at the
-  house book. It sees ALL orders, ALL positions, ALL risk limits across every
+  ServerStrategy. It sees ALL orders, ALL positions, ALL risk limits across every
   allocated instrument of every strategy, and its position view is the sum over all strategies.
   It can cancel any client's orders and amend any manual (non-algo) order (global order-id
   addressing); its creates always book to strategy 0. An algo's orders are cancel-only from a GUI
@@ -424,14 +431,14 @@ row in `LocalPositionHeaders`) and the server's master for that instrument (`Alg
 in `Algo.Target`), the client's risk copy and the server's risk copy all use it, so a paused algo sends nothing, and an
 order that races a pause is refused `AlgoIsPaused` at the server.
 - A strategy workspace's Pause/Resume turns its strategy's switch, as before. A server workspace's turns the master: its
-  control carries strategy 0, and `Server.OnControlAlgoStatus` writes the server row only, never a strategy's (the house
-  book has no algo, so strategy 0's own status means nothing). Pause All in a server workspace stops every algo.
+  control carries strategy 0, and `Server.OnControlAlgoStatus` writes the server row only, never a strategy's (the
+  ServerStrategy has no algo, so strategy 0's own status means nothing). Pause All in a server workspace stops every algo.
 - The master is a kill switch: Live at every start, whatever its file says (`ServerContext.AllocateInstrument`). Its
   changes go on record as a fill's server row does, on the audit channel to `<server>/Positions`.
 - A user's Pause (the control, from either workspace) also cancels at once, on the server, the working algo orders it
   stops: every strategy's on the instrument for the master, that strategy's for its own switch (`Server.CancelAlgoOrders`,
-  2026-10-20). Algo orders only (`ClientId == StrategyId`): a manual order, a GUI's booked to a strategy or the house
-  book's, is never cancelled. The cancel is numbered as a GUI's cancel of an algo order is
+  2026-10-20). Algo orders only (`ClientId == StrategyId`): a manual order, a GUI's booked to a strategy or the
+  ServerStrategy's, is never cancelled. The cancel is numbered as a GUI's cancel of an algo order is
   (`OrderTarget.s_foreignCancelSeqJump`, see "Manual orders"), so the algo's own cancel on its next tick, or a racing
   amend, finds the order gone and is discarded (`StateIsDone`); a Create still unread is refused `AlgoIsPaused`. A pause after an algo
   order's reject cancels nothing: the algo cancels its own on its next tick, as before. Without this a quiet or stuck
@@ -457,7 +464,7 @@ So the firm's limit is the master: a strategy works within its own limit, and th
 firm past the firm's. Example: firm limit 10, strategy X's 4, strategy Y's 8. X asks for 5 and its clip sends 4; Y then
 asks for 8, which passes its own check (8 <= 8), and the server refuses it (4 + 8 > 10), which pauses Y.
 - **Manual orders get only the firm's limit.** A client checks only its own algo orders (see "Why the client keeps its
-  own copy"), and the server checks only the firm's. Strategy 0 (the house book) has no strategy limit: its orders are
+  own copy"), and the server checks only the firm's. Strategy 0 (the ServerStrategy) has no strategy limit: its orders are
   manual, and its edits address the firm's row.
 - **No cross reads.** A strategy never reads the firm's exposure (the server writes it on every order, so reading it would
   cost the server a cache-line transfer per write), and the server never reads a strategy's. Declined 2026-10-15: clipping
@@ -491,7 +498,7 @@ asks for 8, which passes its own check (8 <= 8), and the server refuses it (4 + 
 `RiskLimit.MaxFillsPerSession` caps the lots filled on an instrument in one session, buys and sells both counted:
 `WorkingRisk.FillsThisSession` adds `|fill quantity|` in `RiskLayer.OnFill` for an algo order's fill only
 (`OrderId.IsAlgoOrder()`), on both sides: the server counts every strategy's algo fills against the firm's limit, a
-strategy its own against its own. A manual fill, house book or booked to a strategy, never counts (decided 2026-10-16),
+strategy its own against its own. A manual fill, ServerStrategy or booked to a strategy, never counts (decided 2026-10-16),
 though it still moves the position. `RiskLayer.OnSessionClosed` zeroes it
 at the instrument's `Closed` status, on the server beside the message-efficiency day's end and in each client for its
 own copy. The check is strict, assuming every working algo lot on both sides fills: the fills room is
@@ -617,7 +624,7 @@ By timing, the client is always at least as tight as the server:
 What the client cannot see is everyone else on the instrument. The server's room is
 `MaxPositionQuantity` minus the server-wide position and the reservations of every order on the
 instrument; the client's is the same limit minus its own strategy's position and its own
-reservations. With other strategies, manual orders booked to this strategy, or the house book on
+reservations. With other strategies, manual orders booked to this strategy, or the ServerStrategy on
 the same instrument, the server has less room than the client sees, and the server refuses (and
 pauses the algo) an order the client thought fit. That is accepted (see "Manual orders" and
 Accepted residuals). So "never looser" holds exactly when this strategy's own orders are all that is
@@ -916,7 +923,7 @@ once; an IOC and any marketable order publish queue position 0/0.
 ## Manual orders
 
 A manual order is one whose `ClientId != StrategyId` (`IsAlgoOrder()` false): a GUI's order booked
-to a strategy, or to the house book.
+to a strategy, or to the ServerStrategy.
 
 - **An algo's orders are cancel-only from a GUI.** `ManualClient.Amend` throws
   `InvalidOperationException` for a Reduce or Replace of an algo order, and the ladder, orders grid
@@ -961,21 +968,21 @@ to a strategy, or to the house book.
 
 ## Position transfer (2026-10-30)
 
-A server workspace moves part of one book's position on an instrument into another book: the house book or any strategy,
-either way, while everything runs. For an exit booked to the house book by mistake, and for handing a strategy's open
+A server workspace moves part of one book's position on an instrument into another book: the ServerStrategy or any strategy,
+either way, while everything runs. For an exit booked to the ServerStrategy by mistake, and for handing a strategy's open
 position to another strategy.
 
 - **GUI.** Positions widget, right-click a row, "Transfer Position…", offered in a server workspace only. The dialog
   (`TransferPositionDialog`, resizable) opens on the row's instrument, with a dropdown of every instrument the server trades
-  (picking another refills both books, the quantity and the price); then From and To side by side, each the house book (listed as "Server") or a strategy trading the instrument (never
+  (picking another refills both books, the quantity and the price); then From and To side by side, each the ServerStrategy (listed as "Server") or a strategy trading the instrument (never
   a GUI, which books to one of these: `ManualClient.IsGuiName`), each with its position below; then Quantity in lots, always
   in the direction of From's position, and Price with Avg (From's average price) and Mid (the book's). It previews both
   books after the transfer through `PositionHeader.OnFill`, the server's arithmetic, and re-reads the rows four times a
   second, since a fill or an algo switch can change either book while it is open.
 - **The price decides who gets the profit.** At From's average price From realizes nothing and To takes over the original
   cost: the result follows the position (the mis-booking case). At the mid From realizes its open profit and To starts at
-  the market (the strategy-to-strategy case). Example: the house book +2 ES at 6810.25, TRStratA −2 at 6800; transferring 2
-  at 6810.25 leaves both flat, the house book realizing 0 and TRStratA (6800 − 6810.25) × 2 × 50 = −1,025.
+  the market (the strategy-to-strategy case). Example: the ServerStrategy +2 ES at 6810.25, TRStratA −2 at 6800; transferring 2
+  at 6810.25 leaves both flat, the ServerStrategy realizing 0 and TRStratA (6800 − 6810.25) × 2 × 50 = −1,025.
 - **Wire.** `ControlTransferPosition` (`ControlType.TransferPosition` = 202): the requesting GUI's ClientId, InstrumentId,
   FromStrategyId, ToStrategyId, Quantity signed as From's position, Price. It travels as the other controls do: on the
   instrument's execution channel, through the Mirror from a remote desk (`LocalMirror` hands it to the stand-in).
@@ -988,15 +995,15 @@ position to another strategy.
   strategy client's `RiskLayer.OnFill` neither releases (the GUI's ClientId is not its own) nor counts a session fill (not an
   algo order), and `Client.OnFill` skips message efficiency for a Transfer fill.
 - **One check, two users.** `Context.CanTransferPosition` is the rule: From and To differ, both trade the instrument, Quantity
-  is non-zero, on From's side and no more than From holds, Price is finite, and no algo is live on either book (the house book
+  is non-zero, on From's side and no more than From holds, Price is finite, and no algo is live on either book (the ServerStrategy
   has none). Both sides apply it and fail silently, for now (2026-10-30, the user's call; error handling to come): the dialog
   shows no preview and its Transfer button does nothing; the server returns early, moving nothing, and only a race between
   two GUIs gets that far. A second click on a whole-position transfer finds nothing left to move and is dropped, so no record
   of past transfers is needed.
-- **House book records.** A transfer's house-book fill and row are filed under `ServerStrategyName` like any house-book
-  fill's (see "Strategy 0 — the house book"), so the house book's position survives a server restart.
-- **Verified 2026-10-30** (scratchpad `transferrig`: a Realtime server, two strategies and the house book seeded through
-  their position files, the real Workspace as a server workspace): house book → strategy beside the server, and strategy →
+- **ServerStrategy records.** A transfer's ServerStrategy fill and row are filed under `ServerStrategyName` like any ServerStrategy
+  fill's (see "Strategy 0 — the ServerStrategy"), so the ServerStrategy's position survives a server restart.
+- **Verified 2026-10-30** (scratchpad `transferrig`: a Realtime server, two strategies and the ServerStrategy seeded through
+  their position files, the real Workspace as a server workspace): ServerStrategy → strategy beside the server, and strategy →
   strategy from a remote desk through a Local and a Remote Mirror; rows, both strategies' own risk copies, the fills each
   strategy received and the audit's fills all as above; a live algo refused in the dialog; an over-sized request refused by
   the server with nothing moved. That run had the since-removed refusal messages and throw; the checks are unchanged.
@@ -1127,7 +1134,7 @@ reference for each:
   early.
 - **Server restart replays allocations through the client path.** `LoadInstruments` calls
   `OnAllocateInstrument(clientId, ref …)` for every recorded line, restoring the client's and the
-  house book's allocation bits, the CoreGroup poll bit, the admin reply and the `AllocateInstrument`
+  ServerStrategy's allocation bits, the CoreGroup poll bit, the admin reply and the `AllocateInstrument`
   callback an exchange adapter needs to rebuild routers for orders still working after a restart.
   A host must call `LoadClients` before `LoadInstruments`.
 
@@ -2071,9 +2078,9 @@ footer `Navigate`.
 
 ## Open items
 
-- **House position persistence, write side:** position lines are written by the logging tap
-  following each client's socket. Strategy 0 has no socket, so nothing writes its `.position` files
-  yet; the restore path finds no file and starts a zeroed row.
+- ~~**ServerStrategy position persistence, write side**~~ — resolved 2026-10-31: position lines are written by the
+  logging tap following each client's socket, and strategy 0 had none, so nothing wrote its `.position` files and the
+  restore path started a zeroed row. The server now gives it a socket of its own (see "Strategy 0 — the ServerStrategy").
 - ~~**Multiple server workspaces collide**~~ — resolved 2026-10-07: each workspace takes the next free
   `<principal>_GUI<n>` name (see "Workspaces (GUIs)").
 - **C++ mirror:** the union rule lives in `Server.OnAllocateInstrument` and must be mirrored in

@@ -41,7 +41,6 @@ public class Server : IDisposable
     private readonly ServerContext _serverContext;
     private readonly ClientSocket _loggingServer;
     private readonly ClientSocket _audit;
-    private readonly ClientSocket _houseBookAudit;   // the house book's own record, which Logging files under ServerStrategyName as a strategy's tap files a strategy's; channel == CoreGroupId
     private readonly RiskLayer _riskLayer;
     private readonly WriteOnlySocket?[] _instrumentData;
 
@@ -125,8 +124,6 @@ public class Server : IDisposable
         _serverContext = new ServerContext(ServerName, Access.Write);
         _loggingServer = new ClientSocket(ServerName + ".server", _serverContext.LoggingServerName, [SocketChannel.AdminChannelLength], [SocketChannel.AdminChannelLength]);
         _audit = new ClientSocket(ServerName + ".audit", _serverContext.LoggingServerName, SocketChannel.BuildChannelLengths(serverHeader.CoreGroupIds), [SocketChannel.AdminChannelLength]);
-        // Why: the house book has no client, so nothing taps a channel of its own; this link is where its fills and rows are filed (see Spec.md "Strategy 0")
-        _houseBookAudit = new ClientSocket(_serverContext.ServerStrategyName + ".audit", _serverContext.LoggingServerName, SocketChannel.BuildChannelLengths(serverHeader.CoreGroupIds), [SocketChannel.AdminChannelLength]);
         _riskLayer = new RiskLayer(_serverContext, OrderRejectedSource.Server);
 
         // Before anything else: LoadClients() runs between construction and Connect(), and
@@ -157,7 +154,14 @@ public class Server : IDisposable
 
         _loggingServer.Connect();
         _audit.Connect();
-        _houseBookAudit.Connect();
+
+        // The ServerStrategy has no client, so it gets a socket of its own, Detached like a restored strategy's: the server's writes to
+        // strategy 0's channel land in it, and Logging taps and files it under ServerStrategyName as it does a strategy's (see Spec.md
+        // "Strategy 0"). Why not OnClientAllocated: its subscribers record real clients, and this one must never be reloaded as one.
+        int[] serverStrategyChannelLengths = SocketChannel.BuildChannelLengths(serverHeader.CoreGroupIds);
+        SocketHeader serverStrategySocketHeader = new(ServerName, _serverContext.ServerStrategyName, serverStrategyChannelLengths, serverStrategyChannelLengths, Environment.ProcessId) { ClientId = OrderIdAllocator.ServerStrategyId };
+        _serverSocket.CreateDetatchedClient(in serverStrategySocketHeader);
+        _loggingServer.Write(in serverStrategySocketHeader);
     }
 
     private string[] _subDirectories = new string[] { "Alerts", "Audit", "Fills", "Positions", "Series", "Clients", "Instruments" };
@@ -310,7 +314,7 @@ public class Server : IDisposable
     // WorkingRisk, so an edit cannot rewind a reservation (see Spec.md). Strategy 0's (a server workspace's) is the firm's limit.
     public void OnControlRiskLimit(in ControlRiskLimit controlRiskLimit)
     {
-        // Step 1: the row: the firm's for strategy 0, never a strategy's (the house book's orders are manual, checked by the firm's alone)
+        // Step 1: the row: the firm's for strategy 0, never a strategy's (the ServerStrategy's orders are manual, checked by the firm's alone)
         int strategyId = controlRiskLimit.StrategyId;
         bool isServerRiskLimit = strategyId == OrderIdAllocator.ServerStrategyId;
         ref SharedArrayEntry<RiskLimit> riskLimitEntry = ref isServerRiskLimit ? ref _serverContext.GetRiskLimit(controlRiskLimit.InstrumentId) : ref _serverContext.GetRiskLimit(strategyId, controlRiskLimit.InstrumentId);
@@ -342,7 +346,7 @@ public class Server : IDisposable
     // row; strategy 0's (a server workspace's) is the server row, the master switch every algo on the instrument also needs Live.
     public void OnControlAlgoStatus(int strategyId, int instrumentId, AlgoStatus algoStatus)
     {
-        // Step 1: the switch: the master is the server row, never a strategy's (the house book has no algo of its own)
+        // Step 1: the switch: the master is the server row, never a strategy's (the ServerStrategy has no algo of its own)
         bool isMasterSwitch = strategyId == OrderIdAllocator.ServerStrategyId;
         ref SharedArrayEntry<PositionHeader> positionEntry = ref isMasterSwitch ? ref _serverContext.GetPositionHeader(instrumentId) : ref _serverContext.GetPositionHeader(strategyId, instrumentId);
 
@@ -392,19 +396,19 @@ public class Server : IDisposable
     }
 
     // One Transfer fill on record as OnFill writes a fill: the fill and its book's row on the book's channel (where Logging's tap
-    // files them; the house book has no channel), the fill in the audit. Never the firm's row: the firm traded nothing.
+    // files them, the ServerStrategy's included), the fill in the audit. Never the firm's row: the firm traded nothing.
     private void WriteTransferFill(in Fill fill)
     {
         int strategyId = fill.OrderHeader.OrderId.StrategyId;
         int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
         int coreGroupId = _serverContext.GetInstrument(instrumentId).Header.CoreGroupId;
-        WriteToBook(strategyId, coreGroupId, in fill);
-        WriteToBook(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, instrumentId).GetRef());
+        WriteToExecution(strategyId, coreGroupId, in fill);
+        WriteToExecution(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, instrumentId).GetRef());
         WriteToAudit(coreGroupId, in fill);
     }
 
     // Cancels the working algo orders a user's pause stops: the master switch every strategy's on the instrument, a strategy's
-    // switch that strategy's. Algo orders only: a manual order (a GUI's, the house book's) is never touched. CoreGroup thread only.
+    // switch that strategy's. Algo orders only: a manual order (a GUI's, the ServerStrategy's) is never touched. CoreGroup thread only.
     private void CancelAlgoOrders(int strategyId, int instrumentId)
     {
         bool isMasterSwitch = strategyId == OrderIdAllocator.ServerStrategyId;
@@ -627,9 +631,10 @@ public class Server : IDisposable
 
         OpenInstrumentData(instrumentId, allocateInstrument.Symbol.ToString());
 
-        // Why both: each link's writer names its files by the symbols this record carries
         WriteToAudit(SocketChannel.Admin, in allocateInstrument);
-        _houseBookAudit.Write(SocketChannel.Admin, in allocateInstrument);
+        // Why: the ServerStrategy is allocated every instrument (OnAllocateInstrument below) but never asked, so it gets the admin reply a
+        // strategy gets for its own request, from which Logging's tap names its fill and position files
+        WriteToAdmin(OrderIdAllocator.ServerStrategyId, in allocateInstrument);
 
         return instrumentId;
     }
@@ -665,7 +670,7 @@ public class Server : IDisposable
 
         _serverContext.AllocateInstrument(clientId, instrumentId);
 
-        // Strategy 0 is the house book: it holds the union of every client's allocations (see Spec.md).
+        // Strategy 0 is the ServerStrategy: it holds the union of every client's allocations (see Spec.md).
         if (clientId != OrderIdAllocator.ServerStrategyId)
             _serverContext.AllocateInstrument(OrderIdAllocator.ServerStrategyId, instrumentId);
 
@@ -747,8 +752,8 @@ public class Server : IDisposable
         WriteToExecution(in existingOrderState.OrderHeader, in existingOrderState);
         foreach (ref readonly Fill fill in fills)
         {
-            WriteToBook(strategyId, coreGroupId, in fill);
-            WriteToBook(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, fill.OrderHeader.OrderId.InstrumentId).GetRef());
+            WriteToExecution(strategyId, coreGroupId, in fill);
+            WriteToExecution(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, fill.OrderHeader.OrderId.InstrumentId).GetRef());
         }
 
         foreach (ref readonly Fill fill in fills)
@@ -902,18 +907,6 @@ public class Server : IDisposable
         WriteToExecution(orderHeader.OrderId.ClientId, coreGroupId, in value);
     }
 
-    // A book's own fill or position row: a strategy's on its execution channel, where its client applies it and Logging's tap files it
-    // under the strategy; the house book's, which has no client, on its own audit link, which Logging files under ServerStrategyName.
-    // CoreGroup thread only, the channel's single writer. Hot path (OnFill): one compare more per write, no allocation.
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void WriteToBook<T>(int strategyId, int coreGroupId, in T value) where T : unmanaged
-    {
-        if (strategyId == OrderIdAllocator.ServerStrategyId)
-            _houseBookAudit.Write(coreGroupId, in value);
-        else
-            WriteToExecution(strategyId, coreGroupId, in value);
-    }
-
     // Per-CoreGroup audit: channelId == CoreGroupId (0 = admin). Each CoreGroup thread owns its own
     // audit channel and admin owns channel 0, so every channel is single-writer => no lock and no
     // cross-CCD bounce on the fill path.
@@ -946,7 +939,6 @@ public class Server : IDisposable
         // Why after the server socket: its admin thread, the admin channel's only other writer, has stopped
         if (Clock.Mode == ClockMode.Realtime)
             PostMessageEfficiencies();
-        _houseBookAudit.Dispose();
         _audit.Dispose();
         _loggingServer.Dispose();
         _serverContext.Dispose();
@@ -992,7 +984,7 @@ public class Server : IDisposable
                 Console.WriteLine($"Server.LoadInstruments: {allocateInstrument.Symbol} (exchange instrument id {allocateInstrument.ExchangeInstrumentId}) is no longer listed; not restored.");
                 continue;
             }
-            // The full client path, not the server-only one: it restores the client and house-book
+            // The full client path, not the server-only one: it restores the client and ServerStrategy
             // allocations and fires AllocateInstrument, which an exchange adapter needs to rebuild routers
             // and market data for orders still working at the exchange after a restart.
             OnAllocateInstrument(allocateInstrument.ClientId, ref allocateInstrument);

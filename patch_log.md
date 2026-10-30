@@ -4,9 +4,23 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
-## 2026-10-30 — The house book's fills and position are saved, so it survives a server restart
+## 2026-10-31 — The ServerStrategy is saved through a socket of its own, not a separate link
 
-- `Provider/Server.cs` — a third link to the Logging server, `<ServerStrategyName>.audit` (`_houseBookAudit`), which Logging's
+- `Provider/Server.cs` — strategy 0 gets a client socket of its own at startup (`ServerStrategyName`, a strategy's channel
+  layout, built Detached by `CreateDetatchedClient`, announced to Logging on `.server`), so the server's ordinary writes to its
+  channel land and Logging taps and files them like any strategy's. The third Logging link `<ServerStrategyName>.audit` and
+  `WriteToBook` are gone; `OnFill` and `WriteTransferFill` write plain `WriteToExecution` again (no compare on the fill path);
+  the first allocation of an instrument sends strategy 0 the admin reply that names its files. Why: the user's choice, the
+  existing protocol with no special case. Not raised through `OnClientAllocated`, so no subscriber can record it as a client.
+- Verified in scratchpad `transferrig` (its stand-in Logging taps clients announced on `.server` into the real `AuditWriter`,
+  as `OnChildSubscribed` does): strategy 0 announced first, under its own directory; a transfer of 1 of its 2 lots wrote its
+  Transfer fill and +1 row there; a restart on those files loaded it at +1 @ 6810.25. C++: P41 rewritten. −8 lines.
+
+---
+
+## 2026-10-30 — The ServerStrategy's fills and position are saved, so it survives a server restart
+
+- `Provider/Server.cs` — a third link to the Logging server, `<ServerStrategyName>.audit` (`_serverStrategyAudit`), which Logging's
   `AuditWriter` files under strategy 0's directory as it files a strategy's tap. `WriteToBook` sends a book's own fill and
   position row to the strategy's execution channel, or for strategy 0 to this link (`OnFill`, `WriteTransferFill`);
   `OnAllocateInstrument` writes each allocation to it too, so the files carry their symbols. Hot path (`OnFill`): one more
@@ -16,8 +30,8 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
   positions they closed. One-off restore for that: scratchpad `positionfix/restore_server_book.sh` writes strategy 0's three
   positions and fills on the box, after which a server workspace transfers them to the strategy.
 - Verified in scratchpad `transferrig` (its stand-in Logging hands this link to the real `AuditWriter`): the link connects,
-  a transfer of 1 of the house book's 2 lots wrote its Transfer fill and its +1 row under strategy 0's directory, and a restart
-  on those files loaded the house book at +1 @ 6810.25. C++: P41, no lockstep. +19 lines.
+  a transfer of 1 of the ServerStrategy's 2 lots wrote its Transfer fill and its +1 row under strategy 0's directory, and a restart
+  on those files loaded the ServerStrategy at +1 @ 6810.25. C++: P41, no lockstep. +19 lines.
 
 ---
 
@@ -45,7 +59,7 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 ## 2026-10-30 — A server workspace transfers a position between books
 
 - `Widget/PositionsWidget.axaml.cs`, `Widget/TransferPositionDialog.axaml(.cs)` (new) — in a server workspace only, a
-  position row's menu offers "Transfer Position…": From and To side by side (the house book or a strategy trading the
+  position row's menu offers "Transfer Position…": From and To side by side (the ServerStrategy or a strategy trading the
   instrument, never a GUI), each with its position, then Quantity in lots and Price with Avg and Mid, a preview of both books
   after when the check passes; Transfer does nothing when it fails. Re-reads the rows four times a second.
 - `Provider/Allocate.cs` — `ControlType.TransferPosition` (202), `ControlTransferPosition` with `NewTransferFill`.
@@ -59,10 +73,10 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
   fill (one byte compare on the fill path, no allocation); `ManualClient.IsGuiName`, with `TryParseRemoteGuiName` now sharing
   its suffix parse (`GetGuiSuffixIndex`), behaviour unchanged. `Provider/RemoteClient.cs`, `Mirror/LocalMirror.cs` — the
   call through the Mirror. `Logging/LoggingServer.cs` — the request in a GUI's audit.
-- Why: exits booked to the house book by mistake (MBT and MET, 2026-10-29) needed a server stop and a file edit to undo, and
+- Why: exits booked to the ServerStrategy by mistake (MBT and MET, 2026-10-29) needed a server stop and a file edit to undo, and
   a strategy's open position could not be handed to another strategy.
 - Verified in scratchpad `transferrig` beside the server and from a remote desk through both Mirrors (Spec.md "Position
-  transfer"). Found on the way: the house book's position is never filed, so it starts flat at every server start (noted in
+  transfer"). Found on the way: the ServerStrategy's position is never filed, so it starts flat at every server start (noted in
   Spec.md, not changed). C++: P40, in lockstep. +402 lines (dialog 213).
 
 ---
@@ -678,7 +692,7 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
   owner's seqs; `ManualClient.Amend` and `Server.TryCloseOutOrders` use it (same value, no behaviour change).
 - `Provider/Client.cs` — the read switch's comment on `OrderTarget` names the pause cancel too (still ignored).
 - Verified: scratch simulation (scratchpad\pausecancel, root off S:), two algos with 8 resting orders each and two
-  manual orders on 6E (one from A's GUI on A's book, one from a server GUI on the house book). Master Pause from the
+  manual orders on 6E (one from A's GUI on A's book, one from a server GUI on the ServerStrategy). Master Pause from the
   server GUI: 16/16 algo orders `Done` with seq >= 1,000,000 within 100 ms, both manual orders `Active`. Master Live: the
   algos re-quoted. B's Pause from B's GUI: B's 8 cancelled, A's 8 and the 2 manual untouched. No non-discarded reject;
   switches ended master Live, A Live, B Paused.
@@ -912,7 +926,7 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ## 2026-10-16 — a manual order is never limited by fills; the risk-limit tests
 
-- `Provider/RiskLayer.cs`, `Execution/Order.cs` — a manual order (house book, or booked to a strategy) is out of the fills
+- `Provider/RiskLayer.cs`, `Execution/Order.cs` — a manual order (ServerStrategy, or booked to a strategy) is out of the fills
   limit entirely, on the server and in a strategy: `OnFill` counts only an algo order's fill; the new
   `WorkingRisk.AlgoWorstQuantity` (24 bytes) holds only the working algo orders' worst, kept in `ApplyWorstQuantityDelta`,
   and the fills room uses it instead of `WorstLong/ShortQuantity`; `ValidateOrder` runs the fills check for algo orders
@@ -979,7 +993,7 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 - `Provider/RiskLayer.cs`, `Provider/Position.cs` (`IsAlgoLive`), `Strategy/Algo.cs` — the algo, the client's risk copy and
   the server's risk copy all check both switches.
 - `Provider/Server.cs` — `OnControlAlgoStatus` for strategy 0 (a server workspace's Pause/Resume) writes the server row
-  only and audits it; a strategy's control writes its own row, as before. Why: the house book has no algo, so a server
+  only and audits it; a strategy's control writes its own row, as before. Why: the ServerStrategy has no algo, so a server
   workspace's pause used to set a status nothing read.
 - A refusal for `AlgoIsPaused` alone was already discarded, so the master never auto-pauses a strategy's own switch.
 - Hot path: one more byte read per algo decision and order check; the server's fill write may pay a cache-line
@@ -1251,7 +1265,7 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 - `Provider/Allocate.cs` — `ServerHeader` gains `int ServerProcessId` at offset 173, after `Persistance`; every earlier
   offset is unchanged and the size check is now 177 bytes. Why: nothing in shared memory said which server process wrote
   the header, so nothing could tell a dead server from a live one.
-- `Provider/Context.cs` — `ServerContext.Connect` stamps it with `Environment.ProcessId` beside the house-book reservation,
+- `Provider/Context.cs` — `ServerContext.Connect` stamps it with `Environment.ProcessId` beside the ServerStrategy reservation,
   so every host (Server, ServerSimulator, tests) gets it without setting it. When the post is refused (the previous run's
   header is still there because some process maps it) it now says which case: "already running as process N" or
   "previous server (process N) has exited, but other processes still map its shared memory; stop its clients…" (was
@@ -1541,7 +1555,7 @@ takes a negative refusal code as its id.
 - `Socket/Protocol.cs`, `Socket/SharedArray.cs`, `Provider/Context.cs` — every `SharedArray` row is framed at
   construction (`Protocol.Stamp`: `Magic` and `Length` where missing, never `Sequence`). The end-to-end test found the
   mirror shipped no order state: rows edited under the lock never get a frame from `Write`, and `TryRead` read them as
-  Empty (the house-book allocation row too, so a remote server workspace refused its own orders). The server-header
+  Empty (the ServerStrategy allocation row too, so a remote server workspace refused its own orders). The server-header
   alias (a one-row array over the header `LetterBox`, "array 0") is deleted: the `LetterBox` reads `Length` as "posted",
   so a stamp would fake a post. The Mirror sends the header as its own packet (`MirrorPacketType.ServerHeader`) first in
   every pass; the remote posts the first into its `LetterBox` (`TryStore`) and writes later ones into that entry. The
@@ -1592,7 +1606,7 @@ takes a negative refusal code as its id.
 The seven "C# to implement" items of the C++ review, each agreed with the user, C++ the reference:
 
 - `Provider/Server.cs` — `LoadInstruments` replays each line through `OnAllocateInstrument(clientId,
-  ref …)` (client, house-book and poll bits, admin reply, `AllocateInstrument` callback), not the
+  ref …)` (client, ServerStrategy and poll bits, admin reply, `AllocateInstrument` callback), not the
   server-only overload. `InitDirectories` calls `ServerContext.ThrowIfInvalidServerName` first, so a
   simulation run against a live server's name throws before deleting any file.
 - `Provider/Client.cs`, `Socket/Socket.cs` — the constructor checks all 64 slots once
@@ -1749,7 +1763,7 @@ rebuilt together. cpp_alignment.md has the C++ handoff.
   By timing, the client is never looser than the server for this strategy's own orders: it counts its
   own sends before the server reads them, and it learns of reductions (acks, Dones, server or exchange
   rejects) after the server. It does not see other strategies, manual orders booked to the strategy,
-  the house book or the server rate limit, so "never looser" holds exactly when this strategy's own
+  the ServerStrategy or the server rate limit, so "never looser" holds exactly when this strategy's own
   orders are all that is on the instrument (Spec.md "The client copy is never looser than the server —
   and where it can be").
 - `Provider/Position.cs` — `Target(Ticks, WorkingQuantity, TimeInForce = Day)`.
@@ -2332,12 +2346,12 @@ rebuilt together. cpp_alignment.md has the C++ handoff.
 
 ## Unreleased (working tree, 2026-08-11)
 
-### Strategy 0 / house book (see Spec.md)
+### Strategy 0 / ServerStrategy (see Spec.md)
 
 - `Spec.md` (new) — normative model: strategies, strategy 0, workspaces, allocation union.
 - `Provider/Server.cs` — every allocation also provisions strategy 0 (the union rule), which is
   what lets a server workspace create orders without a validator special-case.
-- `Provider/Context.cs` — `ServerStrategyName` (house directory = Strategies tree under the
+- `Provider/Context.cs` — `ServerStrategyName` (ServerStrategy directory = Strategies tree under the
   server's leaf name), used for strategy 0's position files; `AllocateClientId` throws if a client
   takes the server's name.
 - `cpp_alignment.md` (new) — full handoff list to bring HFT_cpp in line (wire structs, renames,

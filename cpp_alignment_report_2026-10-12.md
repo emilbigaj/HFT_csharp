@@ -92,7 +92,7 @@ client's id, as before. A negative value is now a refusal reason:
 | `ServerError` | -2 | something threw while the server decided | `PollLetterBox` |
 | `AlreadyConnected` | -3 | a live process holds the name (status `Open`) | `DecideConnect` |
 | `Closing` | -4 | the name's previous session is still closing; the client asks again (P9) | `DecideConnect` |
-| `ReservedClientName` | -5 | the name is the server's own leaf, reserved for the house book (strategy 0) | `ServerContext::AllocateClientId` |
+| `ReservedClientName` | -5 | the name is the server's own leaf, reserved for the ServerStrategy (strategy 0) | `ServerContext::AllocateClientId` |
 | `NotReady` | -6 | the server's admission rule refused it for now: orders a previous process left are still working (P5) | `DecideConnect` via `IsClientReady` |
 | `RemoteDesk` | -7 | the "server" is a C# Remote Mirror on a remote desk, not a trading server (§8, C2) | only the C# Remote Mirror. **A C++ server never returns it.** Add the value so a C++ `ClientSocket` can name it |
 
@@ -426,7 +426,7 @@ void Dispose():
 
 ### P10. `ServerContext::AllocateClientId` returns refusals instead of throwing
 
-- A client named after the server (`ClientName == ServerStrategyName`, the house book's reserved leaf): **return**
+- A client named after the server (`ClientName == ServerStrategyName`, the ServerStrategy's reserved leaf): **return**
   `ReservedClientName` (was: throw).
 - No free id (`ClientIds.LowestClear < 0`): **return** `NoClientIdAvailable` (was: throw). The `ServerSocket` default
   allocator and the logging server's already returned -1.
@@ -529,7 +529,7 @@ if access == Write:
 ```
 
 - **Why:** rows the server edits under the lock (`AcquireLock`, field stores, `ReleaseLock`: order states, positions, the
-  house-book allocation row) never get `Magic`/`Length` from `Write`, so `TryRead`/`Read` saw them as `Empty`. The C#
+  ServerStrategy allocation row) never get `Magic`/`Length` from `Write`, so `TryRead`/`Read` saw them as `Empty`. The C#
   mirror found it: it shipped no order state at all.
 - **Safe for concurrent openers and live rows:** the values are constants, so concurrent stampers and writers cannot
   disagree; `Sequence` is never written, so an unwritten row (seq 0) still reads `Empty` and a live row's seqlock counter
@@ -730,7 +730,7 @@ struct ServerHeader (Pack = 1, 177 bytes; was 173):
 ```
 
 - **Who sets it:** the code that publishes the header into its `LetterBox` (C# `ServerContext::Connect`, which already
-  reserves the house book's client id there), with the current process id (`getpid()`), so no host can forget it. A host
+  reserves the ServerStrategy's client id there), with the current process id (`getpid()`), so no host can forget it. A host
   that builds the header leaves it 0.
 - **Update the size check** (C# throws unless `sizeof(ServerHeader) == 177`; a C++ `static_assert` should match).
 - **Who reads it:** the C# Local Mirror reads it once at startup and exits as soon as that process has exited
@@ -1013,7 +1013,7 @@ ServerContext::AllocateInstrument(clientId, instrumentId): LocalRiskLimits[clien
   C++ strategy, if there is one, does the same.
 - A client receives a `RiskLimit` (16) on its execution channel and ignores it (it is there for the audit tap). A C#
   client that predates this throws `NotImplementedException("Unknown message type")`: see L11.
-- Manual orders and strategy 0 (the house book) get the firm's limit only.
+- Manual orders and strategy 0 (the ServerStrategy) get the firm's limit only.
 - **Hot-path cost:** none on the server.
 
 **Verify:** firm limit 10, strategy X's 4: X's algo targeting 5 sends 4; from X's workspace raise X's limit to 6: the row
@@ -1087,7 +1087,7 @@ stuck algo left its orders working. Now `Server.ReadExecution`'s `ControlType::A
 - **Which orders:** the working orders on the instrument (`EnumerateOrders(instrumentId, strategyId)`, no in-flight
   client: the server's state is this order and not `Done`) of every strategy for the master switch (strategy 0), of that
   strategy for a strategy's switch, and of those **algo orders only** (`ClientId == StrategyId`). A manual order, a GUI's
-  booked to a strategy or the house book's, is never cancelled.
+  booked to a strategy or the ServerStrategy's, is never cancelled.
 - **The cancel:** `orderState.NewCancel()`, `Seq` = the owner's target-row seq + `OrderTarget::s_foreignCancelSeqJump`
   (1,000,000, now one named constant for the GUI's cancel of an algo order and `TryCloseOutOrders` too), `NicTimestamp` =
   now. It is sent by the new `SendServerOrderTarget`: written to the owner's server-to-client execution channel first (so
@@ -1247,7 +1247,7 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
 ### P40. MUST PORT: a server workspace transfers a position between books (C# `Provider/Server.cs`, `Provider/Context.cs`, `Provider/Allocate.cs`; 2026-10-30)
 
 - **Wire, new:** `ControlType::TransferPosition = 202` and `ControlTransferPosition`, packed: `Header<ControlType>`, int32
-  ClientId, int32 InstrumentId, int32 FromStrategyId (0 the house book), int32 ToStrategyId, int32 Quantity (signed as the
+  ClientId, int32 InstrumentId, int32 FromStrategyId (0 the ServerStrategy), int32 ToStrategyId, int32 Quantity (signed as the
   from book's position), double Price. `FillType::Transfer = 3`.
 - **Read switch:** `ReadExecution` handles it beside `ControlType::RiskLimit` and calls `OnControlTransferPosition`.
 - **Check, before anything moves** (C# `Context.GetTransferRefusal`): from != to; both strategies allocated the instrument;
@@ -1258,28 +1258,31 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
   and both timestamps `now`, OrderId { ClientId = request's ClientId, StrategyId = the book, InstrumentId }: `-Quantity` to the
   from book, `+Quantity` to the to book. Lock the from row, then the to row; `OnFill` each with its
   fill; unlock the to row, then the from row (so no reader sees one book moved and the other not). Then, for each fill in turn,
-  write the fill and its book's row to the book's execution channel (a no-op for book 0, as for every house-book fill
+  write the fill and its book's row to the book's execution channel (a no-op for book 0, as for every ServerStrategy fill
   today) and the fill to the audit channel. Never the server (firm) row, never the RiskLayer, nothing to iLink.
 - **Client side** (C#, nothing for C++ unless the C++ Client takes fills): message efficiency skips a Transfer fill.
 - **Deploy in lockstep with the C# desks and the C# Logging server:** a C# GUI sends type 202, which an old C++ server ignores
   (its switch's default), so the dialog would close and nothing would move.
 
-### P41. MUST PORT: the house book's fills and position rows are filed (C# `Provider/Server.cs`; 2026-10-30)
+### P41. MUST PORT: the ServerStrategy's fills and position rows are filed (C# `Provider/Server.cs`; 2026-10-30)
 
 - **Why:** strategy 0 has no client, so the server's writes of its fills and rows to "its" execution channel were dropped. Its
-  position file under `ServerStrategyName` was never written, and the house book started flat at every server start: a
+  position file under `ServerStrategyName` was never written, and the ServerStrategy started flat at every server start: a
   manual exit booked to it on 2026-10-29 vanished at the next restart, leaving the strategy it closed showing the position.
-- **Change:** open a third ClientSocket to the Logging server beside `.server` and `.audit`, named
-  `<ServerStrategyName>.audit` (`Strategies/<mode>/<server leaf>.audit`), with the same channel lengths as `.audit`
-  (`BuildChannelLengths(CoreGroupIds)`, admin channel), connected and disposed with `.audit`.
-- **Route:** wherever the server writes a book's own fill or position row to that book's execution channel (`OnFill`, and the
-  position transfer of P40), write it instead to this link, channel = CoreGroupId, when the book is strategy 0; any other
-  strategy is unchanged (C# `Server.WriteToBook`). The `.audit` writes (every fill, the firm's row) are unchanged.
-- **Symbols:** in `OnAllocateInstrument`, write the `AllocateInstrument` record to this link's admin channel as well as to
-  `.audit`; the Logging server names the files from it.
+- **Change, at the end of the server's constructor** (after the `.server` and `.audit` links connect, before `LoadClients`):
+  build a SocketHeader for strategy 0, ServerName = the server's, ClientName = `ServerStrategyName`
+  (`Strategies/<mode>/<server leaf>`), both directions' channel lengths `BuildChannelLengths(CoreGroupIds)` (a strategy's
+  layout), ClientProcessId = the server's, ClientId = 0. Create its socket Detached (C# `ServerSocket.CreateDetatchedClient`,
+  as `LoadClients` does for a restarted strategy) and write the header to the `.server` link, which is how Logging learns to tap
+  it. Do NOT raise the client-allocated event or save it to the clients file: it must never be reloaded as a client.
+- **Writes:** none change. The existing writes of strategy 0's fills and rows to "its" execution channel (`OnFill`, the P40
+  transfer) now land in that socket. Delete any special case that skips them for strategy 0, if the C++ has one.
+- **Symbols:** in `OnAllocateInstrument`, on an instrument's first allocation (beside the `.audit` write), also write the
+  `AllocateInstrument` record to strategy 0's admin channel, as the admin reply a strategy gets; Logging names the files from it.
+- **Check the client walks:** Detached is writable and never Open, so the dead-client poll, the open-client set, open/close
+  events, close-out and drain must all skip it, as they skip any Detached client. Verify the C++ ones do.
 - **Load:** nothing new: allocation already reads strategy 0's position file under `ServerStrategyName`, as for any strategy.
-- **Deploy:** no lockstep. The C# Logging server files any `*.audit` link it is offered; a server without this simply never
-  offers it.
+- **Deploy:** no lockstep. The C# Logging server taps any client the server announces.
 
 ---
 
@@ -1635,4 +1638,4 @@ server reader has seen its close message (answered, not hung).
   only); a reject does not show on a remote Workspace's screen (it reaches Telegram from the CME box).
 - **Not planned** (decided 2026-10-07): a workspace registering a strategy whose algo has not connected, or adding
   instruments to a strategy's book. Emergencies are covered by the server workspace, which trades any instrument at any time
-  on the house book (strategy 0).
+  on the ServerStrategy (strategy 0).

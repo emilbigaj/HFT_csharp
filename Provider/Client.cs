@@ -18,7 +18,7 @@ public sealed class ManualClient : Client, IManualClient
     // Kept solely so Dispose releases what this client opened — ContextManager owns the ServerContext.
     private readonly ClientContext? _algoContext;
 
-    // Manual orders book to the principal. A server workspace books to the reserved house id, which
+    // Manual orders book to the principal. A server workspace books to the reserved ServerStrategy id, which
     // also keeps ClientId != StrategyId — that is what makes the RiskLayer treat them as human
     // intervention rather than algo flow (no pause gate, no algo rate limit).
     private readonly int _strategyId;
@@ -99,7 +99,7 @@ public sealed class ManualClient : Client, IManualClient
         return isGuiSuffix ? suffixIndex : -1;
     }
 
-    // A GUI client named guiName, booking to principalName: the server (server mode, the house book) or a strategy.
+    // A GUI client named guiName, booking to principalName: the server (server mode, the ServerStrategy) or a strategy.
     public ManualClient(string guiName, string principalName, string serverName) : base(guiName, serverName)
     {
         try

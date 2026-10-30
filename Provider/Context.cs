@@ -100,7 +100,7 @@ public abstract class Context
 {
     public FileSystemPath ServerName { get; }
     public FileSystemPath LoggingServerName { get; }
-    // Strategy 0's directory: the house book lives in the Strategies tree like any other strategy (see Spec.md).
+    // Strategy 0's directory: the ServerStrategy lives in the Strategies tree like any other strategy (see Spec.md).
     public FileSystemPath ServerStrategyName { get; }
     public FileSystemPath DirectoryPath { get; }
 
@@ -439,7 +439,7 @@ public abstract class Context
         if (!double.IsFinite(controlTransferPosition.Price))
             return false;
 
-        // Step 4: no algo may trade either position meanwhile; the house book has none
+        // Step 4: no algo may trade either position meanwhile; the ServerStrategy has none
         bool isEitherAlgoLive = (fromStrategyId != OrderIdAllocator.ServerStrategyId && IsAlgoLive(fromStrategyId, instrumentId))
             || (toStrategyId != OrderIdAllocator.ServerStrategyId && IsAlgoLive(toStrategyId, instrumentId));
         return !isEitherAlgoLive;
@@ -450,7 +450,7 @@ public abstract class Context
 
 
 
-    // The strategy whose rows are this context's own: a client's id, or strategy 0 (the house book) on the server.
+    // The strategy whose rows are this context's own: a client's id, or strategy 0 (the ServerStrategy) on the server.
     public int StrategyId => (this as ClientContext)?.ClientId ?? OrderIdAllocator.ServerStrategyId;
 
     // This context's own limit, the one its RiskLayer checks: the firm's on the server, the strategy's on a client (see Spec.md "Two levels of risk limit").
@@ -721,7 +721,7 @@ public abstract class Context
             return;
         }
         // A ServerContext's positions are the server-wide rows; no client owns their order slots
-        // (only Client.Create ever sets one), so the house id is the correct inert owner.
+        // (only Client.Create ever sets one), so the ServerStrategy id is the correct inert owner.
         Position position = new Position(instrument, this, StrategyId);
         _positions[instrument.InstrumentId] = position;
     }
@@ -963,7 +963,7 @@ public sealed class ServerContext : Context
         // region, and Context.EnsureConnected() then spins forever on a box nobody writes.
         LetterBox<ServerHeader> serverHeaderBox = new LetterBox<ServerHeader>(serverName / "ServerHeader", Access.Write);
 
-        // Reserve the house book before anyone can connect. AllocateClientId hands out
+        // Reserve the ServerStrategy before anyone can connect. AllocateClientId hands out
         // ClientIds.LowestClear, so without this the FIRST client to attach takes id 0 and every
         // manual order from a server workspace would be attributed to it. Pre-setting the bit both
         // keeps it out of the allocator and makes the slot addressable — ThrowIfClientIdOutOfRange
@@ -1024,7 +1024,7 @@ public sealed class ServerContext : Context
     // The client's id: its existing one, the id it asks for (LoadClients only), or the lowest free one; a negative ConnectRefusal when refused.
     public int AllocateClientId(in SocketHeader socketHeader)
     {
-        // The server's leaf name is reserved for strategy 0's directory — a client named after the server would share the house book's files (see Spec.md).
+        // The server's leaf name is reserved for strategy 0's directory — a client named after the server would share the ServerStrategy's files (see Spec.md).
         if (socketHeader.ClientName == ServerStrategyName.Path)
             return (int)ConnectRefusal.ReservedClientName;
 

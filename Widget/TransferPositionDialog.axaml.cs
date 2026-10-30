@@ -12,7 +12,7 @@ using Tools;
 
 namespace Widget;
 
-/// A book a position can move between: the house book or a strategy trading the instrument. UI thread, cold path.
+/// A book a position can move between: the ServerStrategy or a strategy trading the instrument. UI thread, cold path.
 public sealed class TransferBook(int strategyId, string name)
 {
     public int StrategyId { get; } = strategyId;
@@ -84,7 +84,7 @@ public partial class TransferPositionDialog : Window
         SetQuantityAndPrice();
     }
 
-    // The house book, then each strategy trading the instrument; never a GUI, which books to one of these.
+    // The ServerStrategy, then each strategy trading the instrument; never a GUI, which books to one of these.
     private static List<TransferBook> NewTransferBooks(ServerContext serverContext, int instrumentId)
     {
         List<TransferBook> transferBooks = [new TransferBook(OrderIdAllocator.ServerStrategyId, "Server")];

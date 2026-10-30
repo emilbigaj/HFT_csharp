@@ -27,7 +27,7 @@ namespace Execution
         public const int MaxStrategyId = (1 << StrategyBits) - 1;     // 63
         public const int MaxInstrumentId = (1 << InstrumentBits) - 1; // 16 383
 
-        // The house book: the StrategyId every order originated from a server workspace is
+        // The ServerStrategy: the StrategyId every order originated from a server workspace is
         // attributed to. It is a RESERVED clientId — ServerContext.Connect pre-sets bit 0 in
         // ClientIds so AllocateClientId can never hand it to a connecting client, which is what
         // makes ClientId != StrategyId (i.e. IsAlgoOrder() == false) for manual server orders.
