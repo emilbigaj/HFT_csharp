@@ -4,6 +4,16 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-30 — A position transfer moves both books under both locks
+
+- `Provider/Server.cs` — `OnControlTransferPosition` locks the from row and the to row before moving either, applies both
+  fills, and releases in reverse, then records each fill (`WriteTransferFill`); `ApplyTransferFill` is gone. Why: each row was
+  moved under its own lock in turn, so a reader between the two saw one book moved and the other not, and the books no longer
+  summed to the firm's row. Cost: one more row lock held for one position update, a few nanoseconds, no allocation. C++: P40
+  updated. +5 lines.
+
+---
+
 ## 2026-10-30 — A server workspace transfers a position between books
 
 - `Widget/PositionsWidget.axaml.cs`, `Widget/TransferPositionDialog.axaml(.cs)` (new) — in a server workspace only, a

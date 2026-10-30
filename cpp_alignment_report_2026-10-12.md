@@ -1256,8 +1256,9 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
   once and move nothing: no exception, no log (C# `Context.CanTransferPosition`, then an early return; error handling comes later).
 - **Apply:** one timestamp `now`; two fills, both `FillType::Transfer`, Price, FillId = now in nanoseconds, OrderHeader Seq 0
   and both timestamps `now`, OrderId { ClientId = request's ClientId, StrategyId = the book, InstrumentId }: `-Quantity` to the
-  from book, `+Quantity` to the to book. For each in turn: lock the book's local position row, `OnFill(fill, multiplier)`,
-  unlock; then write the fill and the row to the book's execution channel (a no-op for book 0, as for every house-book fill
+  from book, `+Quantity` to the to book. Lock the from row, then the to row; `OnFill` each with its
+  fill; unlock the to row, then the from row (so no reader sees one book moved and the other not). Then, for each fill in turn,
+  write the fill and its book's row to the book's execution channel (a no-op for book 0, as for every house-book fill
   today) and the fill to the audit channel. Never the server (firm) row, never the RiskLayer, nothing to iLink.
 - **Client side** (C#, nothing for C++ unless the C++ Client takes fills): message efficiency skips a Transfer fill.
 - **Deploy in lockstep with the C# desks and the C# Logging server:** a C# GUI sends type 202, which an old C++ server ignores

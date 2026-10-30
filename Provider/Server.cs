@@ -355,8 +355,9 @@ public class Server : IDisposable
     }
 
     // CoreGroup thread only: the position rows' sole writer, as OnFill. Moves part of one book's position into another as two Transfer
-    // fills at the request's price; the firm's row, the exchange and every fill count stay as they were (see Spec.md "Position
-    // transfer"). A transfer the check refuses moves nothing and is dropped silently: the dialog checks the same, so only a race gets here.
+    // fills at the request's price, both rows under both locks at once so no reader sees one book moved and the other not; the firm's
+    // row, the exchange and every fill count stay as they were (see Spec.md "Position transfer"). A transfer the check refuses moves
+    // nothing and is dropped silently: the dialog checks the same, so only a race gets here.
     public void OnControlTransferPosition(in ControlTransferPosition controlTransferPosition)
     {
         // Step 1: the dialog's own check, against the rows as they are now
@@ -369,28 +370,32 @@ public class Server : IDisposable
         Fill fromFill = controlTransferPosition.NewTransferFill(controlTransferPosition.FromStrategyId, -quantity, now);
         Fill toFill = controlTransferPosition.NewTransferFill(controlTransferPosition.ToStrategyId, quantity, now);
 
-        // Step 3: each to its book, its row and its record
-        ApplyTransferFill(in fromFill);
-        ApplyTransferFill(in toFill);
+        // Step 3: both rows under both locks, acquired from-to and released in reverse, as OnFill does with its two rows
+        int instrumentId = controlTransferPosition.InstrumentId;
+        double multiplier = _serverContext.GetInstrument(instrumentId).Multiplier;
+        ref SharedArrayEntry<PositionHeader> fromPositionEntry = ref _serverContext.GetPositionHeader(controlTransferPosition.FromStrategyId, instrumentId);
+        ref SharedArrayEntry<PositionHeader> toPositionEntry = ref _serverContext.GetPositionHeader(controlTransferPosition.ToStrategyId, instrumentId);
+        fromPositionEntry.AcquireLock();
+        toPositionEntry.AcquireLock();
+        fromPositionEntry.GetRef().OnFill(in fromFill, multiplier);
+        toPositionEntry.GetRef().OnFill(in toFill, multiplier);
+        toPositionEntry.ReleaseLock();
+        fromPositionEntry.ReleaseLock();
+
+        // Step 4: each on record once both rows are consistent
+        WriteTransferFill(in fromFill);
+        WriteTransferFill(in toFill);
     }
 
-    // One Transfer fill on its book's row, then on record as OnFill writes a fill: the fill and the row on the book's channel (where
-    // Logging's tap files them; the house book has no channel), the fill in the audit. Never the firm's row: the firm traded nothing.
-    private void ApplyTransferFill(in Fill fill)
+    // One Transfer fill on record as OnFill writes a fill: the fill and its book's row on the book's channel (where Logging's tap
+    // files them; the house book has no channel), the fill in the audit. Never the firm's row: the firm traded nothing.
+    private void WriteTransferFill(in Fill fill)
     {
-        // Step 1: the row, under its lock as a fill's
         int strategyId = fill.OrderHeader.OrderId.StrategyId;
         int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
-        Instrument instrument = _serverContext.GetInstrument(instrumentId);
-        ref SharedArrayEntry<PositionHeader> positionEntry = ref _serverContext.GetPositionHeader(strategyId, instrumentId);
-        positionEntry.AcquireLock();
-        positionEntry.GetRef().OnFill(in fill, instrument.Multiplier);
-        positionEntry.ReleaseLock();
-
-        // Step 2: on record
-        int coreGroupId = instrument.Header.CoreGroupId;
+        int coreGroupId = _serverContext.GetInstrument(instrumentId).Header.CoreGroupId;
         WriteToExecution(strategyId, coreGroupId, in fill);
-        WriteToExecution(strategyId, coreGroupId, in positionEntry.GetRef());
+        WriteToExecution(strategyId, coreGroupId, in _serverContext.GetPositionHeader(strategyId, instrumentId).GetRef());
         WriteToAudit(coreGroupId, in fill);
     }
 

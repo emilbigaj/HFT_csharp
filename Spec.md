@@ -972,8 +972,9 @@ position to another strategy.
   instrument's execution channel, through the Mirror from a remote desk (`LocalMirror` hands it to the stand-in).
 - **Server.** `Server.OnControlTransferPosition`, on the CoreGroup thread that owns both rows: two fills of
   `FillType.Transfer` (= 3), `-Quantity` to From and `+Quantity` to To, at one price and one time and with one FillId (the
-  time's nanoseconds), each order id carrying the GUI's ClientId. Each is applied to its book's row under the row's lock,
-  then written as `Server.OnFill` writes a fill: the fill and the row on the book's execution channel, the fill in the audit.
+  time's nanoseconds), each order id carrying the GUI's ClientId. Both rows are locked before either moves (from then to,
+  released in reverse, as `Server.OnFill` does with its two rows), so no reader sees one book moved and the other not; then
+  each is written as `Server.OnFill` writes a fill: the fill and the row on the book's execution channel, the fill in the audit.
   The firm's row is not touched, nothing goes to the exchange, the server's RiskLayer is not called, and no count moves: the
   strategy client's `RiskLayer.OnFill` neither releases (the GUI's ClientId is not its own) nor counts a session fill (not an
   algo order), and `Client.OnFill` skips message efficiency for a Transfer fill.
