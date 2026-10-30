@@ -2,9 +2,9 @@
   "MirrorRole": "Remote",
   "ServerName": "CME_Production",
   "ClockMode": "Realtime",
-  "ListenPort": 27793,
-  "IPWhitelist": ["204.14.4.196"],
-  "ConnectAddresses": [],
+  "ListenPort": 0,
+  "IPWhitelist": [],
+  "ConnectAddresses": ["100.119.146.54:27793"], // Tailscale; was ListenPort 27793 with IPWhitelist ["204.14.4.196"], the box dialling in
   "DirectoriesRoot": "Data",
   "IsConsoleVisible": true,
   "IsFolderSyncOn": true

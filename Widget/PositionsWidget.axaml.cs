@@ -138,7 +138,11 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
         contextMenu.Items.Add(WidgetMenus.NewMenuItem("Create Order", "📝", () => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, widgetPosition.Instrument))));
         contextMenu.Items.Add(WidgetMenus.NewMenuItem("Create Close Order", "❌", () => this.AddToHost(SendOrderWidget.NewCreateOrder(_context, widgetPosition.Instrument, quantity: -widgetPosition.Quantity))));
 
-        // Step 3: the ladder
+        // Step 3: a transfer between books, which only a server workspace sees
+        if (_context.Primary is ServerContext serverContext)
+            contextMenu.Items.Add(WidgetMenus.NewMenuItem("Transfer Position…", "⇄", () => _ = TransferPosition(serverContext, widgetPosition)));
+
+        // Step 4: the ladder
         contextMenu.Items.Add(new Separator());
         contextMenu.Items.Add(WidgetMenus.NewMenuItem("Open Ladder", "🪜", () => this.AddToHost(LadderWidget.NewLadder(_context, widgetPosition.InstrumentId))));
     }
@@ -158,6 +162,32 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
             ClientId = _context.Manual.Context.ClientId
         };
         _context.Manual.OnControlAlgoStatus(controlAlgoStatus);
+    }
+
+    /// Opens the transfer dialog on the position's instrument and sends the transfer it closes with; logs a failure.
+    private async System.Threading.Tasks.Task TransferPosition(ServerContext serverContext, WidgetPosition widgetPosition)
+    {
+        // Why the catch: a failed transfer must not take down the GUI; it is logged and the positions stay as they were
+        try
+        {
+            // Step 1: the dialog, on the books as they are now
+            if (TopLevel.GetTopLevel(this) is not Window window)
+                return;
+            TransferPositionDialog transferPositionDialog = new(serverContext, widgetPosition.Instrument);
+            ControlTransferPosition? typedControlTransferPosition = await transferPositionDialog.ShowDialog<ControlTransferPosition?>(window);
+            if (typedControlTransferPosition == null)
+                return;
+
+            // Step 2: send it on the instrument's execution channel; the server moves both rows, the grid shows them on its next refresh
+            _context.AllocateToManualClient(widgetPosition.InstrumentId);
+            ControlTransferPosition controlTransferPosition = typedControlTransferPosition.Value;
+            controlTransferPosition.ClientId = _context.Manual.Context.ClientId;
+            _context.Manual.OnControlTransferPosition(in controlTransferPosition);
+        }
+        catch (Exception exception)
+        {
+            Console.WriteLine($"PositionsWidget.TransferPosition: {exception.Message}");
+        }
     }
 
     /// Pauses or resumes the algo of every position the grid shows. Why Rows: only the UI thread writes it, so a click mid-refresh sees a whole list

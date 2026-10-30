@@ -3,7 +3,7 @@
   "ServerName": "CME_Production",
   "ListenPort": 0,
   "IPWhitelist": [],
-  "ConnectAddresses": ["10.172.13.228:27793"],
+  "ConnectAddresses": ["100.119.146.54:27793"], // TNS "10.172.13.228:27793"
   "DirectoriesRoot": "Data",
   "IsConsoleVisible": true,
   "IsFolderSyncOn": true,

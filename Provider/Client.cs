@@ -78,12 +78,25 @@ public sealed class ManualClient : Client, IManualClient
     // that is no remote GUI's.
     public static bool TryParseRemoteGuiName(string remoteGuiName, out string principalName, out int guiNumber)
     {
-        int machineIndex = remoteGuiName.LastIndexOf('@');
-        int suffixIndex = machineIndex > 0 ? remoteGuiName.LastIndexOf("_GUI", machineIndex, StringComparison.Ordinal) : -1;
+        int suffixIndex = GetGuiSuffixIndex(remoteGuiName, remoteGuiName.LastIndexOf('@'), out guiNumber);
+        principalName = suffixIndex > 0 ? remoteGuiName[..suffixIndex] : "";
+        return suffixIndex > 0;
+    }
+
+    // True for any GUI's name, beside the server ("<principal>_GUI<n>") or on a remote desk ("<principal>_GUI<n>@<machine>").
+    public static bool IsGuiName(string clientName)
+    {
+        int machineIndex = clientName.LastIndexOf('@');
+        return GetGuiSuffixIndex(clientName, machineIndex > 0 ? machineIndex : clientName.Length, out _) > 0;
+    }
+
+    // Where the "_GUI<n>" that ends at nameEnd starts, with its n; -1 (n 0) when the name has none there.
+    private static int GetGuiSuffixIndex(string name, int nameEnd, out int guiNumber)
+    {
+        int suffixIndex = nameEnd > 0 ? name.LastIndexOf("_GUI", nameEnd - 1, StringComparison.Ordinal) : -1;
         guiNumber = 0;
-        bool isGuiName = suffixIndex > 0 && int.TryParse(remoteGuiName.AsSpan(suffixIndex + 4, machineIndex - suffixIndex - 4), out guiNumber);
-        principalName = isGuiName ? remoteGuiName[..suffixIndex] : "";
-        return isGuiName;
+        bool isGuiSuffix = suffixIndex > 0 && int.TryParse(name.AsSpan(suffixIndex + 4, nameEnd - suffixIndex - 4), out guiNumber);
+        return isGuiSuffix ? suffixIndex : -1;
     }
 
     // A GUI client named guiName, booking to principalName: the server (server mode, the house book) or a strategy.
@@ -139,6 +152,14 @@ public sealed class ManualClient : Client, IManualClient
     public void OnControlRiskLimit(in ControlRiskLimit controlRiskLimit)
     {
         ControlRiskLimit copy = controlRiskLimit;
+        _writeQueue.Enqueue(() => _socket.Write(Context.GetInstrument(copy.InstrumentId).Header.CoreGroupId, in copy));
+    }
+
+    // Request a position transfer between two books, on the instrument's execution channel so the CoreGroup thread that owns both
+    // rows applies it. The rows show the result.
+    public void OnControlTransferPosition(in ControlTransferPosition controlTransferPosition)
+    {
+        ControlTransferPosition copy = controlTransferPosition;
         _writeQueue.Enqueue(() => _socket.Write(Context.GetInstrument(copy.InstrumentId).Header.CoreGroupId, in copy));
     }
 
@@ -637,7 +658,9 @@ public abstract class Client
         RiskLayer.OnFill(in fill, fill.OrderHeader.OrderId.ClientId == _clientId);
         Position position = Context.GetPosition(fill.OrderHeader.OrderId.InstrumentId);
         int productGroupId = position.Instrument.ProductGroupId;
-        Context.GetMessageEfficiency(productGroupId).GetRef().OnFill(fill.Quantity);
+        // Why not a transfer's: the server moved a position between books, the exchange traded nothing (see Spec.md "Position transfer")
+        if (fill.FillType != FillType.Transfer)
+            Context.GetMessageEfficiency(productGroupId).GetRef().OnFill(fill.Quantity);
         position.OnFill(fill);
         Fill?.Invoke(in fill);
     }

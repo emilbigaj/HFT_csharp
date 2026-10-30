@@ -1227,6 +1227,42 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
 - **Unchanged:** the stamps on what the server makes itself (InFlight state, injected cancels, position rows).
 - **Deploy:** no lockstep (no layout or wire change). A C++ server without this keeps overwriting, as today.
 
+### P39. MUST PORT: a spread leg on another root keeps its root in the spread's name (C# `Data/Symbology.cs`; 2026-10-28)
+
+- **Why:** a spread's `Symbol` names its risk-limit, position and fill files. Every leg dropped its own root, so on
+  CME_Production 893 names were shared by two or more spreads (10Y minus 5YY and 10Y minus 2YY were both
+  `Spread XCBT 10Y +2026-10-30 -2026-10-30`), and those spreads shared their files.
+- **Change, `LeggedSymbology`'s ticker and short symbol:** a leg whose root equals the spread's root is unchanged (signed
+  weight, then its ticker without the root: "+2026-10-30", "+22026-10-30"). A leg on another root is its signed weight,
+  one space, then its own full ticker: SR1 Apr28 minus ZQ Apr28 is `Spread XCME SR1 +2028-04-30 - ZQ 2028-04-30`, short
+  `SR1 +Apr28 - ZQ Apr28`; weight -3 of 5YY is `-3 5YY 2026-10-30`. The space is required: roots start with digits.
+- **Change, `Symbology::FromString` for a spread:** split the legs on spaces; a token shorter than 11 characters is a leg on
+  another root, its sign and weight, and the next two tokens are its root and its date.
+- **Check:** all 91,894 spreads on CME_Production round-trip through FromString; shared spread names fall from 893 to 127
+  (the rest are instruments the header cannot tell apart, Spec.md "Spread names").
+- **Deploy in lockstep with the C# desks and the C# Logging server:** the Logging server writes `.risklimit` files and the
+  GUI reads positions under these names, while the C++ server loads them at allocation. A spread with a leg on another
+  root is renamed, so a file under its old name is no longer read: move any such file to the new name before the deploy.
+
+### P40. MUST PORT: a server workspace transfers a position between books (C# `Provider/Server.cs`, `Provider/Context.cs`, `Provider/Allocate.cs`; 2026-10-30)
+
+- **Wire, new:** `ControlType::TransferPosition = 202` and `ControlTransferPosition`, packed: `Header<ControlType>`, int32
+  ClientId, int32 InstrumentId, int32 FromStrategyId (0 the house book), int32 ToStrategyId, int32 Quantity (signed as the
+  from book's position), double Price. `FillType::Transfer = 3`.
+- **Read switch:** `ReadExecution` handles it beside `ControlType::RiskLimit` and calls `OnControlTransferPosition`.
+- **Check, before anything moves** (C# `Context.GetTransferRefusal`): from != to; both strategies allocated the instrument;
+  Quantity != 0, same sign as the from row's Quantity, |Quantity| <= |from Quantity|; Price finite; for each book other than
+  0, the algo not live (its own row's AlgoStatus and the server row's both Live means live). When the check fails, return at
+  once and move nothing: no exception, no log (C# `Context.CanTransferPosition`, then an early return; error handling comes later).
+- **Apply:** one timestamp `now`; two fills, both `FillType::Transfer`, Price, FillId = now in nanoseconds, OrderHeader Seq 0
+  and both timestamps `now`, OrderId { ClientId = request's ClientId, StrategyId = the book, InstrumentId }: `-Quantity` to the
+  from book, `+Quantity` to the to book. For each in turn: lock the book's local position row, `OnFill(fill, multiplier)`,
+  unlock; then write the fill and the row to the book's execution channel (a no-op for book 0, as for every house-book fill
+  today) and the fill to the audit channel. Never the server (firm) row, never the RiskLayer, nothing to iLink.
+- **Client side** (C#, nothing for C++ unless the C++ Client takes fills): message efficiency skips a Transfer fill.
+- **Deploy in lockstep with the C# desks and the C# Logging server:** a C# GUI sends type 202, which an old C++ server ignores
+  (its switch's default), so the dialog would close and nothing would move.
+
 ---
 
 ## 8. Do not port (C#-only)

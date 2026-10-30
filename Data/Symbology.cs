@@ -66,6 +66,7 @@ public class Symbology
         // Ticker formats emitted:
         // Future: "<Root> <Date>"                e.g., "ES 2025-12-15"
         // Spread: "<Root> +<Date> -<Date>"       signed leg tokens, weight folded into the sign
+        //         "<Root> +<Date> - <Root> <Date>"  a leg on another root: its sign, then its own ticker
         int spaceAfterRoot = ticker.IndexOf(' ');
         if (spaceAfterRoot < 0)
             throw new FormatException("Ticker must contain root and a maturity part.");
@@ -82,18 +83,24 @@ public class Symbology
             // Signed leg tokens "±[n]<Date>": root appears once, legs maturity-ascending. Parsed
             // blindly assuming the format is correct — the ISO date is the fixed-width (10) END of
             // the token, the digits between the sign and the date are the optional weight
-            // magnitude ("+22026-07-31" = weight 2); anything malformed throws on its own.
+            // magnitude ("+22026-07-31" = weight 2); anything malformed throws on its own. A token too
+            // short to hold a date is a leg on another root: its sign and weight, then its root and date.
             List<Symbology> symbologies = new List<Symbology>();
             List<int> weights = new List<int>();
-            foreach (string legToken in remainder.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            string[] legTokens = remainder.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            for (int tokenIndex = 0; tokenIndex < legTokens.Length; tokenIndex++)
             {
+                string legToken = legTokens[tokenIndex];
+                bool isOtherRoot = legToken.Length < 11;   // Why 11: the shortest same-root token is a sign and a 10-character date
+                string legRoot = isOtherRoot ? legTokens[++tokenIndex] : root;
+                string legDate = isOtherRoot ? legTokens[++tokenIndex] : legToken[^10..];
                 int sign = legToken[0] == '-' ? -1 : 1;
                 int magnitude = 0;
-                for (int index = 1; index < legToken.Length - 10; index++)
+                for (int index = 1; index < legToken.Length - (isOtherRoot ? 0 : 10); index++)
                 {
                     magnitude = magnitude * 10 + (legToken[index] - '0');
                 }
-                symbologies.Add(new FutureSymbology(exchange, root, Timestamp.FromString(legToken[^10..], "yyyy-MM-dd")));
+                symbologies.Add(new FutureSymbology(exchange, legRoot, Timestamp.FromString(legDate, "yyyy-MM-dd")));
                 weights.Add(sign * Math.Max(magnitude, 1));
             }
             return new SpreadSymbology(exchange, root, symbologies, weights);
@@ -140,14 +147,18 @@ public class LeggedSymbology : Symbology
 
     public override string ShortSymbol { get; }
 
-    // The root appears once, up front; leg tokens carry only sign+maturity ("+M2025-12-19").
+    // The root appears once, up front; a leg on it carries only sign+maturity ("+2025-12-19"), a leg on another root its own
+    // ticker after a space ("- ZQ 2028-04-30"), so spreads that differ only in a leg's product never share a Symbol.
     public LeggedSymbology(InstrumentType instrumentType, string exchange, string root, List<Symbology> symbologies, List<int> weights)
-        : base(instrumentType, exchange, root, GetLegsTicker(root, symbologies.Select((l, i) => new SymbolLeg(l.Ticker.Replace(l.Root + " ", ""), weights[i])).ToList()))
+        : base(instrumentType, exchange, root, GetLegsTicker(root, symbologies.Select((l, i) => new SymbolLeg(NewLegText(root, l, l.Ticker), weights[i])).ToList()))
     {
         Symbologies = symbologies;
         Weights = weights;
-        ShortSymbol = GetLegsTicker(root, symbologies.Select((l, i) => new SymbolLeg(l.ShortSymbol.Replace(l.Root + " ", ""), weights[i])).ToList());
+        ShortSymbol = GetLegsTicker(root, symbologies.Select((l, i) => new SymbolLeg(NewLegText(root, l, l.ShortSymbol), weights[i])).ToList());
     }
+
+    // A leg in its spread's name: its date alone on the spread's own root ("Apr28"), after a space with its root on another (" ZQ Apr28").
+    private static string NewLegText(string root, Symbology legSymbology, string legText) => legSymbology.Root == root ? legText.Replace(root + " ", "") : " " + legText;
 
     // Weight rendered as the leg-token sign: "+", "-", "+2"; negative weights carry their own '-'.
     public static string GetSignedWeight(int weight) => weight switch

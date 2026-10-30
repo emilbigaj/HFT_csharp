@@ -234,6 +234,9 @@ public sealed class LocalMirror
             case (byte)ControlType.RiskLimit:
                 manualClient.OnControlRiskLimit(in MemoryMarshal.AsRef<ControlRiskLimit>(message));
                 break;
+            case (byte)ControlType.TransferPosition:
+                manualClient.OnControlTransferPosition(in MemoryMarshal.AsRef<ControlTransferPosition>(message));
+                break;
         }
 
         // Step 3: sent at once: a GUI detached later in this batch keeps its last calls

@@ -14,6 +14,7 @@ public interface IManualClient : IDisposable
     void OnAllocateInstrument(int instrumentHeaderId);
     void OnControlAlgoStatus(in ControlAlgoStatus controlAlgoStatus);
     void OnControlRiskLimit(in ControlRiskLimit controlRiskLimit);
+    void OnControlTransferPosition(in ControlTransferPosition controlTransferPosition);
     void WriteSocket();
     void ReadSocket();
 }
@@ -77,6 +78,8 @@ public sealed class RemoteClient : IManualClient
     public void OnControlAlgoStatus(in ControlAlgoStatus controlAlgoStatus) => _clientSocket.Write(in controlAlgoStatus);
 
     public void OnControlRiskLimit(in ControlRiskLimit controlRiskLimit) => _clientSocket.Write(in controlRiskLimit);
+
+    public void OnControlTransferPosition(in ControlTransferPosition controlTransferPosition) => _clientSocket.Write(in controlTransferPosition);
 
     // Nothing queued. Why: every call comes from the UI thread, the ring's only writer, so it is written as it is made.
     public void WriteSocket() { }

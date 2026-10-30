@@ -413,6 +413,38 @@ public abstract class Context
         GetPositionHeader(strategyId, instrumentId).GetReadonlyRef().AlgoStatus == AlgoStatus.Live
         && _serverPositionHeaders.GetEntry(instrumentId).GetReadonlyRef().AlgoStatus == AlgoStatus.Live;
 
+    // True when the transfer may go ahead against the rows as they are now: the server enforces it and a server workspace's dialog
+    // checks it before sending, so the two never disagree (see Spec.md "Position transfer"). Cold path.
+    public bool CanTransferPosition(in ControlTransferPosition controlTransferPosition)
+    {
+        int instrumentId = controlTransferPosition.InstrumentId;
+        int fromStrategyId = controlTransferPosition.FromStrategyId;
+        int toStrategyId = controlTransferPosition.ToStrategyId;
+
+        // Step 1: two books, both trading the instrument
+        if (fromStrategyId == toStrategyId)
+            return false;
+        bool isEachBookAllocated = GetInstrumentIdsByClientId(fromStrategyId).GetReadonlyRef()[instrumentId] && GetInstrumentIdsByClientId(toStrategyId).GetReadonlyRef()[instrumentId];
+        if (!isEachBookAllocated)
+            return false;
+
+        // Step 2: part of the from book's position, on its side
+        int fromQuantity = GetPositionHeader(fromStrategyId, instrumentId).GetReadonlyRef().Quantity;
+        int quantity = controlTransferPosition.Quantity;
+        bool isPartOfPosition = quantity != 0 && Math.Sign(quantity) == Math.Sign(fromQuantity) && Math.Abs(quantity) <= Math.Abs(fromQuantity);
+        if (!isPartOfPosition)
+            return false;
+
+        // Step 3: a price to book it at
+        if (!double.IsFinite(controlTransferPosition.Price))
+            return false;
+
+        // Step 4: no algo may trade either position meanwhile; the house book has none
+        bool isEitherAlgoLive = (fromStrategyId != OrderIdAllocator.ServerStrategyId && IsAlgoLive(fromStrategyId, instrumentId))
+            || (toStrategyId != OrderIdAllocator.ServerStrategyId && IsAlgoLive(toStrategyId, instrumentId));
+        return !isEitherAlgoLive;
+    }
+
     public abstract bool TryGetInstrumentId(int instrumentHeaderId, out int instrumentId);
     public abstract Bitset64 InstrumentIds { get; }
 

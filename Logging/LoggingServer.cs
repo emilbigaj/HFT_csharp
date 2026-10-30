@@ -128,6 +128,7 @@ public class ClientSocketReader : IReader
             case (byte)OrderType.MessageEfficiency:
             case (byte)ControlType.AlgoStatus:
             case (byte)ControlType.RiskLimit:
+            case (byte)ControlType.TransferPosition:
                 return @default; // requests and message-efficiency rows carry no timestamp: sort at the high-water mark, arrival order kept
             default:
                 nicTimestamp = MemoryMarshal.AsRef<OrderHeader>(rsrc.Slice(Unsafe.SizeOf<Header<OrderType>>())).NicTimestamp;
@@ -1041,6 +1042,13 @@ public class AuditWriter : ObjectWriter
                     ref readonly ControlRiskLimit controlRiskLimit = ref MemoryMarshal.AsRef<ControlRiskLimit>(rsrc);
                     string symbol = GetSymbol(controlRiskLimit.InstrumentId);
                     string json = Json.SerializeToLine(controlRiskLimit);
+                    return json.Insert(1, $"\"Symbol\":\"{symbol}\",");
+                }
+            case (byte)ControlType.TransferPosition:
+                {
+                    ref readonly ControlTransferPosition controlTransferPosition = ref MemoryMarshal.AsRef<ControlTransferPosition>(rsrc);
+                    string symbol = GetSymbol(controlTransferPosition.InstrumentId);
+                    string json = Json.SerializeToLine(controlTransferPosition);
                     return json.Insert(1, $"\"Symbol\":\"{symbol}\",");
                 }
             case (byte)OrderType.RiskLimit:

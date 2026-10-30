@@ -258,6 +258,12 @@ public class Server : IDisposable
                             CancelAlgoOrders(controlAlgoStatus.StrategyId, controlAlgoStatus.InstrumentId);
                         break;
                     }
+                    case (byte)ControlType.TransferPosition:
+                    {
+                        ref readonly ControlTransferPosition controlTransferPosition = ref MemoryMarshal.AsRef<ControlTransferPosition>(rdst);
+                        OnControlTransferPosition(in controlTransferPosition);
+                        break;
+                    }
                     default:
                         break;
                 }
@@ -346,6 +352,46 @@ public class Server : IDisposable
 
         // Step 3: on record as a fill's rows are
         WriteToRecord(strategyId, _serverContext.GetInstrument(instrumentId).Header.CoreGroupId, in positionHeader);
+    }
+
+    // CoreGroup thread only: the position rows' sole writer, as OnFill. Moves part of one book's position into another as two Transfer
+    // fills at the request's price; the firm's row, the exchange and every fill count stay as they were (see Spec.md "Position
+    // transfer"). A transfer the check refuses moves nothing and is dropped silently: the dialog checks the same, so only a race gets here.
+    public void OnControlTransferPosition(in ControlTransferPosition controlTransferPosition)
+    {
+        // Step 1: the dialog's own check, against the rows as they are now
+        if (!_serverContext.CanTransferPosition(in controlTransferPosition))
+            return;
+
+        // Step 2: one fill out of the from book, one into the to book, at one price and time
+        Timestamp now = Clock.Now;
+        int quantity = controlTransferPosition.Quantity;
+        Fill fromFill = controlTransferPosition.NewTransferFill(controlTransferPosition.FromStrategyId, -quantity, now);
+        Fill toFill = controlTransferPosition.NewTransferFill(controlTransferPosition.ToStrategyId, quantity, now);
+
+        // Step 3: each to its book, its row and its record
+        ApplyTransferFill(in fromFill);
+        ApplyTransferFill(in toFill);
+    }
+
+    // One Transfer fill on its book's row, then on record as OnFill writes a fill: the fill and the row on the book's channel (where
+    // Logging's tap files them; the house book has no channel), the fill in the audit. Never the firm's row: the firm traded nothing.
+    private void ApplyTransferFill(in Fill fill)
+    {
+        // Step 1: the row, under its lock as a fill's
+        int strategyId = fill.OrderHeader.OrderId.StrategyId;
+        int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
+        Instrument instrument = _serverContext.GetInstrument(instrumentId);
+        ref SharedArrayEntry<PositionHeader> positionEntry = ref _serverContext.GetPositionHeader(strategyId, instrumentId);
+        positionEntry.AcquireLock();
+        positionEntry.GetRef().OnFill(in fill, instrument.Multiplier);
+        positionEntry.ReleaseLock();
+
+        // Step 2: on record
+        int coreGroupId = instrument.Header.CoreGroupId;
+        WriteToExecution(strategyId, coreGroupId, in fill);
+        WriteToExecution(strategyId, coreGroupId, in positionEntry.GetRef());
+        WriteToAudit(coreGroupId, in fill);
     }
 
     // Cancels the working algo orders a user's pause stops: the master switch every strategy's on the instrument, a strategy's

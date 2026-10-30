@@ -104,8 +104,8 @@ public partial class PhoneView : UserControl, IWidgetHost
     // The GUI's client under the server as principal (a server workspace) and its thread, as Workspace.Connect; not the UI thread.
     private void Connect()
     {
-        ContextManager.ServerContext.WarmSymbolStrings();
         _manualClient = ManualClient.Open(ContextManager.ServerContext.ServerName, ContextManager.ServerContext.ServerName, _guiNumber);
+        ContextManager.ServerContext.WarmSymbolStrings();   // Why after Open: the copy is complete only once Open returns
         ManualClient.TryParseRemoteGuiName(_manualClient.Context.ClientName.ToString(), out _, out _guiNumber);
         _isClientStopping = false;
         IManualClient manualClient = _manualClient;

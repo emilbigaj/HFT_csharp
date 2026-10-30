@@ -951,6 +951,48 @@ to a strategy, or to the house book.
   refused and pauses it, in either mode. Accepted: trading manually on an algo's book is the user's
   responsibility.
 
+## Position transfer (2026-10-30)
+
+A server workspace moves part of one book's position on an instrument into another book: the house book or any strategy,
+either way, while everything runs. For an exit booked to the house book by mistake, and for handing a strategy's open
+position to another strategy.
+
+- **GUI.** Positions widget, right-click a row, "Transfer Position…", offered in a server workspace only. The dialog
+  (`TransferPositionDialog`) has From and To side by side, each the house book (listed as "Server") or a strategy trading the instrument (never
+  a GUI, which books to one of these: `ManualClient.IsGuiName`), each with its position below; then Quantity in lots, always
+  in the direction of From's position, and Price with Avg (From's average price) and Mid (the book's). It previews both
+  books after the transfer through `PositionHeader.OnFill`, the server's arithmetic, and re-reads the rows four times a
+  second, since a fill or an algo switch can change either book while it is open.
+- **The price decides who gets the profit.** At From's average price From realizes nothing and To takes over the original
+  cost: the result follows the position (the mis-booking case). At the mid From realizes its open profit and To starts at
+  the market (the strategy-to-strategy case). Example: the house book +2 ES at 6810.25, TRStratA −2 at 6800; transferring 2
+  at 6810.25 leaves both flat, the house book realizing 0 and TRStratA (6800 − 6810.25) × 2 × 50 = −1,025.
+- **Wire.** `ControlTransferPosition` (`ControlType.TransferPosition` = 202): the requesting GUI's ClientId, InstrumentId,
+  FromStrategyId, ToStrategyId, Quantity signed as From's position, Price. It travels as the other controls do: on the
+  instrument's execution channel, through the Mirror from a remote desk (`LocalMirror` hands it to the stand-in).
+- **Server.** `Server.OnControlTransferPosition`, on the CoreGroup thread that owns both rows: two fills of
+  `FillType.Transfer` (= 3), `-Quantity` to From and `+Quantity` to To, at one price and one time and with one FillId (the
+  time's nanoseconds), each order id carrying the GUI's ClientId. Each is applied to its book's row under the row's lock,
+  then written as `Server.OnFill` writes a fill: the fill and the row on the book's execution channel, the fill in the audit.
+  The firm's row is not touched, nothing goes to the exchange, the server's RiskLayer is not called, and no count moves: the
+  strategy client's `RiskLayer.OnFill` neither releases (the GUI's ClientId is not its own) nor counts a session fill (not an
+  algo order), and `Client.OnFill` skips message efficiency for a Transfer fill.
+- **One check, two users.** `Context.CanTransferPosition` is the rule: From and To differ, both trade the instrument, Quantity
+  is non-zero, on From's side and no more than From holds, Price is finite, and no algo is live on either book (the house book
+  has none). Both sides apply it and fail silently, for now (2026-10-30, the user's call; error handling to come): the dialog
+  shows no preview and its Transfer button does nothing; the server returns early, moving nothing, and only a race between
+  two GUIs gets that far. A second click on a whole-position transfer finds nothing left to move and is dropped, so no record
+  of past transfers is needed.
+- **House book records.** The house book has no socket, so the server's writes to its channel are dropped (as for every
+  house-book fill today): its Transfer fill reaches only the audit (the server's Fills file), and its row is not filed under
+  `ServerStrategyName`. The house book's row is therefore loaded from a file nothing writes, and starts flat at every server
+  start. Not changed here; noted because it means a house-book position never survives a server restart.
+- **Verified 2026-10-30** (scratchpad `transferrig`: a Realtime server, two strategies and the house book seeded through
+  their position files, the real Workspace as a server workspace): house book → strategy beside the server, and strategy →
+  strategy from a remote desk through a Local and a Remote Mirror; rows, both strategies' own risk copies, the fills each
+  strategy received and the audit's fills all as above; a live algo refused in the dialog; an over-sized request refused by
+  the server with nothing moved. That run had the since-removed refusal messages and throw; the checks are unchanged.
+
 ## Spreads must be two-leg +1/-1 calendars
 
 `Spread` builds its risk legs as +1/-1, so any other shape (a butterfly, a ratio spread) would be
@@ -1106,9 +1148,26 @@ Instrument headers are append-only: a header's identity (exchange, root, type, m
 changes after it is written, and header slots are never reused within a server's run. The symbol strings a
 GUI shows (`ServerContext.GetSymbolStrings`, computed once per headerId and cached on the server context) depend
 on this; a restarted server is a new run, so a remote desk rebuilt on it renews its contexts and so starts them over (`ContextManager.Renew`, see
-"Restarts" under Remote workspaces). If slot reuse or identity rewrites within a run are ever introduced, the
+"Restarts" under Remote workspaces). A GUI warms the cache only after `ManualClient.Open` returns: on a remote desk the
+copy fills row by row while the Mirror starts, and only a complete copy is opened to GUIs, so an earlier warm-up cached "?"
+for every spread whose legs had not arrived yet, until the Workspace closed. If slot reuse or identity rewrites within a run are ever introduced, the
 cache needs a generation check. Mutable header fields
 (`TradingStatus`, `TickSize`, `InstrumentId`) are outside the cache and always read live.
+
+## Spread names
+
+A spread's `Symbol` names its instrument's risk-limit, position and fill files, so it must differ between spreads. The
+spread's root appears once, up front. A leg on that root is its signed weight and its date ("+2026-10-30", "+22026-10-30"
+for weight 2); a leg on another root is its signed weight, a space, then its own ticker ("- ZQ 2028-04-30"). So SR1 Apr28
+minus ZQ Apr28 is `Spread XCME SR1 +2028-04-30 - ZQ 2028-04-30`, short `SR1 +Apr28 - ZQ Apr28`. Why the space: roots start
+with digits (10Y, 6E) and so does a weight, so "+210Y" could not be split. `Symbology.FromString` reads a token too short
+to hold a date as such a leg's sign and weight. Calendar spreads kept their names when this came in (2026-10-28); the
+3,882 spreads on CME_Production with a leg on another root were renamed. Before, 893 names on CME_Production were shared
+by two or more spreads (10Y minus 5YY and 10Y minus 2YY were both `10Y +2026-10-30 -2026-10-30`).
+
+Accepted residual: 127 spread names and 1,550 future names are still shared on CME_Production, by instruments the header
+cannot tell apart (for example 22 DDB futures all maturing 2026-10-30 with the same tick and multiplier, apparently one per
+trading day, and spreads over them). Those share their files until the header carries what distinguishes them.
 
 ## The 64-level book: deleting a price better than the best changes nothing
 
@@ -1912,6 +1971,15 @@ relay: it dials a relay desk (see "Relay") exactly as a desk dials, and to the b
 - A relay desk adds `"RelayListenPort": 27794, "RelayIPWhitelist": ["<each phone's tunnel address>"]` (the THREADRIPPER template,
   this PC's desk: Tailscale, the S22+ at 100.99.246.93); a phone's config is a desk's with `"ConnectAddresses":
   ["<relay desk's tunnel address>:27794"]` (the Threadripper is 100.86.63.127), and no folder sync.
+- Over Tailscale (2026-10-28), instead of the TNS VPN that kept dropping: the CME box is the Tailscale machine `cme`,
+  100.119.146.54, joined with `--accept-dns=false` (the box keeps its own DNS), key expiry off, started at boot; its
+  service runs on cores 0-3 by itself, since isolcpus holds 4-31. The THREADRIPPER and Adrian templates dial
+  `100.119.146.54:27793` (Adrian's desk listened before, the box dialling its public address); ARB and NewRelease still
+  dial over the VPN (`10.172.13.228`). The box's listener admits each such desk by its Tailscale address in its
+  `IPWhitelist` (the Threadripper's 100.86.63.127, Adrian's laptop's once it joins). Round trip from the Threadripper,
+  idle: 221 ms direct over Tailscale, 270 ms over the VPN. Tailscale also encrypts the link, which the VPN path left as
+  plain TCP. Never list both addresses in one desk's `ConnectAddresses`: each new link replaces the live one, closing the
+  desk's stand-ins, so the box would cancel every remote order whenever either path reconnected.
 - A listening end accepts only `IPWhitelist`, each entry one address or a CIDR range (`"10.10.0.0/16"` admits 10.10.*.*, for desks whose VPN address changes; keep the range as small as the VPN pool) (`TcpLinkConnector.AcceptTcpLinks` closes any other connection at once; `MirrorConfig.ThrowIfInvalid` refuses to start a listener with the list empty). Why: on a Remote any new link replaces the live one, and the Local end then closes that desk's stand-ins, so the server cancels every remote order; an internet scanner touching the port would do that several times a day. Firewall the port to the same address too: links are still plain TCP, unauthenticated and
   unencrypted for now.
 

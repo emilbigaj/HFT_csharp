@@ -31,6 +31,7 @@ public partial class WidgetContainer : UserControl
     private WidgetResizeEdge _resizeEdge;
     private Point _pointerGestureStartPoint;   // where a drag or resize started, on the canvas
     private Rect _pointerGestureStartRect;     // the container's layout rect when it started (GetLayoutRect)
+    private double _restoredHeight;            // the height before a minimise, put back by the restore (UI thread)
 
     public WidgetContainer()
     {
@@ -79,23 +80,14 @@ public partial class WidgetContainer : UserControl
         MinimizeButton.Click += (_, _) => OnMinimizeClick();
     }
 
+    /// Minimises the frame to its title bar, or restores it to the height it had before.
     private void OnMinimizeClick()
     {
-        if (PART_ContentPresenter.IsVisible)
-        {
-            PART_ContentPresenter.IsVisible = false;
-            Height = TitleBarHeight;
-        }
-        else
-        {
-            PART_ContentPresenter.IsVisible = true;
-            Height = double.NaN; // Restore to auto/previous height logic if needed, or better: keep the explicit height
-            // If we are restoring, we might want to go back to the stored Height. 
-            // For now, let's just make it visible. The layout engine might need a trigger or explicit height restore 
-            // if we were storing 'PreMinimizeHeight'. 
-            // Simple fix for now: if Bounds.Height is small, try to restore a default or just let Content drive it if NaN.
-            if (Bounds.Height < ContainerMinHeight) Height = 400;
-        }
+        bool isMinimizing = PART_ContentPresenter.IsVisible;
+        if (isMinimizing)
+            _restoredHeight = Bounds.Height > 0 ? Bounds.Height : Height;
+        PART_ContentPresenter.IsVisible = !isMinimizing;
+        Height = isMinimizing ? TitleBarHeight : _restoredHeight;
     }
 
     private Canvas? GetParentCanvas() => this.FindAncestorOfType<Canvas>();

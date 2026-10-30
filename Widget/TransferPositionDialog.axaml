@@ -1,0 +1,50 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:Widget"
+        x:Class="Widget.TransferPositionDialog"
+        Title="Transfer Position"
+        Width="460"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+
+	<Window.Resources>
+		<DataTemplate x:Key="TransferBookTemplate" x:DataType="local:TransferBook">
+			<TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis"/>
+		</DataTemplate>
+	</Window.Resources>
+
+	<Grid Margin="12" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+
+		<TextBlock x:Name="SymbolText" Grid.Row="0" FontWeight="Bold" Margin="0,0,0,10"/>
+
+		<Grid Grid.Row="1" ColumnDefinitions="*,12,*" Margin="0,0,0,12">
+			<StackPanel Grid.Column="0" Spacing="4">
+				<TextBlock Text="From"/>
+				<ComboBox x:Name="FromBookPicker" HorizontalAlignment="Stretch" ItemTemplate="{StaticResource TransferBookTemplate}"/>
+				<TextBlock x:Name="FromPositionText" Foreground="DimGray"/>
+			</StackPanel>
+			<StackPanel Grid.Column="2" Spacing="4">
+				<TextBlock Text="To"/>
+				<ComboBox x:Name="ToBookPicker" HorizontalAlignment="Stretch" ItemTemplate="{StaticResource TransferBookTemplate}"/>
+				<TextBlock x:Name="ToPositionText" Foreground="DimGray"/>
+			</StackPanel>
+		</Grid>
+
+		<Grid Grid.Row="2" ColumnDefinitions="Auto,70,16,Auto,*,Auto,Auto" Margin="0,0,0,12">
+			<TextBlock Grid.Column="0" Text="Quantity" VerticalAlignment="Center" Margin="0,0,6,0"/>
+			<TextBox Grid.Column="1" x:Name="QuantityInput"/>
+			<TextBlock Grid.Column="3" Text="Price" VerticalAlignment="Center" Margin="0,0,6,0"/>
+			<TextBox Grid.Column="4" x:Name="PriceInput"/>
+			<Button Grid.Column="5" x:Name="AvgPriceButton" Content="Avg" Margin="6,0,0,0" ToolTip.Tip="The from book's average price: it realizes nothing"/>
+			<Button Grid.Column="6" x:Name="MidPriceButton" Content="Mid" Margin="4,0,0,0" ToolTip.Tip="The book's mid: the from book realizes its open profit"/>
+		</Grid>
+
+		<TextBlock x:Name="PreviewText" Grid.Row="3" FontFamily="Consolas,Menlo,monospace" Margin="0,0,0,8"/>
+
+		<StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10">
+			<Button Content="Cancel" Click="OnCancelClick"/>
+			<Button Content="Transfer" Click="OnTransferClick" Classes="accent"/>
+		</StackPanel>
+	</Grid>
+</Window>

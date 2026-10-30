@@ -84,10 +84,7 @@ public partial class Workspace : Window, IWidgetHost
     // on a restarted server or Remote Mirror. Throws when the client cannot connect (ManualClient.Open's refusals).
     private void Connect()
     {
-        // Step 1: the server's symbol strings, warmed off-thread
-        ContextManager.ServerContext.WarmSymbolStrings();
-
-        // Step 2: the client.
+        // Step 1: the client.
         // The server as principal selects server mode: the GUI still connects as its own "<server>_GUI<n>"
         // client, but shadows every client instead of one algo and books manual orders to the reserved house
         // strategy. Open takes the first free number, so any number of workspaces may share a principal.
@@ -99,6 +96,9 @@ public partial class Workspace : Window, IWidgetHost
             Clock.Exception += AlertManager.OnException;
             manualClient.OrderRejected += (in OrderRejected orderRejected) => AlertManager!.OnOrderRejected(orderRejected, "");
         }
+
+        // Step 2: the server's symbol strings, warmed off-thread. Why after Open: on a remote desk the copy is complete only once Open returns
+        ContextManager.ServerContext.WarmSymbolStrings();
 
         // Step 3: its thread, and the context its widgets are built with
         _isClientStopping = false;

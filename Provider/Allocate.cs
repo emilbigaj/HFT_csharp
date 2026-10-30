@@ -21,6 +21,7 @@ public enum ControlType : byte
 {
     AlgoStatus = 200,
     RiskLimit = 201,
+    TransferPosition = 202,
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -79,6 +80,41 @@ public struct ControlRiskLimit()
     public int MaxOrderQuantity = 0;
     public int MaxPositionQuantity = 0;
     public int MaxFillsPerSession = 0;
+    public override string ToString()
+    {
+        return Json.Serialize(this);
+    }
+}
+
+// Server workspace -> server request: moves Quantity of the from book's position into the to book at Price, as two Transfer fills;
+// the firm's row does not move (see Spec.md "Position transfer").
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+[RegisterJson]
+public struct ControlTransferPosition()
+{
+    public readonly Header<ControlType> Header = new(ControlType.TransferPosition);
+    public int ClientId = -1;          // the requesting GUI's: each Transfer fill's order id carries it, so neither counts as an algo's
+    public int InstrumentId = -1;
+    public int FromStrategyId = -1;    // 0 the house book
+    public int ToStrategyId = -1;
+    public int Quantity = 0;           // the part of the from book's position that moves, signed as that position
+    public double Price = double.NaN;
+
+    /// The Transfer fill that books quantity to this strategy at the transfer's price; both fills of a transfer share its FillId.
+    public readonly Fill NewTransferFill(int strategyId, int quantity, Timestamp timestamp) => new()
+    {
+        OrderHeader = new()
+        {
+            OrderId = new() { ClientId = ClientId, StrategyId = strategyId, InstrumentId = InstrumentId },
+            ExchangeTimestamp = timestamp,
+            NicTimestamp = timestamp,
+        },
+        FillId = (ulong)timestamp.NanosSinceEpoch,
+        Price = Price,
+        Quantity = quantity,
+        FillType = FillType.Transfer,
+    };
+
     public override string ToString()
     {
         return Json.Serialize(this);

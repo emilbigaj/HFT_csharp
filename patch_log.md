@@ -4,6 +4,74 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-10-30 — A server workspace transfers a position between books
+
+- `Widget/PositionsWidget.axaml.cs`, `Widget/TransferPositionDialog.axaml(.cs)` (new) — in a server workspace only, a
+  position row's menu offers "Transfer Position…": From and To side by side (the house book or a strategy trading the
+  instrument, never a GUI), each with its position, then Quantity in lots and Price with Avg and Mid, a preview of both books
+  after when the check passes; Transfer does nothing when it fails. Re-reads the rows four times a second.
+- `Provider/Allocate.cs` — `ControlType.TransferPosition` (202), `ControlTransferPosition` with `NewTransferFill`.
+  `Data/Series.cs` — `FillType.Transfer` (3).
+- `Provider/Context.cs` — `CanTransferPosition`, the one check the server enforces and the dialog applies.
+- `Provider/Server.cs` — `OnControlTransferPosition` on the CoreGroup thread: two Transfer fills at one price, each applied to
+  its book's row and recorded as a fill is (execution channel and audit); the firm's row, the exchange and every count
+  untouched; a request the check refuses returns early, silently (refusal messages, their enum and the throw removed the same
+  day at the user's request; error handling to come).
+- `Provider/Client.cs` — `ManualClient.OnControlTransferPosition`; `Client.OnFill` skips message efficiency for a Transfer
+  fill (one byte compare on the fill path, no allocation); `ManualClient.IsGuiName`, with `TryParseRemoteGuiName` now sharing
+  its suffix parse (`GetGuiSuffixIndex`), behaviour unchanged. `Provider/RemoteClient.cs`, `Mirror/LocalMirror.cs` — the
+  call through the Mirror. `Logging/LoggingServer.cs` — the request in a GUI's audit.
+- Why: exits booked to the house book by mistake (MBT and MET, 2026-10-29) needed a server stop and a file edit to undo, and
+  a strategy's open position could not be handed to another strategy.
+- Verified in scratchpad `transferrig` beside the server and from a remote desk through both Mirrors (Spec.md "Position
+  transfer"). Found on the way: the house book's position is never filed, so it starts flat at every server start (noted in
+  Spec.md, not changed). C++: P40, in lockstep. +402 lines (dialog 213).
+
+---
+
+## 2026-10-28 — The THREADRIPPER and Adrian desks reach the CME box over Tailscale
+
+- `Publish/RiskDesk/Templates/Adrian/MirrorConfig.json` — dials the box's Tailscale address `100.119.146.54:27793` (was:
+  listening on 27793 for the box's public address 204.14.4.196). `Templates/THREADRIPPER/MirrorConfig.json` (edited by
+  hand) dials the same address, the VPN one kept in a comment. Why: the TNS VPN drops constantly, and each drop closes a
+  desk's stand-ins, which cancels its remote orders. Both configs load and pass `MirrorConfig.ThrowIfInvalid`. Needs on
+  the box: each desk's Tailscale address in the Local Mirror's `IPWhitelist`, and Adrian's address dropped from its
+  `ConnectAddresses`. Spec.md "Setting up a remote desk".
+
+---
+
+## 2026-10-28 — A spread leg on another product keeps its product in the spread's name
+
+- `Data/Symbology.cs` — `LeggedSymbology` writes a leg on the spread's own root as before ("+2026-10-30") and a leg on
+  another root as its signed weight, a space and its own ticker: `Spread XCME SR1 +2028-04-30 - ZQ 2028-04-30`, short
+  `SR1 +Apr28 - ZQ Apr28` (was `SR1 +Apr28 -Apr28`). `FromString` reads a token too short for a date as such a leg's sign
+  and weight, followed by its root and date. Why: the Symbol names an instrument's risk-limit, position and fill files, and
+  893 names on CME_Production were shared by two or more spreads; now 127, all instruments the header cannot tell apart
+  (Spec.md "Spread names"). Calendar spreads keep their names. All 91,894 production spreads round-trip through FromString.
+  Breaks: a file under a renamed spread's old name (3,882 spreads with a leg on another root) is no longer read. C++: P39,
+  in lockstep. +11 lines.
+
+---
+
+## 2026-10-28 — A remote desk names every spread, not "?" for the ones whose legs arrived late
+
+- `Workspace/Workspace.axaml.cs`, `Phone/PhoneView.axaml.cs` — `Connect` warms the symbol strings after `ManualClient.Open`,
+  not before. Why: the Remote Mirror copies the server's headers row by row (149,402 on CME_Production) and lets GUIs attach
+  only once the copy is complete; a Workspace started with it warmed against the partial copy, and a spread whose legs had not
+  arrived cached "?" until the Workspace closed. Seen on the THREADRIPPER desk: SR1 spreads 18 to 25 (legs from header 35467
+  up) showed "?", SR1 spreads 0 to 17 (legs up to 35458) were named; the same rows read later all name correctly. 0 lines.
+
+---
+
+## 2026-10-28 — A widget restored after a minimise keeps its height
+
+- `Widget/WidgetContainer.axaml.cs` — `OnMinimizeClick` keeps the frame's height in `_restoredHeight` when it minimises and puts
+  it back on restore (was: `Height = NaN`, then a fixed 400 when that came out small, so every widget returned at 400).
+  Verified on a desk Workspace: Positions at 400 px, minimised, restored at 400. A layout saved while a widget is minimised
+  still records the title bar's 32 px (no minimised state saved; not changed). −7 lines.
+
+---
+
 ## 2026-10-27 — The phone shows a widget's title bar in a strip of its own
 
 - `Phone/PhoneView.axaml(.cs)` — under the green bar, a strip on a desk title bar's background (#F3F3F3) holds the shown
