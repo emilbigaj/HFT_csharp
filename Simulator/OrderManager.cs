@@ -185,7 +185,7 @@ public class QueueManager
         }
         foreach ((ulong orderId, int quantity) in makerFills)
         {
-            InstrumentSimulator.Make(orderId, Ticks, quantity);
+            InstrumentSimulator.Make(orderId, Ticks, quantity, in trade.TickHeader);
         }
         PublishQuantityAhead();
     }

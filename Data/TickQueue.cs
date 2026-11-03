@@ -99,110 +99,37 @@ namespace Data
 
     }
 
-    public class PriorityTickQueue : TickQueue
+    // The file queues merged in exchange-time order: a heap of the queues keyed by each front event's time, read in place from the file
+    // queue's ring, no buffer of its own. Single consumer: the thread that peeks and dequeues, which is the clock's (see Simulator/spec.txt).
+    public sealed class TickMerge
     {
+        private readonly LockedPriorityQueue<Timestamp, TickQueue> _queuesByFrontTimestamp = new(isMultiWriter: true, initialCapacity: 16);
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Enqueue(TickQueue tickQueue)
+        // Adds a file queue once its first event is in its ring (TryPeek waits for the producer); a queue at end of stream is not added.
+        public void Add(TickQueue tickQueue)
         {
             if (tickQueue.TryPeek(out ReadOnlySpan<byte> src))
-            {
-                Timestamp timestamp = MemoryMarshal.AsRef<TickHeader>(src).ExchangeTimestamp;
-                _priorityQueue.Enqueue(timestamp, tickQueue);
-            }
+                _queuesByFrontTimestamp.Enqueue(MemoryMarshal.AsRef<TickHeader>(src).ExchangeTimestamp, tickQueue);
         }
 
-        private readonly LockedPriorityQueue<Timestamp, TickQueue> _priorityQueue = new LockedPriorityQueue<Timestamp, TickQueue>(isMultiWriter: true, initialCapacity: 16);
-        public PriorityTickQueue(int capacity) : base(capacity)
-        {
-        }
-
+        // The earliest front event, in its file queue's ring: valid until Dequeue.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected override int MoveNext(Span<byte> dst, out TickType tickType)
+        public bool TryPeek(out ReadOnlySpan<byte> src)
         {
-            if (_priorityQueue.TryPeek(out Timestamp timestamp, out TickQueue queue))
-            {
-                if (queue.TryPeek(out ReadOnlySpan<byte> src))
-                {
-                    tickType = MemoryMarshal.AsRef<TickHeader>(src).TickType;
-                    if (tickType.IsTick())
-                        src.Slice(0, Unsafe.SizeOf<Tick>()).CopyTo(dst);
-                    else if (tickType == TickType.MarketByPriceSnapshot || tickType == TickType.MarketByPriceUpdate)
-                    {
-                        ref readonly MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(src);
-                        src.Slice(0, Unsafe.SizeOf<MarketByPrice>()).CopyTo(dst);
-                    }
-                    else if (tickType == TickType.MarketByOrderSnapshot || tickType == TickType.MarketByOrderUpdate)
-                    {
-                        ref readonly MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(src);
-                        src.Slice(0, Unsafe.SizeOf<MarketByOrder>()).CopyTo(dst);
-                    }
-                    return src.Length;
-                }
-            }
-            tickType = default!;
-            return 0;
+            if (_queuesByFrontTimestamp.TryPeek(out _, out TickQueue tickQueue))
+                return tickQueue.TryPeek(out src);
+            src = default;
+            return false;
         }
 
+        // Consumes the earliest front event and re-keys its queue by the event behind it.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected override void ReadTick(Span<byte> dst)
+        public void Dequeue()
         {
-            PopAndPush(dst);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected override void ReadMarketByPrice(Span<byte> dst)
-        {
-            PopAndPush(dst);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected override void ReadMarketByOrder(Span<byte> dst)
-        {
-            PopAndPush(dst);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected void PopAndPush(Span<byte> dst)
-        {
-            if (!_priorityQueue.TryDequeue(out Timestamp timestamp, out TickQueue tickQueue))
-                throw new Exception();
-
-            tickQueue.TryPeek(out ReadOnlySpan<byte> src);
-
-            TickType tickType = MemoryMarshal.AsRef<TickHeader>(src).TickType;
-            if (tickType == TickType.MarketByPriceSnapshot || tickType == TickType.MarketByPriceUpdate)
-            {
-                ref readonly MarketByPrice mbp = ref MemoryMarshal.AsRef<MarketByPrice>(src);
-
-                int headerSize = Unsafe.SizeOf<MarketByPrice>();
-                int levelsSize = mbp.SizeOfLevels();
-
-                // dst already has the header at [0..headerSize)
-                // copy just the levels right after the header:
-                ReadOnlySpan<byte> levelBytes = src.Slice(headerSize, levelsSize);
-
-                levelBytes.CopyTo(dst.Slice(headerSize));
-            }
-            else if (tickType == TickType.MarketByOrderSnapshot || tickType == TickType.MarketByOrderUpdate)
-            {
-                ref readonly MarketByOrder mbo = ref MemoryMarshal.AsRef<MarketByOrder>(src);
-
-                int headerSize = Unsafe.SizeOf<MarketByOrder>();
-                int ordersSize = mbo.SizeOfOrders();
-
-                // dst already has the header at [0..headerSize)
-                // copy just the orders right after the header:
-                ReadOnlySpan<byte> orderBytes = src.Slice(headerSize, ordersSize);
-
-                orderBytes.CopyTo(dst.Slice(headerSize));
-            }
+            if (!_queuesByFrontTimestamp.TryDequeue(out _, out TickQueue tickQueue))
+                throw new InvalidOperationException("TickMerge.Dequeue: nothing to dequeue");
             tickQueue.TryDequeue();
-            if (tickQueue.TryPeek(out src))
-            {
-                timestamp = MemoryMarshal.AsRef<TickHeader>(src).ExchangeTimestamp;
-                _priorityQueue.Enqueue(timestamp, tickQueue);
-            }
+            Add(tickQueue);
         }
     }
 

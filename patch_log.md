@@ -4,6 +4,82 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-11-03 — A queue-position change caused by a market event carries that event's timestamp
+
+- `Simulator/ServerSimulator.cs` — `InstrumentSimulator.BeginRecordedEvent` / `EndRecordedEvent` (was `SetLastRecordedNicTimestamp`)
+  bracket a recorded event's application at `ExchangeSimulator`'s three entry points; while one is applied, `NewEngineNicTimestamp`
+  returns that event's NIC time, so the `AheadOfOrder` the event causes leaves with the event's market data, as the maker fill it
+  causes already did. Outside an event the lookahead stamp is unchanged.
+- Why: stamped with the next event's latency, the queue-position update sat ahead of the same event's maker fill in the
+  instrument's in-order queue and held the fill whenever the next event was the slower: 233 fills on the makerfill day, up to
+  402 us (next 667 us against own 265 us) after the trade print they belong with.
+- Verified (scratchpad `makerfill`, MBT Jul26, 2026-07-01): order states read after their NIC time 233 → 0; of 968,428 engine
+  messages none before the previous print or after the next; 10,957 maker fills all with a print's stamps; the day 10.9-12.0 s.
+  Simulator/spec.txt "Engine Messages Lag as the Feed Does". Simulator only: nothing to port. +8 lines.
+
+---
+
+## 2026-11-03 — The simulated server's replies to a target reach the client at once
+
+- `Provider/Server.cs` — `ReadExecution` returns true if it read anything (one local bool; the simulator is its only caller).
+- `Simulator/ServerSimulator.cs` — `OnInterject` offers `Clock.Now` when `ReadExecution` read something, so the clock ticks
+  once more at the same instant and the client reads what the server wrote back on reading the target: the InFlight for every
+  Create, and the Rejected state and reject for a Create the server's own risk layer refuses. A re-tick only follows a read, and
+  a read only follows a client write, so it cannot spin. `FromClientToExchange_OrderTarget`'s own offer of the target's
+  exchange time (2026-10-23) is redundant on that pass, where the exchange simulator offers its queue head: removed.
+- Why: those writes make no exchange trip, so nothing offered the clock a time for them; an accepted Create's InFlight waited for
+  the exchange arrival and a refused Create's states waited for the next event of any kind (1.49 s once on the makerfill day,
+  a rate-limit refusal in a quiet market). Exchange-side rejects were never affected: they ride the execution FIFO with a NIC time.
+- Verified (scratchpad `makerfill`, MBT Jul26, 2026-07-01, with and without the re-tick): order states read after their NIC time
+  88,264 (longest 1.49 s) → 233 (longest 402 us); bounds and fills unchanged; 783,607 same-instant ticks among 18,333,990
+  (4.5% more); the day 10.2-11.0 s → 11.3-11.6 s. Simulator/spec.txt "A Target Wakes the Clock at Its Exchange Time". Nothing
+  on the wire; the C++ server's `ReadExecution` need only return the same bool if its simulator is ported. +7 lines.
+
+---
+
+## 2026-11-03 — The simulated matching engine's messages lag as the feed does, not a fixed 10 us; DataSimulator merges the file queues themselves
+
+- `Simulator/ServerSimulator.cs` — `InstrumentSimulator.NewEngineNicTimestamp` stamps what the engine sends itself (OrderStates,
+  rejects and AheadOfOrder through `ServerSimulator.NewEngineClientNicTimestamp`; taker fills; the book republish after a user
+  order) with the feed's latency at that moment, read on the line from the previous recorded market event's latency
+  (`BeginRecordedEvent`, from `ExchangeSimulator.OnMarketByPrice`, `OnMarketByOrder` and trade ticks only) to the next's
+  (`DataSimulator.TryPeekNext`): computed as the previous event's NIC time moved towards the next's by the fraction of the gap
+  that has passed, so the message lands between the two NIC times. One neighbour's latency when only one is known; the fixed
+  `FromExchangeToNicLatency` with neither and under `OverrideNicTimestamp`. The outbound path is unchanged.
+- `Simulator/DataSimulator.cs`, `Data/TickQueue.cs` — `PriorityTickQueue` (a merged ring filled ahead of time from the file
+  queues, which hid each instrument's next event) is replaced by `TickMerge`, a priority queue of the file queues keyed by each
+  front's exchange time; `OnTickTock` copies the event in hand into `_eventBuffer` and dequeues it before dispatch, so every file
+  queue's front is the event behind it; `TryPeekNext(instrumentId)` is the earliest front among an instrument's files.
+- Why: with maker fills stamped at their trade's recorded NIC (entry below), a cancel acked 10 us after the match waited in the
+  instrument's in-order queue behind the fill (up to 141.8 ms on the test day), and a fixed 10 us was unrelated to the feed's
+  real latency. Two forms were tried and rejected: the previous event's latency alone (a lag seen before a quiet gap put a
+  message after the next event, which the feed delivered in less), and the next event's latency alone bounded below by the
+  previous event's NIC time (within the bounds, but a message sent just after an event was pinned to that event's NIC time).
+- Verified (scratchpad `makerfill`, MBT Jul26, 2026-07-01 full day, final form with the two entries above): of 1,453,538 engine
+  messages none arrived before the trade print before it or after the one after it; all 9,461 maker fills match a print; taker
+  fills' NIC minus exchange time 80 us min, 347 us median, 68.5 ms max; no order state read after its NIC time; the day
+  11.6-11.9 s. Scratchpad `mergecheck` (two MBT contracts, four files, 8,410,969
+  events): the same order byte for byte, merge alone 1.6 s against 1.8-2.0 s, the day 10.2-10.8 s against 15.2-15.4 s.
+  Simulator/spec.txt "Engine Messages Lag as the Feed Does". Simulator only: nothing to port. -10 lines.
+
+---
+
+## 2026-11-03 — A simulated maker fill carries its market event's exchange and NIC timestamps
+
+- `Simulator/ServerSimulator.cs`, `Simulator/OrderManager.cs` — `OrderManager.OnTrade` passes the triggering trade's TickHeader to
+  `Make`, and `FromExchangeToNicToClient_Fill` stamps the fill (its OrderState and every leg fill) with that event's exchange time
+  and the NIC time the event itself is delivered at. `NewClientNicTimestamp` is now the one formula for the delivered NIC (book
+  updates and trade prints used two copies of it). Taker fills pass the same stamps as before (`Take`: Clock.Now and Clock.Now +
+  FromExchangeToNicLatency), unchanged while the user decides on them.
+- Why: a maker fill was stamped match time + 10 us (MicroOutright) and so reached the strategy ahead of the market data showing
+  the trade, by the data's whole capture latency: overly optimistic.
+- Verified (scratchpad `makerfill`, MBT Jul26, 2026-07-01 full day, under %TEMP%, no Logging server): maker fills' NIC minus
+  exchange time went from exactly 10 us to 80 us min, 229 us median, 64.7 ms max, and all 20,877 maker fills carry the exchange
+  and NIC times of a trade print (before: none of 18,831); taker fills stay at exactly 10 us. Simulator/spec.txt "A Maker Fill
+  Carries Its Market Event's Timestamps". Simulator only: nothing to port. +8 lines.
+
+---
+
 ## 2026-10-31 — The ServerStrategy is saved through a socket of its own, not a separate link
 
 - `Provider/Server.cs` — strategy 0 gets a client socket of its own at startup (`ServerStrategyName`, a strategy's channel

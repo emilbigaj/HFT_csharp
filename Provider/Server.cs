@@ -211,8 +211,11 @@ public class Server : IDisposable
     // One reader thread per (client, channel) => SPSC-safe; different segments touch different
     // ReadOnlySockets. It also drains the injection queue first (off-thread cancels).
     // Realtime: the caller wraps this in try/catch -> AlertManager.OnException (as Scenario's ReadSocket loop); simulation: the Clock's exceptions go to the AlertManager.
-    public void ReadExecution(int coreGroupId)
+    /// Drains the injected targets and every client's channel for this CoreGroup. Returns true if it read anything.
+    public bool ReadExecution(int coreGroupId)
     {
+        bool isRead = false;
+
         // Drain injected OrderTargets first (off-thread cancels): sole reader, no lock. Copy out and
         // Dequeue before sending so the slot frees ahead of a slow SendOrder.
         ByteQueue? injected = _orderTargetQueues[coreGroupId];
@@ -223,6 +226,7 @@ public class Server : IDisposable
                 OrderTarget orderTarget = MemoryMarshal.Read<OrderTarget>(qsrc);
                 injected.Dequeue();
                 SendServerOrderTarget(in orderTarget);
+                isRead = true;
             }
         }
 
@@ -233,6 +237,7 @@ public class Server : IDisposable
             {
                 if (rdst.IsEmpty)
                     continue;
+                isRead = true;
 
                 byte msgType = rdst[0];
                 switch (msgType)
@@ -282,6 +287,7 @@ public class Server : IDisposable
         long drainRequest = Volatile.Read(ref _drainRequest.Value);
         if (drainRequest != _drainAcknowledgedByCoreGroupId[coreGroupId].Value)
             Volatile.Write(ref _drainAcknowledgedByCoreGroupId[coreGroupId].Value, drainRequest);
+        return isRead;
     }
 
     // Realtime: the caller wraps this in try/catch -> AlertManager.OnException (as Scenario's ReadSocket loop); simulation: the Clock's exceptions go to the AlertManager.

@@ -31,8 +31,10 @@ public class DataSimulator
     public LockedHashMap<string, int> Subscriptions { get; } = new LockedHashMap<string, int>();
     public int Capacity { get; set; } = 1024 * 1024;
 
-    private PriorityTickQueue _priorityTickQueue;
-    private TickQueueManager _tickQueueManager = new TickQueueManager();
+    private readonly TickMerge _tickMerge = new();
+    private readonly TickQueueManager _tickQueueManager = new TickQueueManager();
+    private System.Collections.Generic.List<TickHistoryTickQueue>[] _tickQueuesByInstrumentId = [];   // each instrument's file queues, for TryPeekNext; sized at ClockStarted
+    private readonly byte[] _eventBuffer;   // the event being processed, copied out of its file queue: sized for the largest frame a file queue holds
 
     public string Name { get; }
 
@@ -42,7 +44,7 @@ public class DataSimulator
     {
         Name = name;
         _exchangeSimulator = exchangeSimulator;
-        _priorityTickQueue = new PriorityTickQueue(64*Capacity);
+        _eventBuffer = new byte[64 * Capacity];
         SubscribeClock();
     }
 
@@ -84,15 +86,39 @@ public class DataSimulator
                 TickHistoryReader reader = new TickHistoryReader(history, begin: Clock.Begin, Clock.End);
                 TickHistoryTickQueue tickQueue = new TickHistoryTickQueue(reader, instrumentId, capacity);
                 _tickQueueManager.Add(tickQueue);
-                _priorityTickQueue.Enqueue(tickQueue); // blocks
+                if (instrumentId >= _tickQueuesByInstrumentId.Length)
+                    Array.Resize(ref _tickQueuesByInstrumentId, instrumentId + 1);
+                (_tickQueuesByInstrumentId[instrumentId] ??= new System.Collections.Generic.List<TickHistoryTickQueue>(4)).Add(tickQueue);
+                _tickMerge.Add(tickQueue); // blocks until the file's first event is in its ring
             }
         }
-        _tickQueueManager.Add(_priorityTickQueue);
+    }
+
+    // The instrument's next recorded event: the earliest front among its file queues (its book and its trading status); false once all are
+    // at end of stream, or for an instrument with no files. Waits, as the merge does, for a file whose worker has not unpacked that far yet.
+    public bool TryPeekNext(int instrumentId, out TickHeader tickHeader)
+    {
+        tickHeader = default;
+        bool isFound = false;
+        if (instrumentId >= _tickQueuesByInstrumentId.Length || _tickQueuesByInstrumentId[instrumentId] == null)
+            return false;
+        foreach (TickHistoryTickQueue tickQueue in _tickQueuesByInstrumentId[instrumentId])
+        {
+            if (!tickQueue.TryPeek(out ReadOnlySpan<byte> src))
+                continue;
+            ref readonly TickHeader front = ref MemoryMarshal.AsRef<TickHeader>(src);
+            if (!isFound || front.ExchangeTimestamp < tickHeader.ExchangeTimestamp)
+            {
+                tickHeader = front;
+                isFound = true;
+            }
+        }
+        return isFound;
     }
 
     public bool TryPeek(out Timestamp timestamp)
     {
-        if (_priorityTickQueue.TryPeek(out ReadOnlySpan<byte> dst))
+        if (_tickMerge.TryPeek(out ReadOnlySpan<byte> dst))
         {
             ref readonly TickHeader tickHeader = ref MemoryMarshal.AsRef<TickHeader>(dst);
             timestamp = tickHeader.ExchangeTimestamp;
@@ -119,11 +145,16 @@ public class DataSimulator
     internal void OnTickTock(Timestamp now)
     {
         // Drain all ticks with timestamp <= now
-        while (_priorityTickQueue.TryPeek(out ReadOnlySpan<byte> src))
+        while (_tickMerge.TryPeek(out ReadOnlySpan<byte> head))
         {
-            ref readonly TickHeader tickHeader = ref MemoryMarshal.AsRef<TickHeader>(src);
-            if (tickHeader.ExchangeTimestamp > now)
+            if (MemoryMarshal.AsRef<TickHeader>(head).ExchangeTimestamp > now)
                 break;
+
+            // Why a copy, dequeued before it is processed: each file queue's front is then the event behind this one, which the engine's stamps look at (see spec.txt)
+            Span<byte> src = _eventBuffer.AsSpan(0, head.Length);
+            head.CopyTo(src);
+            _tickMerge.Dequeue();
+            ref readonly TickHeader tickHeader = ref MemoryMarshal.AsRef<TickHeader>(src);
 
             if (tickHeader.ExchangeTimestamp.Date > _date)
             {
@@ -159,9 +190,6 @@ public class DataSimulator
                 Clock.Stop();
                 throw;
             }
-
-            _priorityTickQueue.TryDequeue();
-
         }
     }
 }

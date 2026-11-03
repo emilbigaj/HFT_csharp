@@ -529,6 +529,36 @@ public class InstrumentSimulator
 
 
 
+    private TickHeader _lastRecordedEvent;   // the latest recorded market event: one end of the latency line the engine's own messages are stamped on
+    private bool _hasRecordedEvent;
+    private bool _isApplyingRecordedEvent;   // between BeginRecordedEvent and EndRecordedEvent: what the engine sends leaves with that event's market data
+
+    // Brackets the recorded market event being applied: ExchangeSimulator's entry points only, never our own republish.
+    public void BeginRecordedEvent(in TickHeader tickHeader) { _lastRecordedEvent = tickHeader; _hasRecordedEvent = true; _isApplyingRecordedEvent = true; }
+    public void EndRecordedEvent() => _isApplyingRecordedEvent = false;
+
+    // The NIC time of a message this matching engine sends now: while a recorded event is applied, that event's, as it caused the message; otherwise
+    // now plus the feed's latency at this moment, read on the line from the previous recorded event's latency to the next's, so it lands strictly
+    // between their NIC times; one neighbour's latency when only one is known, the configured latency when neither is (see spec.txt).
+    public Timestamp NewEngineNicTimestamp()
+    {
+        if (_isApplyingRecordedEvent)
+            return _lastRecordedEvent.NicTimestamp;
+        Timestamp now = Clock.Now;
+        bool hasNext = ExchangeSimulator.DataSimulator.TryPeekNext(InstrumentId, out TickHeader next);
+        if (_hasRecordedEvent && hasNext)
+        {
+            // Why the NIC line rather than the latency line: the same point, but rounding can never put a later message a nanosecond before an earlier one
+            long gapNanoseconds = next.ExchangeTimestamp.NanosSinceEpoch - _lastRecordedEvent.ExchangeTimestamp.NanosSinceEpoch;
+            double fraction = gapNanoseconds > 0 ? (double)(now.NanosSinceEpoch - _lastRecordedEvent.ExchangeTimestamp.NanosSinceEpoch) / gapNanoseconds : 1.0;
+            return _lastRecordedEvent.NicTimestamp.AddNanoseconds((long)(fraction * (next.NicTimestamp.NanosSinceEpoch - _lastRecordedEvent.NicTimestamp.NanosSinceEpoch)));
+        }
+        long latencyNanoseconds = hasNext ? next.NicTimestamp.NanosSinceEpoch - next.ExchangeTimestamp.NanosSinceEpoch
+            : _hasRecordedEvent ? _lastRecordedEvent.NicTimestamp.NanosSinceEpoch - _lastRecordedEvent.ExchangeTimestamp.NanosSinceEpoch
+            : ExchangeSimulator.ServerSimulator.FromExchangeToNicLatency * 1_000L;
+        return now.AddNanoseconds(latencyNanoseconds);
+    }
+
     protected void UpdateMarketByPrice()
     {
         if (_inOnMarketByPrice || _inOnMarketByOrder)   // the end-of-message synthetic update republishes; a mid-walk republish can remove a queue node the trade path still holds a ref to
@@ -536,8 +566,8 @@ public class InstrumentSimulator
 
         Span<byte> src = stackalloc byte[MarketByPrice.SizeOf(0, 0)];
         ref MarketByPrice update = ref MemoryMarshal.AsRef<MarketByPrice>(src);
-        // Why: the republish crosses the exchange->NIC leg like the ack it belongs to (see spec.txt)
-        update = new MarketByPrice(TickType.MarketByPriceUpdate, InstrumentId, Clock.Now, Clock.Now, Clock.Now.AddMicroseconds(ExchangeSimulator.ServerSimulator.FromExchangeToNicLatency), 0, 0);
+        // Why: the republish crosses the exchange->NIC leg like the ack it belongs to, at the same latency (see spec.txt)
+        update = new MarketByPrice(TickType.MarketByPriceUpdate, InstrumentId, Clock.Now, Clock.Now, NewEngineNicTimestamp(), 0, 0);
         OnMarketByPrice(in update, src);
     }
 
@@ -585,7 +615,8 @@ public class InstrumentSimulator
                 }
 
                 Update(ref orderState, orderProfile, signedFillQuantity, OrderStateReason.Fill);
-                ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, level.Ticks, signedFillQuantity, FillType.Taker);
+                // Why now: a taking fill's market event is the book update its own trade causes, stamped as that update is (UpdateMarketByPrice)
+                ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, level.Ticks, signedFillQuantity, FillType.Taker, Clock.Now, NewEngineNicTimestamp());
                 workingQuantity -= signedFillQuantity;
                 if (ExchangeSimulator.MaskTaken)
                     _mask += fillQuantity;
@@ -606,7 +637,8 @@ public class InstrumentSimulator
         ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_AheadOfOrder(new AheadOfOrder(clientOrderId, quantityAhead, quantityBehind));
     }
 
-    public void Make(ulong clientOrderId, int ticks, int quantityFilled)
+    // A resting order filled by the market event in tickHeader, whose exchange and NIC times the fill carries.
+    public void Make(ulong clientOrderId, int ticks, int quantityFilled, in TickHeader tickHeader)
     {
         if (clientOrderId == Debug.OrderId)
         {
@@ -618,7 +650,7 @@ public class InstrumentSimulator
             throw new InvalidOperationException($"ExecutionSimulator({InstrumentDetails.Symbol}) can not Make Fill for ClientOrderId {clientOrderId}. GlobalOrderIndex is occupied by ClientOrderId {orderState.OrderHeader.OrderId}.");
 
         Update(ref orderState, orderState.OrderProfile, quantityFilled, OrderStateReason.Fill);
-        ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, ticks, quantityFilled, FillType.Maker);
+        ExchangeSimulator.ServerSimulator.FromExchangeToNicToClient_Fill(in orderState, _fillId++, ticks, quantityFilled, FillType.Maker, tickHeader.ExchangeTimestamp, tickHeader.NicTimestamp);
     }
 
     private readonly OrderState[] _orderStates;
@@ -1016,19 +1048,28 @@ public class ExchangeSimulator
 
     public void OnMarketByPrice(in MarketByPrice mbp, ReadOnlySpan<byte> src)
     {
-        _instrumentSimulators[mbp.TickHeader.InstrumentId].OnMarketByPrice(in mbp, src);
+        InstrumentSimulator instrumentSimulator = _instrumentSimulators[mbp.TickHeader.InstrumentId];
+        instrumentSimulator.BeginRecordedEvent(in mbp.TickHeader);
+        instrumentSimulator.OnMarketByPrice(in mbp, src);
+        instrumentSimulator.EndRecordedEvent();
     }
 
     public void OnMarketByOrder(in MarketByOrder mbo, ReadOnlySpan<byte> src)
     {
-        _instrumentSimulators[mbo.TickHeader.InstrumentId].OnMarketByOrder(in mbo, src);
+        InstrumentSimulator instrumentSimulator = _instrumentSimulators[mbo.TickHeader.InstrumentId];
+        instrumentSimulator.BeginRecordedEvent(in mbo.TickHeader);
+        instrumentSimulator.OnMarketByOrder(in mbo, src);
+        instrumentSimulator.EndRecordedEvent();
     }
 
     public void OnTick(ref Tick tick)
     {
         if (tick.TickHeader.TickType == TickType.Trade)
         {
-            _instrumentSimulators[tick.TickHeader.InstrumentId].OnTrade(ref Unsafe.As<Tick, Trade>(ref tick));
+            InstrumentSimulator instrumentSimulator = _instrumentSimulators[tick.TickHeader.InstrumentId];
+            instrumentSimulator.BeginRecordedEvent(in tick.TickHeader);
+            instrumentSimulator.OnTrade(ref Unsafe.As<Tick, Trade>(ref tick));
+            instrumentSimulator.EndRecordedEvent();
         }
         else if (tick.TickHeader.TickType == TickType.Settlement)
         {
@@ -1053,8 +1094,7 @@ public class ExchangeSimulator
 
         ref OrderTarget orderTargetCopy = ref MemoryMarshal.AsRef<OrderTarget>(dst);
         exchangeTimestamp = orderTargetCopy.OrderHeader.NicTimestamp.AddMicroseconds(ServerSimulator.FromExchangeToNicToClientLatency);
-        orderTargetCopy.OrderHeader.ExchangeTimestamp = exchangeTimestamp;
-        Clock.OnInterject(exchangeTimestamp);   // Why: the server reads targets after this end offered its queue head, so the clock would skip to the next market event (see spec.txt)
+        orderTargetCopy.OrderHeader.ExchangeTimestamp = exchangeTimestamp;   // Why no offer: the pass that follows the server's read at the same instant offers this queue's head (see spec.txt)
     }
 
 
@@ -1292,7 +1332,8 @@ public class ServerSimulator
         return byClientTimestamp[instrumentId].Enqueue(length);
     }
 
-    public void FromExchangeToNicToClient_Fill(in OrderState orderState, ulong fillId, int ticks, int quantity, FillType fillType)
+    // The fill carries the exchange and NIC times of the market event that reports it, delivered as that event is (see spec.txt).
+    public void FromExchangeToNicToClient_Fill(in OrderState orderState, ulong fillId, int ticks, int quantity, FillType fillType, Timestamp eventExchangeTimestamp, Timestamp eventNicTimestamp)
     {
         if (orderState.OrderHeader.OrderId == Debug.OrderId)
         {
@@ -1309,9 +1350,9 @@ public class ServerSimulator
         // One ER, one entry: [Timestamp][OrderState][Fill × fillCount]. OrderState leads so the
         // release site dispatches on it; its OrderStateReason.Fill says trailing fills follow, and
         // the entry length gives their count. Server.OnFill applies the whole set atomically.
-        Timestamp exchangeTimestamp = Clock.Now;
+        Timestamp exchangeTimestamp = eventExchangeTimestamp;
         Span<byte> dst = Enqueue(_executionByClientTimestamp, ref _hasExecution, instrumentId, Unsafe.SizeOf<Timestamp>() + Unsafe.SizeOf<OrderState>() + fillCount * Unsafe.SizeOf<Fill>());
-        Timestamp nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
+        Timestamp nicTimestamp = NewClientNicTimestamp(eventExchangeTimestamp, eventNicTimestamp);
         MemoryMarshal.AsRef<Timestamp>(dst) = nicTimestamp;
         dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
 
@@ -1383,7 +1424,7 @@ public class ServerSimulator
         ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in orderState, 1));
         Span<byte> dst = Enqueue(_executionByClientTimestamp, ref _hasExecution, orderState.OrderHeader.OrderId.InstrumentId, Unsafe.SizeOf<OrderState>() + Unsafe.SizeOf<Timestamp>());
         ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
-        nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
+        nicTimestamp = NewEngineClientNicTimestamp(orderState.OrderHeader.OrderId.InstrumentId);
         dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
         src.CopyTo(dst);
         MemoryMarshal.AsRef<OrderState>(dst).OrderHeader.NicTimestamp = nicTimestamp;
@@ -1399,7 +1440,7 @@ public class ServerSimulator
         ReadOnlySpan<byte> src = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(in orderRejected, 1));
         Span<byte> dst = Enqueue(_executionByClientTimestamp, ref _hasExecution, orderRejected.OrderHeader.OrderId.InstrumentId, Unsafe.SizeOf<OrderRejected>() + Unsafe.SizeOf<Timestamp>());
         ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
-        nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
+        nicTimestamp = NewEngineClientNicTimestamp(orderRejected.OrderHeader.OrderId.InstrumentId);
         dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
         src.CopyTo(dst);
         MemoryMarshal.AsRef<OrderRejected>(dst).OrderHeader.NicTimestamp = nicTimestamp;
@@ -1413,14 +1454,24 @@ public class ServerSimulator
         OrderId orderId = aheadOfOrder.ClientOrderId;
         Span<byte> dst = Enqueue(_executionByClientTimestamp, ref _hasExecution, orderId.InstrumentId, Unsafe.SizeOf<AheadOfOrder>() + Unsafe.SizeOf<Timestamp>());
         ref Timestamp nicTimestamp = ref MemoryMarshal.AsRef<Timestamp>(dst);
-        nicTimestamp = Clock.Now.AddMicroseconds(FromExchangeToNicToClientLatency);
+        nicTimestamp = NewEngineClientNicTimestamp(orderId.InstrumentId);
         dst = dst.Slice(Unsafe.SizeOf<Timestamp>());
         src.CopyTo(dst);
     }
 
+    // The NIC time a market event, or the maker fill it causes, reaches the client: the recorded NIC plus the NIC-to-client leg, or with
+    // OverrideNicTimestamp the exchange time plus both legs. One formula, so a maker fill and its trade print arrive together (see spec.txt).
+    private Timestamp NewClientNicTimestamp(Timestamp exchangeTimestamp, Timestamp nicTimestamp) =>
+        OverrideNicTimestamp ? exchangeTimestamp.AddMicroseconds(FromExchangeToNicToClientLatency) : nicTimestamp.AddMicroseconds(FromNicToClientLatency);
+
+    // When a message the matching engine sends now (an ack, cancel, reject or queue update) reaches the client: the instrument's engine NIC time,
+    // delivered as a market event is, so it lags as the feed does (see spec.txt).
+    private Timestamp NewEngineClientNicTimestamp(int instrumentId) =>
+        NewClientNicTimestamp(Clock.Now, ExchangeSimulator.GetInstrument(instrumentId).NewEngineNicTimestamp());
+
     public void FromExchangeToNicToClient_MarketByPrice(ref MarketByPrice mbp, ReadOnlySpan<byte> src)
     {
-        Timestamp nicTimestamp = OverrideNicTimestamp ? mbp.TickHeader.ExchangeTimestamp.AddMicroseconds(FromExchangeToNicToClientLatency) : mbp.TickHeader.NicTimestamp.AddMicroseconds(FromNicToClientLatency);
+        Timestamp nicTimestamp = NewClientNicTimestamp(mbp.TickHeader.ExchangeTimestamp, mbp.TickHeader.NicTimestamp);
         mbp.TickHeader.NicTimestamp = nicTimestamp;
 
         Span<byte> dst = Enqueue(_marketDataByClientTimestamp, ref _hasMarketData, mbp.TickHeader.InstrumentId, src.Length + Unsafe.SizeOf<Timestamp>());
@@ -1432,7 +1483,7 @@ public class ServerSimulator
     }
     public void FromExchangeToNicToClient_Tick(ref Tick tick)
     {
-        Timestamp nicTimestamp = OverrideNicTimestamp ? tick.TickHeader.ExchangeTimestamp.AddMicroseconds(FromExchangeToNicToClientLatency) : tick.TickHeader.NicTimestamp.AddMicroseconds(FromNicToClientLatency);
+        Timestamp nicTimestamp = NewClientNicTimestamp(tick.TickHeader.ExchangeTimestamp, tick.TickHeader.NicTimestamp);
         tick.TickHeader.NicTimestamp = nicTimestamp;
 
         Span<byte> dst = Enqueue(_marketDataByClientTimestamp, ref _hasMarketData, tick.TickHeader.InstrumentId, Unsafe.SizeOf<Tick>() + Unsafe.SizeOf<Timestamp>());
@@ -1580,7 +1631,9 @@ public class ServerSimulator
         // Client -> socket -> Server, with no delay on this leg. Server validates each target and
         // fires OrderTarget, which is bound to ExchangeSimulator's own latency queue, so the only
         // delay on the way out is the exchange's.
-        _server.ReadExecution(ServerCoreGroupId);
+        // Why re-tick now: what the server wrote back on reading (an InFlight, a refusal) is at the client already; without this a refused Create waits for the next market event (see spec.txt)
+        if (_server.ReadExecution(ServerCoreGroupId))
+            Clock.OnInterject(Clock.Now);
 
         // Admin is polled at most once a second: allocations happen in Init() before the clock runs,
         // and scanning every client's admin channel on each interject is pure cost during a backtest.

@@ -1284,6 +1284,14 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
 - **Load:** nothing new: allocation already reads strategy 0's position file under `ServerStrategyName`, as for any strategy.
 - **Deploy:** no lockstep. The C# Logging server taps any client the server announces.
 
+### P42. PORT IF THE SIMULATOR IS: `ReadExecution` says whether it read anything (C# `Provider/Server.cs`; 2026-11-03)
+
+- **Change:** `ReadExecution(coreGroupId)` returns a bool, true if it handled any injected target or client message (one local,
+  set in both loops). Nothing on the wire; the production loop ignores it.
+- **Why:** the C# simulator's `OnInterject` offers `Clock.Now` when it is true, so the clock ticks once more at the same instant
+  and the client reads what the server wrote back on reading a target (the InFlight, a risk-layer refusal) instead of at the
+  next event of any kind (Simulator/spec.txt "A Target Wakes the Clock at Its Exchange Time"). Only a ported simulator needs it.
+
 ---
 
 ## 8. Do not port (C#-only)
