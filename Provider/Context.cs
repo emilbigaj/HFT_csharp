@@ -1021,6 +1021,9 @@ public sealed class ServerContext : Context
         return ref _clientSocketHeaders[clientId];
     }
 
+    /// The directory a client's books are filed under: its socket's name, or ServerStrategyName for strategy 0, which has no socket (see Spec.md).
+    public string GetClientName(int clientId) => clientId == OrderIdAllocator.ServerStrategyId ? ServerStrategyName.ToString() : GetSocketHeader(clientId).GetReadonlyRef().ClientName.ToString();
+
     // The client's id: its existing one, the id it asks for (LoadClients only), or the lowest free one; a negative ConnectRefusal when refused.
     public int AllocateClientId(in SocketHeader socketHeader)
     {
@@ -1200,10 +1203,7 @@ public sealed class ServerContext : Context
         ref InstrumentHeader256 header256 = ref GetInstrumentHeader(instrumentHeaderId).GetRef();
         Symbology symbology = header256.Symbology;
 
-        // Strategy 0 has no socket to take a name from; its book lives at ServerStrategyName (see Spec.md).
-        string clientName = clientId == OrderIdAllocator.ServerStrategyId
-            ? ServerStrategyName.ToString()
-            : GetSocketHeader(clientId).GetReadonlyRef().ClientName.ToString();
+        string clientName = GetClientName(clientId);
         string positionPath = GetPositionFilePath(clientName, symbology.Symbol).ToString();
         string? positionLine = Tools.Tools.ReadLastLine(positionPath);
         PositionHeader positionHeader = positionLine != null ? Json.Deserialize<PositionHeader>(positionLine) : new PositionHeader();

@@ -108,7 +108,7 @@ public sealed class AlertManager : IDisposable
     {
         Context = context;
         MachineName = Platform.Name;
-        _logger = new ClientSocket((directoryPath ?? Context.DirectoryPath) + ".alert", Context.LoggingServerName, [SocketChannel.ExecutionChannelLength], [SocketChannel.AdminChannelLength]);
+        _logger = new ClientSocket((directoryPath ?? Context.DirectoryPath) + ".alert", Context.LoggingServerName, [SocketChannel.ChannelLength], [SocketChannel.ChannelLength]);
         _logger.Connect();
 
         _thread = LowLatency.StartBackgroundThread("AlertManager", ConsumeLoop);

@@ -255,7 +255,11 @@ public sealed class Memory : IDisposable
             FileStream fs = new FileStream(fullPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite, 4096, FileOptions.None);
             try
             {
-                if (fs.Length < length)
+                // Why only a new file grows: an existing region of another length is another build's layout, and a mapping over it would
+                // read every ring and row one offset off, silently (see Spec.md "The ring's channel layout is constant")
+                if (fs.Length != 0 && fs.Length != length)
+                    throw new IOException($"Memory.CreateOrOpenShared: {fullPath} is {fs.Length} bytes, this build maps {length}; a region of another build holds the name: stop every process that maps it, delete the file, start again");
+                if (fs.Length == 0)
                     fs.SetLength(length);
 
                 int fd = (int)fs.SafeFileHandle.DangerousGetHandle();

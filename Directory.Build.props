@@ -4,5 +4,9 @@
 		<BaseOutputPath Condition="'$(WSL_BUILD)' == 'true'">$(MSBuildThisFileDirectory)deploy_stage/bin/$(MSBuildProjectName)/</BaseOutputPath>
 		
 		<DefaultItemExcludes Condition="'$(WSL_BUILD)' == 'true'">$(DefaultItemExcludes);**/obj/**;**/bin/**</DefaultItemExcludes>
+
+		<!-- The Avalonia core and every platform package built in lockstep with it (Desktop, Fluent, Inter in GUI.targets; Android in Phone.csproj):
+		     one number, raised here. The DataGrid and Diagnostics are released apart and keep their own. Phone.csproj fails the build on a mismatch -->
+		<AvaloniaVersion>12.1.5</AvaloniaVersion>
 	</PropertyGroup>
 </Project>

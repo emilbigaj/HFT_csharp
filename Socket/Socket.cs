@@ -13,27 +13,21 @@ namespace Socket;
 
 public static class SocketChannel
 {
-    public static readonly int AdminChannelLength = Tools.Memory.HugePageLength;
-    public static readonly int ExecutionChannelLength = Tools.Memory.HugePageLength;
+    public const int ChannelLength = Tools.Memory.HugePageLength;   // every channel, admin and execution alike, is one hugepage
+    public const int ChannelCount = 8;                               // channel index == CoreGroupId: 0 admin, 1..7 execution; a SocketHeader holds at most 8 per direction (Array8)
     public static readonly int Admin = 0;
 
-    // Build the per-direction channel-length array from a CoreGroups bitset (channel index ==
-    // CoreGroupId). Size = highest set bit + 1, so unset indices below it become 0-length gaps.
-    // Channel 0 = admin (AdminChannelLength); 1..7 = execution (ExecutionChannelLength). Both
-    // directions use this same shape. CoreGroupIds must set bit 0 (admin) and stay within 0..7.
-    public static int[] BuildChannelLengths(Bitset64 coreGroupIds)
+    // The per-direction channel lengths of every ring on every server: one channel per possible CoreGroupId, whether the server has
+    // that group or not. Why constant: a ring is mapped by its client, the server, Logging and the week's replay at different times,
+    // and a layout computed from the server's groups was computed differently by each once a group was added mid-week (see Spec.md
+    // "The ring's channel layout is constant"). Who reads which channel is decided by allocation, not by the layout.
+    public static readonly int[] ChannelLengths = NewChannelLengths();
+
+    private static int[] NewChannelLengths()
     {
-        coreGroupIds.Set(Admin); //force admin
-
-        int highest = coreGroupIds.HighestSet;
-        if (highest > 7)
-            throw new ArgumentException("SocketChannel.BuildChannelLengths: CoreGroupId > 7 (max 8 channels).");
-
-        int[] lengths = new int[highest + 1];
-        foreach (int coreGroupId in coreGroupIds)
-            lengths[coreGroupId] = coreGroupId == Admin ? AdminChannelLength : ExecutionChannelLength;
-
-        return lengths;
+        int[] channelLengths = new int[ChannelCount];
+        Array.Fill(channelLengths, ChannelLength);
+        return channelLengths;
     }
 
     // Per-instrument broadcast ring: one writer (the server), many readers (subscribed clients).

@@ -21,7 +21,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Avalonia.Android" Version="12.0.1" />
+		<PackageReference Include="Avalonia.Android" Version="$(AvaloniaVersion)" />
 		<!-- Why: grids sort by a column's property name (reflection), which trimming strips from the widgets' row classes (as Workspace.csproj) -->
 		<TrimmerRootAssembly Include="Widget" RootMode="All" />
 		<!-- Why baked in: every phone dials the one relay (the Threadripper), and a phone cannot be handed a file in the app's folder -->
@@ -44,5 +44,15 @@
 		<ProjectReference Include="..\Widget\Widget.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
 		<ProjectReference Include="..\Mirror\Mirror.csproj" GlobalPropertiesToRemove="RuntimeIdentifier;SelfContained" />
 	</ItemGroup>
+
+	<!-- Why: Avalonia.Android must be the core's exact version; a newer core (an upgrade written into a project file) makes its
+	     TopLevelImpl fail to load at start, and nothing else checks it. Reads the versions the restore resolved, wherever they were written -->
+	<Target Name="ThrowIfAvaloniaAndroidVersionDiffers" AfterTargets="ResolvePackageAssets">
+		<PropertyGroup>
+			<_AvaloniaVersionResolved>@(ResolvedCompileFileDefinitions->WithMetadataValue('NuGetPackageId', 'Avalonia')->Metadata('NuGetPackageVersion')->Distinct())</_AvaloniaVersionResolved>
+			<_AvaloniaAndroidVersionResolved>@(ResolvedCompileFileDefinitions->WithMetadataValue('NuGetPackageId', 'Avalonia.Android')->Metadata('NuGetPackageVersion')->Distinct())</_AvaloniaAndroidVersionResolved>
+		</PropertyGroup>
+		<Error Condition="'$(_AvaloniaVersionResolved)' != '$(_AvaloniaAndroidVersionResolved)'" Text="Phone.csproj: Avalonia.Android $(_AvaloniaAndroidVersionResolved) differs from Avalonia $(_AvaloniaVersionResolved); set AvaloniaVersion in Directory.Build.props once and remove any Avalonia version written into a project file" />
+	</Target>
 
 </Project>

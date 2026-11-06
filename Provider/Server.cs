@@ -122,8 +122,8 @@ public class Server : IDisposable
         _serverHeaderBox = ServerContext.Connect(in serverHeader);
         _serverSocket = new ServerSocket(ServerName, serverHeader.ClientIds.Length);
         _serverContext = new ServerContext(ServerName, Access.Write);
-        _loggingServer = new ClientSocket(ServerName + ".server", _serverContext.LoggingServerName, [SocketChannel.AdminChannelLength], [SocketChannel.AdminChannelLength]);
-        _audit = new ClientSocket(ServerName + ".audit", _serverContext.LoggingServerName, SocketChannel.BuildChannelLengths(serverHeader.CoreGroupIds), [SocketChannel.AdminChannelLength]);
+        _loggingServer = new ClientSocket(ServerName + ".server", _serverContext.LoggingServerName, [SocketChannel.ChannelLength], [SocketChannel.ChannelLength]);
+        _audit = new ClientSocket(ServerName + ".audit", _serverContext.LoggingServerName, SocketChannel.ChannelLengths, [SocketChannel.ChannelLength]);
         _riskLayer = new RiskLayer(_serverContext, OrderRejectedSource.Server);
 
         // Before anything else: LoadClients() runs between construction and Connect(), and
@@ -131,9 +131,9 @@ public class Server : IDisposable
         _serverSocket.Persistance = serverHeader.Persistance;
 
         _instrumentData = new WriteOnlySocket?[serverHeader.InstrumentIds.Length];
-        // +1: channel index == CoreGroupId, so we need slots 0..HighestSet (matches BuildChannelLengths).
-        _clientIdsByCoreGroupId = new Bitset64[serverHeader.CoreGroupIds.HighestSet + 1];
-        _drainAcknowledgedByCoreGroupId = new PaddedLong[serverHeader.CoreGroupIds.HighestSet + 1];
+        // One slot per channel: channel index == CoreGroupId.
+        _clientIdsByCoreGroupId = new Bitset64[SocketChannel.ChannelCount];
+        _drainAcknowledgedByCoreGroupId = new PaddedLong[SocketChannel.ChannelCount];
         _drainRequestAtCloseByClientId = new long[serverHeader.ClientIds.Length];
 
         // One OrderTarget injection queue per EXECUTION CoreGroup (admin carries no order targets).
@@ -158,8 +158,7 @@ public class Server : IDisposable
         // The ServerStrategy has no client, so it gets a socket of its own, Detached like a restored strategy's: the server's writes to
         // strategy 0's channel land in it, and Logging taps and files it under ServerStrategyName as it does a strategy's (see Spec.md
         // "Strategy 0"). Why not OnClientAllocated: its subscribers record real clients, and this one must never be reloaded as one.
-        int[] serverStrategyChannelLengths = SocketChannel.BuildChannelLengths(serverHeader.CoreGroupIds);
-        SocketHeader serverStrategySocketHeader = new(ServerName, _serverContext.ServerStrategyName, serverStrategyChannelLengths, serverStrategyChannelLengths, Environment.ProcessId) { ClientId = OrderIdAllocator.ServerStrategyId };
+        SocketHeader serverStrategySocketHeader = new(ServerName, _serverContext.ServerStrategyName, SocketChannel.ChannelLengths, SocketChannel.ChannelLengths, Environment.ProcessId) { ClientId = OrderIdAllocator.ServerStrategyId };
         _serverSocket.CreateDetatchedClient(in serverStrategySocketHeader);
         _loggingServer.Write(in serverStrategySocketHeader);
     }

@@ -332,10 +332,8 @@ public abstract class Client
             }
         }
 
-        // Channel 0 is admin; channels 1..7 are per-CoreGroupId execution channels. Size them from the
-        // server's declared CoreGroupIds (read before connecting).
-        int[] channelLengths = SocketChannel.BuildChannelLengths(ContextManager.ServerContext.ServerHeader.GetReadonlyRef().CoreGroupIds);
-        _socket = new ClientSocket(ClientName, ServerName, channelLengths, channelLengths);
+        // Channel 0 is admin; channels 1..7 are per-CoreGroupId execution channels, the same eight on every ring (see SocketChannel).
+        _socket = new ClientSocket(ClientName, ServerName, SocketChannel.ChannelLengths, SocketChannel.ChannelLengths);
         _clientId = _socket.Connect();
 
         // Why: once connected, the server holds this name's socket open and answers no second connect under the name

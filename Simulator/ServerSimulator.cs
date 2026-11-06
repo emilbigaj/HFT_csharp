@@ -1273,14 +1273,6 @@ public class ServerSimulator
         Clock.Interject += OnInterject;
         Clock.TickTock += OnTickTock;
 
-        // Why: a pass at least every simulated minute, so a quiet market still moves the header's clock that a simulated Workspace follows
-        static void ensureInterjectionForClockUpdate()
-        {
-            Clock.AddReminder(new Reminder(Clock.Now.AddMinutes(1), ts => ensureInterjectionForClockUpdate()));
-        }
-
-        ensureInterjectionForClockUpdate();
-
         Init();
     }
     public bool OpenConsoleForLogger { get; set; } = false;
@@ -1661,10 +1653,6 @@ public class ServerSimulator
 
     protected void OnTickTock(Timestamp now)
     {
-        SharedArrayEntry<ServerHeader> serverHeaderEntry = _server.Context.ServerHeader;
-        serverHeaderEntry.AcquireLock();
-        _server.Context.ServerHeader.GetRef().Timestamp = now;
-        serverHeaderEntry.ReleaseLock();
         // Release everything the exchange sent whose NIC timestamp has now arrived. This is the only
         // delayed leg: from here on it is plain Server work, identical to what the realtime build does.
         ReleaseToServer(_marketDataByClientTimestamp, ref _hasMarketData, now);

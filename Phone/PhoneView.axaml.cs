@@ -1,9 +1,11 @@
 using System;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Threading;
+using Execution;
 using Mirror;
 using Provider;
 using Tools;
@@ -14,28 +16,36 @@ namespace Phone;
 /// The phone's one view: the desk in one process. Starts the Remote Mirror's loop on a thread over in-process memory (it dials the
 /// relay desk in MirrorConfig.json), opens the GUI's client off the UI thread, then shows one existing widget at a time over the
 /// WorkspaceContext a desk Workspace builds, with the clock and the link's latency in a bar; rebuilds on a server restart as a desk
-/// Workspace does (see Spec.md "The phone"). A server workspace: every order and position; the ladder and Send Order open from the
+/// Workspace does (see Spec.md "The phone"). A view picker names the principal: the server (a server workspace: every order and
+/// position) or a connected strategy (its workspace), and a pick reconnects the GUI under it; the ladder and Send Order open from the
 /// grids' menus as on a desk (the view is their IWidgetHost). UI thread, plus the Mirror thread and the client thread; cold path.
 public partial class PhoneView : UserControl, IWidgetHost
 {
     private const int s_passIntervalMilliseconds = 20;   // Why: the Mirror and client loops pass less often than a desk's 1 ms, for the battery
+    private const string s_serverViewName = "Server";    // the view picker's first entry: the server as principal
     private static readonly string[] s_widgetTypeKeys = [nameof(OrdersWidget), nameof(PositionsWidget), nameof(LadderWidget), nameof(InstrumentHeadersWidget), nameof(RiskLimitsWidget), nameof(MessageEfficiencyWidget), nameof(RateLimitWidget)];   // the row-fed widgets (no files) and the ladder, which picks its instrument; Send Order opens from their menus
 
     private readonly System.Timers.Timer _refreshTimer = new(100);
     private readonly LatencyText _latencyText = new();
+    private readonly ObservableCollection<string> _viewNames = [s_serverViewName];   // the view picker's items: the server, then each strategy connected to it
     private FileSystemPath _serverName = "";
+    private FileSystemPath _principalName = "";          // the server's name (a server workspace) or a strategy's directory (its workspace), as a desk's WorkspaceRequest.ClientName
     private string _connectAddress = "";
     private IManualClient? _manualClient;                // open while connected; null before, and between a session's end and the rebuild
     private WorkspaceContext? _workspaceContext;
     private Thread? _clientThread;
     private volatile bool _isClientStopping;
     private int _guiNumber;                              // this view's GUI number; a rebuild asks for the same one first
-    private bool _isRebuilding;                          // a rebuild's connect runs off the UI thread; no second one meanwhile (UI thread)
+    private bool _isConnecting;                          // a connect runs off the UI thread; no second one meanwhile (UI thread)
 
     public PhoneView()
     {
         InitializeComponent();
         TopBar.Background = Palette.WorkspaceRealtimeGreen;
+        ViewPicker.ItemsSource = _viewNames;
+        ViewPicker.SelectedIndex = 0;
+        ViewPicker.DropDownOpened += (_, _) => FillViewPicker();
+        ViewPicker.SelectionChanged += (_, _) => ChangeView();
         WidgetPicker.ItemsSource = s_widgetTypeKeys;
         WidgetPicker.SelectedIndex = 0;
         WidgetPicker.SelectionChanged += (_, _) => ShowWidget();
@@ -61,6 +71,7 @@ public partial class PhoneView : UserControl, IWidgetHost
             string filesRoot = Android.App.Application.Context.GetExternalFilesDir(null)?.AbsolutePath ?? throw new InvalidOperationException("PhoneView.Start: no external files folder");
             Context.DirectoriesRoot = Path.Combine(filesRoot, "Data");
             _serverName = ServerContext.GetDirectoryPath(mirrorConfig.ServerName);
+            _principalName = _serverName;
             _connectAddress = string.Join(", ", mirrorConfig.ConnectAddresses);
 
             // Step 3: the Mirror's loop, as Mirror.exe runs it on a desk
@@ -81,6 +92,7 @@ public partial class PhoneView : UserControl, IWidgetHost
     /// then shows the picked widget and starts the refresh.
     private void ConnectAsync()
     {
+        _isConnecting = true;
         Task.Run(() =>
         {
             try
@@ -89,22 +101,23 @@ public partial class PhoneView : UserControl, IWidgetHost
                 Connect();
                 Dispatcher.UIThread.Post(() =>
                 {
-                    _isRebuilding = false;
+                    _isConnecting = false;
                     ShowWidget();
                     _refreshTimer.Start();
                 });
             }
             catch (Exception exception)
             {
-                Dispatcher.UIThread.Post(() => { _isRebuilding = false; StatusText.Text = $"connect failed: {exception.GetBaseException().Message}"; });
+                Dispatcher.UIThread.Post(() => { _isConnecting = false; StatusText.Text = $"connect failed: {exception.GetBaseException().Message}"; });
             }
         });
     }
 
-    // The GUI's client under the server as principal (a server workspace) and its thread, as Workspace.Connect; not the UI thread.
+    // The GUI's client under the picked principal (the server: a server workspace; a strategy: its workspace) and its thread, as Workspace.Connect; not the UI thread.
     private void Connect()
     {
-        _manualClient = ManualClient.Open(ContextManager.ServerContext.ServerName, ContextManager.ServerContext.ServerName, _guiNumber);
+        Context principalContext = _principalName == _serverName ? ContextManager.ServerContext : ContextManager.GetClientContext(_principalName);
+        _manualClient = ManualClient.Open(_principalName, ContextManager.ServerContext.ServerName, _guiNumber);
         ContextManager.ServerContext.WarmSymbolStrings();   // Why after Open: the copy is complete only once Open returns
         ManualClient.TryParseRemoteGuiName(_manualClient.Context.ClientName.ToString(), out _, out _guiNumber);
         _isClientStopping = false;
@@ -125,10 +138,10 @@ public partial class PhoneView : UserControl, IWidgetHost
                 Thread.Sleep(s_passIntervalMilliseconds);
             }
         });
-        _workspaceContext = new WorkspaceContext(ContextManager.ServerContext, manualClient);
+        _workspaceContext = new WorkspaceContext(principalContext, manualClient);
     }
 
-    // Stops the client thread and disposes the widget and the client: before a rebuild connects anew. UI thread.
+    // Stops the client thread and disposes the widget and the client: before a rebuild or a view change connects anew. UI thread.
     private void Disconnect()
     {
         _isClientStopping = true;
@@ -138,6 +151,38 @@ public partial class PhoneView : UserControl, IWidgetHost
         _manualClient?.Dispose();
         _manualClient = null;
         _workspaceContext = null;
+    }
+
+    /// Adds the strategies connected to the server that the picker does not list yet: every named client but the ServerStrategy and
+    /// the GUIs (TransferPositionDialog's rule), by the short name a desk's New Strategy Workspace lists.
+    private void FillViewPicker()
+    {
+        if (_workspaceContext == null)
+            return;
+        ServerContext serverContext = ContextManager.ServerContext;
+        foreach (int clientId in serverContext.ServerHeader.GetReadonlyRef().ClientIds)
+        {
+            string clientName = serverContext.GetClientName(clientId);
+            if (clientId == OrderIdAllocator.ServerStrategyId || ManualClient.IsGuiName(clientName))
+                continue;
+            string strategyName = Path.GetFileName(clientName.TrimEnd('\\', '/'));
+            if (!_viewNames.Contains(strategyName))
+                _viewNames.Add(strategyName);
+        }
+    }
+
+    /// Reconnects the GUI under the picked principal: the server, or a strategy by its directory. Nothing while a connect runs, or for the view shown.
+    private void ChangeView()
+    {
+        if (ViewPicker.SelectedItem is not string viewName || _isConnecting)
+            return;
+        FileSystemPath principalName = viewName == s_serverViewName ? _serverName : ClientContext.GetDirectoryPath(viewName);
+        if (principalName == _principalName)
+            return;
+        _principalName = principalName;
+        StatusText.Text = $"opening {viewName}…";
+        Disconnect();
+        ConnectAsync();
     }
 
     /// Shows the picked widget in place of the one shown.
@@ -170,12 +215,11 @@ public partial class PhoneView : UserControl, IWidgetHost
     {
         Dispatcher.UIThread.Post(() =>
         {
-            if (_manualClient is not RemoteClient remoteClient || _isRebuilding)
+            if (_manualClient is not RemoteClient remoteClient || _isConnecting)
                 return;
             // Why: a restarted server is a new run (client ids, instrument ids), so the view rebuilds on it (see Spec.md "Remote workspaces")
             if (remoteClient.IsSessionEnded)
             {
-                _isRebuilding = true;
                 StatusText.Text = "server restarted: rebuilding…";
                 ContextManager.Renew();
                 Disconnect();

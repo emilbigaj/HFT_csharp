@@ -382,6 +382,29 @@ server's array, which throws if no such group exists, and pins its strategy thre
 strategy and prompts for one of CME's groups. The GUI shows a rate limit's CoreGroup by looking its
 id up in the same array.
 
+### The ring's channel layout is constant (2026-11-07)
+
+Every client ring has eight channels per direction, one per possible CoreGroupId (0 admin, 1 to 7 execution), each one
+hugepage (`SocketChannel.ChannelLength`), whether the server has that group or not: `SocketChannel.ChannelLengths`, the same
+array for every socket on every server (the audit and ServerStrategy sockets, a strategy's, a GUI's, a Mirror stand-in's).
+Until then the array was built from the server's `CoreGroupIds`, highest set bit plus one, by whoever mapped the ring: the
+client from the header it read before connecting, the server and Logging from the header the client sent at its first
+attach, which the week's `Clients` file replayed at every restart. Adding a group mid-week (Metals, 2026-11-06) made the two
+differ: a reconnecting client built six channels per direction over a ring the server and Logging held as five, so its
+sixth channel, the new group's requests, was the server's first reply channel (written by both, read by neither), every
+reply it read was one channel off, and nothing reported it: the server answers a known name before it reads the request's
+lengths (`AllocateClientId`), and `Memory.CreateOrOpenShared` grew the file silently. With a constant layout there is nothing
+to compute, so no two mappers can differ, and a new group changes no ring: the server reads a client's channel for a group
+once that client allocates in it (`_clientIdsByCoreGroupId`), the client drains the channels of its own instruments' groups
+(`Client._coreGroupIds`), and Logging walks all eight (a channel nobody writes costs one header read per pass). A ring is
+32 MB (was 20 or 24); the box has over 3,000 free hugepages. A region built by another build is refused, not grown:
+`Memory.CreateOrOpenShared` throws on an existing file of another length, naming both and the cure (stop every process that
+maps it, delete the file). Transition: one stop of everything that maps the rings (GUIs and strategies, the Mirror, Logging,
+the server), delete the rings under `/dev/hugepages`, move the week's `Clients` file aside, start again; never again for a
+group added later. Why not compare and rebuild on re-attach: a ring's layout cannot change under Logging, which keeps the tap
+it built at the first announcement (`OnDirectSubscribed` refuses a second), and a rebuild would drop the writes Persistance
+exists to keep.
+
 ### Risk-limit edits are requests; the CoreGroup thread owns the row
 
 There are two levels of limit, both `RiskLimit` rows the server owns: the firm's, one per instrument
@@ -1887,8 +1910,9 @@ the box's `x86-64-v4` build stops with an illegal instruction on most desk PCs),
 ### Relay: a desk serves its copy onward (2026-10-27)
 
 A Remote whose config sets `RelayListenPort` (with `RelayIPWhitelist`) also serves its copy to further Remotes that dial
-that port: a phone, which cannot reach the box's network, dials the desk it can reach (over a personal tunnel that gives
-it a fixed address to whitelist). `Program.RunRelay` runs a `LocalMirror` over the copy on its own thread: the same
+that port: a phone dials the desk first, so the box sees it as one of that desk's windows and not as a session of its own
+(over a personal tunnel that gives it a fixed address to whitelist; since 2026-11-06 the box is its fallback, see "Dialling
+in order of preference" below). `Program.RunRelay` runs a `LocalMirror` over the copy on its own thread: the same
 class as beside the server, with the copy as its `ServerContext`, publishing every 100 ms, answering pings, serving the
 desk's synced files. Each GUI a phone lists stands in as a `RemoteClient` of the relay desk (the class a desk Workspace
 uses), attached to the relay's own ServerSocket under the phone GUI's name: the relay's `RemoteMirror` lists it to the
@@ -1928,14 +1952,24 @@ relay: it dials a relay desk (see "Relay") exactly as a desk dials, and to the b
   exists (Android has none). The GUI is the desk's: `ManualClient.Open` is answered `RemoteDesk` by the in-process Remote
   Mirror and opens a `RemoteClient`, and the widgets are the desk's over the same `WorkspaceContext`.
 - **One view, one widget at a time** (a phone has no windows): the bar shows the clock and the link's latency (the desk's
-  rule, `Widget.LatencyText`), a picker names the row-fed widgets (Orders, Positions, Instrument Headers, Risk Limits,
+  rule, `Widget.LatencyText`), a view picker names the principal, and a widget picker names the row-fed widgets (Orders, Positions, Instrument Headers, Risk Limits,
   Message Efficiency, Rate Limits; built by `Widgets.NewWidget`, the desk's table) and the Ladder, which picks its
   instrument as every ladder does (a picker in its header lists the primary client's instruments, refreshed when opened:
-  `LadderWidget.FillInstrumentPicker`), and a server workspace is shown: every order and position. A ladder also opens from Instrument Headers' menu (a long press is the phone's right-click; the ladder's own menu answers
+  `LadderWidget.FillInstrumentPicker`). A ladder also opens from Instrument Headers' menu (a long press is the phone's right-click; the ladder's own menu answers
   the Holding gesture too) and Send Order from either, as on a desk: `PhoneView` is the `IWidgetHost` (`AddToHost` finds the nearest host above a widget, a desk's
   Window or the phone's view), and the opened widget replaces the one shown. The phone's orders are a desk GUI's: the box
   cancels them when its session ends (the link silent 10 s). Charts, Fills and the Audit Trail tail synced files; the phone
   syncs none.
+- **The view picker (2026-11-06)** lists "Server" (a server workspace: every order and position, the firm's limits) and, added
+  when the picker opens, each strategy connected to the server: every named client in the copy's headers but the
+  ServerStrategy and the GUIs (`ServerContext.GetClientName`, the transfer dialog's rule), by its short name. Why the copy and
+  not a directory list as a desk's New Strategy Workspace uses: the phone syncs no folders. A pick closes the GUI's client
+  and opens it again under the picked principal (`PhoneView.ChangeView`: the restart rebuild without the context renewal), so
+  the box starts a stand-in under that strategy exactly as for a desk's strategy window, and the GUI's working orders under
+  the old view are cancelled as when a window closes. The GUI number is per principal: the switch asks for its own number
+  first. Accepted residuals: a strategy that leaves stays listed until the app restarts, and its pick says "connect failed:
+  … Client not connected"; a rebuild after a server restart keeps the principal and fails the same way until that strategy
+  reconnects (a desk window does the same); pick again.
 - **The widget's title bar** (Positions' Resume/Pause All and total PnL) shows in a light strip under the green bar, on a
   desk title bar's background so its colours read as there; hidden for a widget with none.
 - **Rotation** follows the phone (its auto-rotate setting): the activity handles orientation and size changes itself
@@ -1993,8 +2027,18 @@ relay: it dials a relay desk (see "Relay") exactly as a desk dials, and to the b
   dial over the VPN (`10.172.13.228`). The box's listener admits each such desk by its Tailscale address in its
   `IPWhitelist` (the Threadripper's 100.86.63.127, Adrian's laptop's once it joins). Round trip from the Threadripper,
   idle: 221 ms direct over Tailscale, 270 ms over the VPN. Tailscale also encrypts the link, which the VPN path left as
-  plain TCP. Never list both addresses in one desk's `ConnectAddresses`: each new link replaces the live one, closing the
-  desk's stand-ins, so the box would cancel every remote order whenever either path reconnected.
+  plain TCP.
+- **Dialling in order of preference (2026-11-06).** `ConnectAddresses` is an ordered list: with no live link the dial thread
+  tries each address in turn, every second, and keeps the first that answers; while a link is live it dials nothing; when
+  the link dies the order starts again (`TcpLinkConnector.DialTcpLinks`). Until then every address got a link of its own,
+  so two addresses could never be listed: each new link replaces the live one, closing the desk's stand-ins, and the box
+  would cancel every remote order whenever either path reconnected. That is also why a recovered preferred address is not
+  switched back to: the fallback is kept until it dies or the Remote restarts. The phone lists the Threadripper's relay
+  port first and the box's port second, so the box does the extra work of a session of its own only while the Threadripper
+  is down (the box's `IPWhitelist` lists each phone's Tailscale address); a desk may list Tailscale first and the VPN second
+  the same way. On a fallback the phone's GUI client stays open (neither the server nor its own Remote Mirror changed), the
+  box takes about ten seconds to close the relay's stand-in of the same name and start its own, and the orders the phone
+  had working through the relay are cancelled, as they are whenever a session ends.
 - A listening end accepts only `IPWhitelist`, each entry one address or a CIDR range (`"10.10.0.0/16"` admits 10.10.*.*, for desks whose VPN address changes; keep the range as small as the VPN pool) (`TcpLinkConnector.AcceptTcpLinks` closes any other connection at once; `MirrorConfig.ThrowIfInvalid` refuses to start a listener with the list empty). Why: on a Remote any new link replaces the live one, and the Local end then closes that desk's stand-ins, so the server cancels every remote order; an internet scanner touching the port would do that several times a day. Firewall the port to the same address too: links are still plain TCP, unauthenticated and
   unencrypted for now.
 

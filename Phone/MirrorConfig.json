@@ -3,7 +3,7 @@
   "ServerName": "CME_Production",
   "ListenPort": 0,
   "IPWhitelist": [],
-  "ConnectAddresses": ["100.86.63.127:27794"],
+  "ConnectAddresses": ["100.86.63.127:27794", "100.119.146.54:27793"],
   "DirectoriesRoot": "",
   "IsConsoleVisible": false,
   "IsFolderSyncOn": false

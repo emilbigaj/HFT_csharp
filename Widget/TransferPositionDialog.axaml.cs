@@ -91,7 +91,7 @@ public partial class TransferPositionDialog : Window
         Bitset64 clientIds = serverContext.GetClientIdsByInstrumentId(instrumentId).GetReadonlyRef();
         foreach (int clientId in clientIds)
         {
-            string clientName = serverContext.GetSocketHeader(clientId).GetReadonlyRef().ClientName.ToString();
+            string clientName = serverContext.GetClientName(clientId);
             if (clientId == OrderIdAllocator.ServerStrategyId || ManualClient.IsGuiName(clientName))
                 continue;
             transferBooks.Add(new TransferBook(clientId, Path.GetFileName(clientName.TrimEnd('\\', '/'))));

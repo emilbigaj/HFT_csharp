@@ -48,7 +48,7 @@ public sealed class RemoteClient : IManualClient
 
     public RemoteClient(string guiName, string serverName)
     {
-        _clientSocket = new ClientSocket(guiName, serverName, [SocketChannel.AdminChannelLength], [SocketChannel.AdminChannelLength]);
+        _clientSocket = new ClientSocket(guiName, serverName, [SocketChannel.ChannelLength], [SocketChannel.ChannelLength]);
         _clientId = _clientSocket.Connect();
         // Why: as in Client: once connected the name is held until the socket closes, so a throw below must close it
         try

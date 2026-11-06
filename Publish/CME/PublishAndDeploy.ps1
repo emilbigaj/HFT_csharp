@@ -61,12 +61,13 @@ if ($LASTEXITCODE -ne 0)
 
 # 4. Sync to CME Server via WSL rsync
 [string]$wslKeyPath = "~/.ssh/bigaj"
-[string]$remoteTarget = "bigaj@10.172.13.228:$remoteActive/"
+[string]$remoteHost = "bigaj@cme"   # the CME box over Tailscale (MagicDNS); its 10.172.13.228 address is not reachable from here
+[string]$remoteTarget = "${remoteHost}:$remoteActive/"
 
 Write-Host "`n[2/3] Syncing to CME Server ($remoteTarget)..." -ForegroundColor Yellow
 
 # Ensure remote active directory exists
-ssh -i C:\Home\ssh\bigaj bigaj@10.172.13.228 "mkdir -p $remoteActive"
+ssh -i C:\Home\ssh\bigaj $remoteHost "mkdir -p $remoteActive"
 
 # Sync using WSL. 
 # Added --exclude to ignore intermediate files.
@@ -81,7 +82,7 @@ if ($LASTEXITCODE -ne 0)
 
 # 5. Create the History Snapshot
 Write-Host "`n[3/3] Creating history snapshot on CME server..." -ForegroundColor Yellow
-ssh -i C:\Home\ssh\bigaj bigaj@10.172.13.228 "cp -a $remoteActive $remoteArchive"
+ssh -i C:\Home\ssh\bigaj $remoteHost "cp -a $remoteActive $remoteArchive"
 
 if ($LASTEXITCODE -ne 0) 
 {

@@ -1292,6 +1292,59 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
   and the client reads what the server wrote back on reading a target (the InFlight, a risk-layer refusal) instead of at the
   next event of any kind (Simulator/spec.txt "A Target Wakes the Clock at Its Exchange Time"). Only a ported simulator needs it.
 
+### P43. NOTHING TO PORT: `ServerHeader.Timestamp` is no longer written (C# `Simulator/ServerSimulator.cs`, `Workspace/Program.cs`; 2026-11-04)
+
+- **Layout:** unchanged; the field stays, unused. P34 said the simulator wrote it as its clock: it no longer does.
+- **Readers:** a GUI's clock, simulated included, is the newest book NIC time (`Context.GetLatestMarketDataTimestamp`, P34). A
+  C++ simulator need not write the field, and no C++ tool may read it as a clock.
+
+---
+
+### P44. `Latency` probes run only while something listens (C# `Tools/Latency.cs`; 2026-11-04)
+
+- **Was:** a public static `Enabled` flag, true by default, that nothing ever set false: every probe (two per `ReadSocket`
+  pass, one per `TryGetQuote`) read the Stopwatch clock and wrote a record whether or not anyone consumed it.
+- **Now:** the flag is gone; a probe constructs as a no-op while `OnFlush` has no subscriber, and its Dispose keys off its own
+  skipped state, so a subscription at any moment leaves the depth counter balanced.
+- **Port:** if the C++ client has a probe of the same shape, gate it on the subscriber the same way. If it has none, nothing to port.
+- **Measured:** scratchpad makerfill day, MBT 2026-07-01: client bucket 4.8 s → 3.9 s, about 47 million probes at ~20 ns.
+
+---
+
+### P45. PORT: `ServerContext::GetClientName(clientId)` (C# `Provider/Context.cs`; 2026-11-06)
+
+- **Was:** the lookup of a client's directory by id (`GetSocketHeader(clientId).ClientName`, `ServerStrategyName` for strategy 0,
+  which has no socket) written out at the allocation seed (`AllocateInstrument(clientId, instrumentId)`, the position file's path).
+- **Now:** one one-line member on `ServerContext`; the allocation seed calls it. The transfer dialog and the phone's view picker
+  (C#-only GUIs) call it too.
+- **Port:** add the member and call it at the server's allocation seed. No wire, layout or behaviour change.
+
+---
+
+### P46. PORT: every ring has eight channels per direction; a region of another length is refused (C# `Socket/Socket.cs`, `Tools/Memory.cs`; 2026-11-07)
+
+- **Was:** `BuildChannelLengths(CoreGroupIds)` sized each direction by the highest CoreGroupId plus one, so the layout of a
+  client's ring depended on the server's groups at the moment whoever mapped it read them. The server and Logging mapped a
+  known client from the week's `Clients` record (its first attach's header); a reconnecting client from the live header. The
+  server answers a known name before it reads the request's lengths, and the region open grew a smaller file silently. With
+  Metals (id 6) added on 2026-11-06 and the server restarted mid-week, every client that reconnected built six channels per
+  direction over a ring held as five: its channel 6 was the server's first reply channel, and its replies read one channel off
+  (the ARB desk's MGC risk limit never applied; see Spec.md "The ring's channel layout is constant").
+- **Now:** `SocketChannel::ChannelLengths`, one constant array of `ChannelCount` (8) entries, each `ChannelLength` (one hugepage;
+  `AdminChannelLength` and `ExecutionChannelLength`, which were equal, are gone). Every socket uses it: a client's, the server's
+  `.audit` socket (client-to-server side), the ServerStrategy's (P41), a stand-in's. `_clientIdsByCoreGroupId` and
+  `_drainAcknowledgedByCoreGroupId` are sized `ChannelCount`. Who reads which channel is unchanged: the server polls a client's
+  channel for a group once the client allocates in it; a client drains the channels of its own instruments' groups; Logging walks
+  all eight. `Memory::CreateOrOpenShared` grows only an empty file; an existing file of another length throws, naming both lengths
+  and the cure.
+- **Port:** replace the builder with the constant and delete the two lengths; size the two per-group arrays by `ChannelCount`;
+  add the length check to the region open. Wire: `SocketHeader` unchanged (its counts are now always 8, its lengths all one
+  hugepage), so the week's `Clients` record always matches the live layout.
+- **Transition on the box, once:** stop every process that maps the rings (GUIs and strategies, the Mirror, Logging, then the
+  server), delete the rings under `/dev/hugepages`, move the week's `Clients` file aside, start again. Rings are 32 MB (were 20
+  or 24); the box had 3,524 free hugepages on 2026-11-07. Deploy the C# and C++ sides in the same stop: a mixed pair refuses to
+  map the other's rings by the new check, which is the intended loud failure.
+
 ---
 
 ## 8. Do not port (C#-only)

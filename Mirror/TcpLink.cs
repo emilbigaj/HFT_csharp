@@ -183,21 +183,21 @@ public sealed class TcpLinkConnector(int listenPort, string[] ipWhitelist, strin
         }
     }
 
-    // Dial thread: every second, redials each address with no live link; a failure is logged once until it recovers.
+    // Dial thread: every second with no live link, dials the addresses in order and keeps the first that answers; the rest are
+    // fallbacks (a phone: the relay desk, then the box). The link is kept until it dies, then the order starts again. Why no
+    // switch back when a preferred address recovers: a new link replaces the live one, and the server cancels every remote order.
     private void DialTcpLinks()
     {
-        TcpLink?[] _dialedTcpLinks = new TcpLink?[connectAddresses.Length];
+        TcpLink? _dialedTcpLink = null;
         bool[] _isFailureLogged = new bool[connectAddresses.Length];
         while (true)
         {
-            for (int addressIndex = 0; addressIndex < _dialedTcpLinks.Length; addressIndex++)
+            for (int addressIndex = 0; addressIndex < connectAddresses.Length && _dialedTcpLink is not { IsConnected: true }; addressIndex++)
             {
-                if (_dialedTcpLinks[addressIndex] is { IsConnected: true })
-                    continue;
                 string connectAddress = connectAddresses[addressIndex];
                 try
                 {
-                    _dialedTcpLinks[addressIndex] = DialTcpLink(connectAddress);
+                    _dialedTcpLink = DialTcpLink(connectAddress);
                     _isFailureLogged[addressIndex] = false;
                 }
                 catch (Exception exception)

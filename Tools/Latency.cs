@@ -96,8 +96,6 @@ public delegate void LatencyFlushHandler(ReadOnlySpan<LatencyRecord> records);
 /// </summary>
 public ref struct Latency
 {
-    public static bool Enabled = true;
-
     private const int MaxRecords = 1024;
 
     [ThreadStatic]
@@ -132,7 +130,7 @@ public ref struct Latency
         _isCanceled = false;
         _parentIndex = s_currentParentIndex;
 
-        if (!Enabled)
+        if (OnFlush == null)   // Why: a probe nobody listens to measures nothing; 47 million a day cost a backtest 0.9 s (see patch_log.md 2026-11-04)
         {
             _recordIndex = -1;
             _startTicks = 0;
@@ -168,7 +166,7 @@ public ref struct Latency
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Dispose()
     {
-        if (!Enabled)
+        if (_recordIndex < 0)   // this probe was skipped: nothing to balance, whoever subscribed meanwhile
             return;
 
         s_stackDepth--;

@@ -4,6 +4,92 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-11-07 — Every ring has eight channels per direction; a region of another length is refused
+
+- `Socket/Socket.cs` — `SocketChannel.ChannelLengths`, one constant array (eight channels per direction, one hugepage each,
+  `ChannelLength`), replaces `BuildChannelLengths(CoreGroupIds)` and the two equal lengths `AdminChannelLength` and
+  `ExecutionChannelLength`. Callers: `Client`, `Server` (the audit and ServerStrategy sockets, and its per-group arrays are sized
+  `ChannelCount`), `AlertManager`, `RemoteClient`.
+- `Tools/Memory.cs` — `CreateOrOpenShared` grows only a new, empty file; an existing region of another length throws, naming
+  both lengths and the cure.
+- Why: Metals was added on 2026-11-06 with the server restarted mid-week. The server and Logging rebuilt every known client's
+  ring from the week's `Clients` record (five channels per direction), while each reconnecting client built six from the new
+  header; nothing compared them. The sixth channel, MGC's risk-limit requests from the ARB desk, landed in the server's first
+  reply channel, and every reply a reconnected client read was one channel off. Spec.md "The ring's channel layout is constant".
+- Transition: stop every process that maps the rings (GUIs and strategies, the Mirror, Logging, the server), delete the rings
+  under `/dev/hugepages`, move the week's `Clients` file aside, start again. C++ report P46. Code: -8 lines.
+
+---
+
+## 2026-11-06 — One Avalonia version for the desks and the phone; the phone build fails on a mismatch
+
+- `Directory.Build.props` — `AvaloniaVersion` (12.1.5), read by `GUI.targets` for the core, Desktop, Fluent and Inter packages and by
+  `Phone.csproj` for Avalonia.Android. The DataGrid (12.1.2) and Diagnostics (11.3.22) keep numbers of their own: they are released apart.
+- `Phone/Phone.csproj` — `ThrowIfAvaloniaAndroidVersionDiffers`, after the packages resolve: the build fails when the resolved
+  Avalonia.Android version differs from the resolved Avalonia core, naming both and the one place to set the number.
+- Why: the 2026-11-06 Visual Studio upgrade raised Avalonia to 12.1.5 by writing override blocks into Chart, Widget and Workspace
+  (GUI.targets, the owner, stayed at 12.0.1) and left Avalonia.Android at 12.0.1. The phone pulls the core through Widget, so its
+  APK carried Avalonia 12.1.5 with Avalonia.Android 12.0.1, whose TopLevelImpl then failed to load at activity start ("app keeps
+  stopping"; TypeLoadException, VTable setup failed). NuGet did not object: Avalonia.Android asks for the core "12.0.1 or newer".
+  The override blocks are deleted and the versions live in GUI.targets. An upgrade through Visual Studio will write overrides
+  again; from now on that fails the phone build instead of the phone.
+
+---
+
+## 2026-11-06 — A Remote dials its addresses in order of preference; the phone falls back to the box
+
+- `Mirror/TcpLink.cs` — `DialTcpLinks` keeps one link: with none live it tries `ConnectAddresses` in order every second and
+  keeps the first that answers until it dies, then starts the order again. Before, every address got a link of its own,
+  so two addresses could not be listed (each new link replaces the live one and the box cancels every remote order).
+- `Phone/MirrorConfig.json` — the Threadripper's relay port first, the box's port second: the box carries a session of its own
+  for the phone only while the Threadripper is down. The box's whitelist already lists both phones.
+- Why no switch back when the preferred address recovers: a new link replaces the live one and cancels the phone's orders;
+  the fallback stays until it dies or the app restarts.
+- Spec.md "Dialling in order of preference"; the relay section no longer says a phone cannot reach the box. Code: -2 lines.
+
+---
+
+## 2026-11-06 — The phone picks its view: the server or a connected strategy
+
+- `Phone/PhoneView.axaml`, `Phone/PhoneView.axaml.cs` — a view picker above the widget picker: "Server", then each strategy
+  connected to the server, read from the copy's client headers when the picker opens (the phone syncs no folders, so a desk's
+  directory list is not there). A pick reconnects the GUI under the picked principal: the restart rebuild without the context
+  renewal, so the box starts a stand-in under that strategy exactly as for a desk's strategy window. The connect guard
+  `_isRebuilding` is now `_isConnecting` and is set inside `ConnectAsync`, so the first connect, a rebuild and a view change share it.
+- `Provider/Context.cs` — `ServerContext.GetClientName(clientId)`: a client's directory from its socket header, `ServerStrategyName`
+  for strategy 0. Replaces the same lookup written out at the allocation seed and in `TransferPositionDialog.NewTransferBooks`;
+  the phone's picker is its third caller. C++ report P45.
+- Why: the phone opened its one client under the server's name and could show nothing but the server workspace, while a desk's
+  strategy windows already work over the Mirror: the phone lacked only the principal's name.
+- Residual: a strategy that leaves stays listed until the app restarts; its pick says "connect failed: … Client not connected".
+
+---
+
+## 2026-11-04 — Latency probes run only while something listens
+
+- `Tools/Latency.cs` — the public static `Enabled` flag is deleted. A probe constructs as a no-op while `OnFlush` has no
+  subscriber; Dispose keys off the probe's own skipped state (`_recordIndex < 0`), not a flag that can flip between open and close.
+- Why: the flag was true by default and nothing ever set it false, so every probe (two per `Client.ReadSocket` pass, one per
+  `Position.TryGetQuote`) read the Stopwatch clock and wrote a record that, outside `Testing/Strategy.cs`, nobody read. A
+  backtest with no subscriber paid 0.9 s a day for it; a live client pays the same two probes on every empty poll.
+- Verified (scratchpad `makerfill`, MBT Jul26, 2026-07-01): every count identical; client bucket 4.8 s → 3.9 s (about 47
+  million probes at ~20 ns). Testing's plot keeps its probes because it subscribes. C++ report P44. -2 lines.
+
+---
+
+## 2026-11-04 — Nothing writes ServerHeader.Timestamp; a simulated Workspace's clock follows the newest book
+
+- `Simulator/ServerSimulator.cs` — `OnTickTock` no longer takes the ServerHeader lock to store the simulation time on every
+  pass of the clock (19.5M a day), and the once-a-minute reminder that existed only to move that clock in a quiet market is gone.
+- `Workspace/Program.cs` — a Workspace run in simulation mode sets `Clock.Begin` and offers `Context.GetLatestMarketDataTimestamp()`
+  (the newest book NIC time, what its top bar already shows since P34) instead of the header's timestamp.
+- `Provider/Allocate.cs` — `ServerHeader.Timestamp` stays for the layout, marked unused.
+- Why: a seqlock acquire, store and release on every tick, for a reader that already had a better clock.
+- Verified (scratchpad `makerfill`, MBT Jul26, 2026-07-01): every count identical but for the minute ticks (19,475,027 →
+  19,473,593 ticks); the day 11.6-11.9 s → 11.3 s. Layout unchanged; C++ report P43. -10 lines.
+
+---
+
 ## 2026-11-03 — A queue-position change caused by a market event carries that event's timestamp
 
 - `Simulator/ServerSimulator.cs` — `InstrumentSimulator.BeginRecordedEvent` / `EndRecordedEvent` (was `SetLastRecordedNicTimestamp`)

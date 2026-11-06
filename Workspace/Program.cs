@@ -76,11 +76,12 @@ internal class Program
         ContextManager.Initialize(serverName);
         if (Clock.Mode == ClockMode.Simulation)
         {
-            Clock.Begin = ContextManager.ServerContext.ServerHeader.GetReadonlyRef().Timestamp;
+            // Why the books: nothing writes ServerHeader.Timestamp since 2026-11-04; the newest book is the clock, as the top bar shows
+            Clock.Begin = ContextManager.ServerContext.GetLatestMarketDataTimestamp();
             Clock.End = Timestamp.MaxValue;
             Clock.Interject += timestamp =>
             {
-                Clock.OnInterject(ContextManager.ServerContext.ServerHeader.GetReadonlyRef().Timestamp);
+                Clock.OnInterject(ContextManager.ServerContext.GetLatestMarketDataTimestamp());
                 Thread.Sleep(1);
             };
         }
