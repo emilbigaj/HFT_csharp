@@ -33,9 +33,12 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
   truth, so no spread definition has to carry one.
 - `Widget/InstrumentHeadersWidget.axaml[.cs]` — a Currency column beside Multiplier.
 - Why: `GetProfit` was `(sell − buy) × Multiplier × quantity` and a multiplier is in the contract's own currency. NIY read
-  ¥2 500 a tick as "2 500" beside MNK's $2.50, and the desk total added them. Corn read 100× too big. Spec.md "Every
-  profit figure is USD".
-- Unblocked: NIY and MNI can be allocated. Fixed in passing: every grain, which had been 100× too big since listing.
+  ¥2 500 a tick as "2 500" beside MNK's $2.50, and the desk total added them. Spec.md "Every profit figure is USD".
+- Unblocked: NIY, MNI and TPY can be allocated; the Databento catalog already labels them `JPY`, so no catalog edit is
+  needed, only a `JPY.exchangerate` file in the server's folder.
+- NOT fixed, and it is a catalog bug: the grains (ZC, ZS, ZW, ZL, MZC, MZL, MZS, MZW, HRS) are quoted in cents a bushel
+  but the Databento catalog labels them `USD`, where the Refinitiv catalog labels them `USc`. `USD` has rate 1.0, so they
+  compute exactly what they did before — still 100× too big. The fix is one field in the Databento import.
 - Breaks: `GetLayoutHash()` changes, so the box, the Threadripper relay, every desk and the phone must deploy together.
 - Residual: a replay values its yen at the file's newest rate, not its own date's. Nothing writes `Currency` on the C++
   side yet, so a C++-fed server prices everything as USD until it does — do not allocate NIY, MNI, TPY or a grain there

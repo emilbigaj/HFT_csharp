@@ -13,16 +13,22 @@ contract's own multiplier **in the currency the contract quotes in**. Nothing co
 has known the currency all along (`InstrumentDetails::Currency`), but it was never carried into the
 shared-memory header, so no running process could see it.
 
-Of the 2 980 instrument files on `Z:\InstrumentDetails`, 612 are not USD:
+There are two catalogs and they disagree. The Databento one (`Z:\InstrumentDetails\Databento\<exchange> <root>\`) is the
+one every Scenario reads; the flat Refinitiv one (`Z:\InstrumentDetails\`) is the older set.
 
 | Currency | Roots | Effect before this change |
 |---|---|---|
-| USc | ZC, ZS, ZW, ZL, MZC, MZL, MZS, MZW, HRS, SIR | P&L in **cents**, shown as dollars: 100× too big |
 | JPY | NIY, MNI, TPY | P&L in **yen**, shown as dollars: ~159× too big |
-| EUR | ECF, EHR | P&L in euro |
+| EUR | ECF (EHR in Refinitiv only) | P&L in euro |
 | CNH | CNH | P&L in offshore renminbi |
 | NOK | ENK | P&L in krone |
 | SEK | ESK | P&L in krona |
+
+**The grains are a catalog bug and this change does not fix them.** ZC, ZS, ZW, ZL, MZC, MZL, MZS, MZW and HRS are quoted
+in cents a bushel (ZC's tick of 0.25 is a quarter of a cent), so their P&L has always been cents shown as dollars — 100×
+too big. Refinitiv labels them `USc`; **Databento labels them `USD`**. Until the Databento import is corrected they take
+rate 1.0 and compute exactly what they computed before: no regression, no fix. Whoever ports this should expect the same,
+and should not "fix" it in C++ — the fix belongs in the import.
 
 Worked example, Nikkei at 50 000, one tick = 5 index points. One tick of NIY is 5 × ¥500 = ¥2 500,
 which at 158.86 ¥/$ is **$15.74**; it was displayed as **2 500**. Beside it one tick of the dollar
@@ -171,12 +177,12 @@ allocate NIY, MNI, TPY or a grain on a C++-fed server until `Currency` is stampe
 
 ## 8. Verification (run on the C# side, 2026-11-12)
 
-A harness drove the real `ServerSimulator` and `ServerContext` with three catalog instruments —
-MNK (USD, ×0.5), MNI (JPY, ×50), ZC (USc, ×5000). All assertions passed:
+A harness drove the real `ServerSimulator` and `ServerContext` with three instruments taken unmodified from the Databento
+catalog — MNK (USD, ×0.5), MNI (JPY, ×50), ZC (×5000). All assertions passed:
 
 - `USD = 1.0` and `USc = 0.01` seed with no files present.
 - With `JPY.exchangerate` holding two lines, the **last** line wins (0.0064516, not the earlier 0.007).
-- MNK `UsdMultiplier` 0.5; ZC `UsdMultiplier` 50.0 (5000 × 0.01 — corn's long-standing 100× error).
+- MNK `UsdMultiplier` 0.5; ZC `UsdMultiplier` 5000 — unchanged, because the catalog calls corn `USD` (see §1).
 - MNI `UsdMultiplier` 0.32258; one MNI tick is **$1.6129**, not 250; one MNK tick is **$2.50**
   unchanged; the two sum to **$4.1129** where the old code summed to 252.50.
 - `PositionHeader::OnFill` round turn of 2 lots over 100 index points banks **$64.516**, not ¥10 000.

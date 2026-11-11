@@ -2124,11 +2124,16 @@ flaw; it was left alone because nothing was seen taking it.
 
 `Instrument.GetProfit` was `(sell − buy) × Multiplier × quantity`, and a contract's multiplier is in the currency that
 contract quotes in. Nothing converted, so a yen contract's P&L was shown and banked in yen and a grain's in cents, and a
-desk total added them to a dollar figure as if they were dollars. Of the 2 980 catalog instruments, 612 are not USD:
-grains in `USc` (ZC, ZS, ZW, ZL, the micros, HRS, SIR), the Nikkei and TOPIX in `JPY` (NIY, MNI, TPY), `EUR` (ECF, EHR),
-`CNH`, `NOK` (ENK) and `SEK` (ESK). One tick of NIY is 5 × ¥500 = ¥2 500, which at 158.86 ¥/$ is $15.74 and read as
-2 500; beside one tick of the dollar Nikkei MNK at $2.50, the positions total read 2 502.50 where the truth is $18.24.
-Corn read 100× too big and had since it was listed.
+desk total added them to a dollar figure as if they were dollars. In the Databento catalog, which every Scenario reads,
+the Nikkei and TOPIX are `JPY` (NIY, MNI, TPY), and there are `EUR` (ECF), `CNH`, `NOK` (ENK) and `SEK` (ESK) products.
+One tick of NIY is 5 × ¥500 = ¥2 500, which at 158.86 ¥/$ is $15.74 and read as 2 500; beside one tick of the dollar
+Nikkei MNK at $2.50, the positions total read 2 502.50 where the truth is $18.24.
+
+**The grains are a catalog bug, not a code one, and are not fixed by this.** ZC, ZS, ZW, ZL, MZC, MZL, MZS, MZW and HRS
+are quoted in cents a bushel — ZC's tick of 0.25 is a quarter of a cent — so their P&L has always been cents displayed as
+dollars, 100× too big. The Refinitiv catalog at `Z:\InstrumentDetails` labels them `USc` correctly; the Databento catalog
+the simulator actually reads labels them `USD`. The two disagree, and until the Databento import writes `USc` the grains
+are untouched by this work: `USD` has rate 1.0, so they compute exactly what they computed before. No regression, no fix.
 
 The header carries the **currency**, which is a fact about the contract and never changes; a separate shared array carries
 the **rate**, which is volatile. That split is the whole design: one write to a rate row revalues every instrument in that
