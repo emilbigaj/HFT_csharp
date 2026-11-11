@@ -334,6 +334,7 @@ public sealed class InstrumentDetails
                 InstrumentType = InstrumentType,
                 TickSize = TickSize,
                 InverseTickSize = InverseTickSize,
+                Currency = Currencies.FromString(Currency),
             };
         }
     }

@@ -4,6 +4,48 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-11-12 — A flat position with no quote is worth zero, not NaN
+
+- `Provider/Position.cs` — `Profit`'s two branches collapse to one: take the mid if there is a quote and `NaN` if there
+  is not, then let `GetProfit` answer, since it already returns 0 for `quantity == 0` before it reads either price.
+- Why: `TryGetQuote` is false for any instrument that is not `Open`, so every closed one returned `Total` and `Floating`
+  as `NaN` even when the client was flat in it. One such row made the positions widget's total read "PnL: NaN" overnight.
+  The widget was innocent — it sums what the library hands it. Spec.md "A flat position with no quote is worth zero".
+- Unchanged on purpose: holding a position in a closed instrument still gives `NaN`, which is honest — it cannot be
+  marked. The `IsEmpty()` branch above has the same flaw and was left alone; nothing was seen taking it.
+- Net −5 lines, and a copy-and-override pair removed.
+
+---
+
+## 2026-11-12 — Every profit figure is USD, whatever the contract quotes in
+
+- `Data/Currency.cs` (new) — the `Currency` byte enum (USD 0, USc 1, JPY 2, EUR 3, CNH 4, SEK 5, NOK 6), the
+  `ExchangeRate` file record, and `Currencies` with the rate array's capacity and the catalog-string parse.
+- `Data/Instrument.cs` — `InstrumentHeader.Currency` at offset 72 of its fixed 128, so no existing offset moves;
+  `Instrument.UsdMultiplier` = multiplier × its currency's rate, read live; `GetValue` goes through it. Each instrument is
+  handed its rate row at construction, as it already is its header row.
+- `Provider/Context.cs` — `<server>/ExchangeRates`, a `SharedArray<double>` of 16 rows by `Currency` value, created last;
+  `GetExchangeRate`; the startup load (USD and USc seeded, then whatever `.exchangerate` files exist, last line each);
+  `ThrowIfExchangeRateIsNotValid`, called there and at `AllocateInstrument`, never on the read path.
+- `Provider/Server.cs`, `Execution/Order.cs`, `Widget/TransferPositionDialog.axaml.cs` — every `OnFill` takes the
+  converted multiplier, so `RealizedProfit` banks in dollars at the rate that applied when it was earned.
+- `Simulator/ServerSimulator.cs` — stamps `Currency` from the catalog; a spread takes its legs', which are the source of
+  truth, so no spread definition has to carry one.
+- `Widget/InstrumentHeadersWidget.axaml[.cs]` — a Currency column beside Multiplier.
+- Why: `GetProfit` was `(sell − buy) × Multiplier × quantity` and a multiplier is in the contract's own currency. NIY read
+  ¥2 500 a tick as "2 500" beside MNK's $2.50, and the desk total added them. Corn read 100× too big. Spec.md "Every
+  profit figure is USD".
+- Unblocked: NIY and MNI can be allocated. Fixed in passing: every grain, which had been 100× too big since listing.
+- Breaks: `GetLayoutHash()` changes, so the box, the Threadripper relay, every desk and the phone must deploy together.
+- Residual: a replay values its yen at the file's newest rate, not its own date's. Nothing writes `Currency` on the C++
+  side yet, so a C++-fed server prices everything as USD until it does — do not allocate NIY, MNI, TPY or a grain there
+  until `cpp_alignment_report_2026-11-12_currency.md` is ported.
+- Verified: a harness drove the real `ServerSimulator` with MNK, MNI and ZC from the catalog. MNI one tick $1.6129 (not
+  250), MNK $2.50 unchanged, the two sum to $4.1129 (was 252.50); ZC ×50 (was ×5000); a round turn banks $64.516 (not
+  ¥10 000); with no JPY file the allocation is refused and the server stays usable; with an empty one it refuses to start.
+
+---
+
 ## 2026-11-11 — Adrian's desk reaches the box through the Threadripper, with the box as its fallback
 
 - `Publish/RiskDesk/Templates/Adrian/MirrorConfig.json` — `ConnectAddresses` is now the Threadripper's relay port

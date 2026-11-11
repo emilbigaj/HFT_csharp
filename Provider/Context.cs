@@ -175,6 +175,11 @@ public abstract class Context
         return Path.Combine(directoryPath, "CoreGroups", coreGroupName + ".coregroup");
     }
 
+    public static FileSystemPath GetExchangeRateFilePath(FileSystemPath directoryPath, Currency currency)
+    {
+        return Path.Combine(directoryPath, "ExchangeRates", currency.ToString() + ".exchangerate");
+    }
+
     public static FileSystemPath GetLoggingServerDirectoryPath(FileSystemPath directoryPath)
     {
         return Path.Combine(directoryPath, "LoggingServer");
@@ -187,6 +192,7 @@ public abstract class Context
     public FileSystemPath MessageEfficiencyDirectoryPath { get; }
     public FileSystemPath RateLimitsDirectoryPath { get; }
     public FileSystemPath CoreGroupsDirectoryPath { get; }
+    public FileSystemPath ExchangeRatesDirectoryPath { get; }
     public FileSystemPath AuditDirectoryPath { get; }
     public FileSystemPath SeriesDirectoryPath { get; }
     public FileSystemPath WorkspaceDirectoryPath { get; }
@@ -222,6 +228,7 @@ public abstract class Context
     protected readonly SharedArray<RollingRateLimit> _rateLimits;
     protected readonly SharedArray<CoreGroup> _coreGroups;
     protected readonly SharedArray<Duration> _latencies;   // per CoreGroup's link; below 0: disconnected
+    protected readonly SharedArray<double> _exchangeRates;   // per Currency; dollars for one of its units, server-written at startup
 
     protected readonly Instrument[] _instruments;
     protected readonly Position[] _positions;
@@ -252,6 +259,8 @@ public abstract class Context
         Directory.CreateDirectory(RateLimitsDirectoryPath);
         CoreGroupsDirectoryPath = Path.Combine(DirectoryPath, "CoreGroups");
         Directory.CreateDirectory(CoreGroupsDirectoryPath);
+        ExchangeRatesDirectoryPath = Path.Combine(DirectoryPath, "ExchangeRates");
+        Directory.CreateDirectory(ExchangeRatesDirectoryPath);
         AlertsDirectoryPath = Path.Combine(DirectoryPath, "Alerts");
         Directory.CreateDirectory(AlertsDirectoryPath);
         AuditDirectoryPath = GetAuditDirectoryPath(DirectoryPath);
@@ -301,6 +310,9 @@ public abstract class Context
         _rateLimits = NewSharedArray<RollingRateLimit>(serverName / "RateLimits", serverHeader.CoreGroupIds.Length, ServerAccess);
         _coreGroups = NewSharedArray<CoreGroup>(serverName / "CoreGroups", serverHeader.CoreGroupIds.Length, ServerAccess);
         _latencies = NewSharedArray<Duration>(serverName / "Latency", serverHeader.CoreGroupIds.Length, ServerAccess);
+        // Dollars for one unit of each currency, by Currency value. The server loads it at startup; the Mirror copies it to
+        // every desk like any other array. Last, so no existing array id moves.
+        _exchangeRates = NewSharedArray<double>(serverName / "ExchangeRates", Currencies.s_capacity, ServerAccess);
 
         _instruments = new Instrument[serverHeader.InstrumentIds.Length];
         _positions = new Position[serverHeader.InstrumentIds.Length];
@@ -487,6 +499,14 @@ public abstract class Context
     // One per CoreGroup: its link's latency, below 0 while disconnected. On a remote copy, index 0 is the
     // Mirror link to the CME box, written by the Remote Mirror (see Spec.md "Remote workspaces").
     public ref SharedArrayEntry<Duration> GetLatency(int coreGroupId) => ref _latencies.GetEntry(coreGroupId);
+
+    // One per Currency, server-written at startup: the dollars one of its units is worth, which every
+    // instrument of that currency reads its profit through.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public ref SharedArrayEntry<double> GetExchangeRate(Currency currency)
+    {
+        return ref _exchangeRates.GetEntry((int)currency);
+    }
 
     // Throws when no loaded CoreGroup has that name: a client asking for a group the server does not have is a setup error.
     public int GetCoreGroupId(String16 coreGroupName)
@@ -677,12 +697,13 @@ public abstract class Context
         }
         ref SharedArrayEntry<InstrumentHeader256> header256Entry = ref GetInstrumentHeader(instrumentHeaderId);
         InstrumentHeader instrHeader = header256Entry.GetReadonlyRef().AsInstrumentHeader();
+        SharedArrayEntry<double> exchangeRateEntry = GetExchangeRate(instrHeader.Currency);
 
         Instrument? instrument = null;
 
         if (instrHeader.InstrumentType == InstrumentType.Future)
         {
-            instrument = new Future(header256Entry.Cast<FutureHeader>());
+            instrument = new Future(header256Entry.Cast<FutureHeader>(), exchangeRateEntry);
         }
         else if (instrHeader.InstrumentType == InstrumentType.Spread)
         {
@@ -700,11 +721,11 @@ public abstract class Context
                     shortLeg = legFuture;
             }
 
-            instrument = new Spread(header256Entry.Cast<LeggedHeader>(), longLeg, shortLeg);
+            instrument = new Spread(header256Entry.Cast<LeggedHeader>(), exchangeRateEntry, longLeg, shortLeg);
         }
         else if (instrHeader.InstrumentType == InstrumentType.Forex)
         {
-            instrument = new Forex(header256Entry.Cast<ForexHeader>());
+            instrument = new Forex(header256Entry.Cast<ForexHeader>(), exchangeRateEntry);
         }
         else
         {
@@ -936,7 +957,32 @@ public sealed class ServerContext : Context
                 rateLimit.RateLimitId = coreGroupId;
                 _rateLimits.GetEntry(coreGroupId).Write(new RollingRateLimit(rateLimit));
             }
+
+            // USD and USc are conversions, not quotes: nothing fetches them, so they are not worth a daily file. A file still wins.
+            _exchangeRates.GetEntry((int)Currency.USD).Write(1.0);
+            _exchangeRates.GetEntry((int)Currency.USc).Write(0.01);
+
+            // Dollars for one unit of every currency that has a file, its last line, as .risklimit is read. Why only the files
+            // present: a box that trades no yen needs no yen file, and an instrument whose currency has none is refused at
+            // allocation instead of being priced at zero. A replay values its yen at the file's newest rate (see Spec.md).
+            foreach (string exchangeRatePath in Directory.GetFiles(ExchangeRatesDirectoryPath, "*.exchangerate"))
+            {
+                Currency currency = Currencies.FromString(Path.GetFileNameWithoutExtension(exchangeRatePath));
+                string? exchangeRateLine = Tools.Tools.ReadLastLine(exchangeRatePath);
+                double usdRate = exchangeRateLine != null ? Json.Deserialize<ExchangeRate>(exchangeRateLine).UsdRate : double.NaN;
+                ThrowIfExchangeRateIsNotValid(currency, usdRate);
+                _exchangeRates.GetEntry((int)currency).Write(in usdRate);
+            }
         }
+    }
+
+    // A currency's rate must exist and be positive: NaN means its file is empty, 0 means it has no file at all.
+    // Why not on the read path: it is written once at startup and cannot change during the run (see Spec.md).
+    private static void ThrowIfExchangeRateIsNotValid(Currency currency, double usdRate)
+    {
+        // Why not <= 0: every comparison against NaN is false, so a missing rate would walk straight past that test
+        if (!(usdRate > 0))
+            throw new InvalidOperationException($"ServerContext.ThrowIfExchangeRateIsNotValid({currency}): rate is {usdRate}, must be greater than 0; add {currency}.exchangerate to the server's ExchangeRates folder and restart.");
     }
 
     public static void ThrowIfInvalidServerName(FileSystemPath serverName)
@@ -1125,6 +1171,8 @@ public sealed class ServerContext : Context
         {
             throw new InvalidOperationException($"{GetType()}.AllocateInstrument({instrumentHeaderId}), InstrumentIds is Full. InstrumentIds.Length: {serverHeader.InstrumentIds.Length}");
         }
+        // The server refuses an instrument it cannot price. Why before the lock: a throw past AcquireLock leaves the ServerHeader row odd for every reader
+        ThrowIfExchangeRateIsNotValid(header.Currency, GetExchangeRate(header.Currency).GetReadonlyRef());
         instrumentId = serverHeader.InstrumentIds.LowestClear;
 
         serverHeaderEntry.AcquireLock();

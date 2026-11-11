@@ -2105,6 +2105,72 @@ relay: it dials a relay desk (see "Relay") exactly as a desk dials, and to the b
   files, so GUIs restart freely within a run, and the mirror recreates a remote GUI's stand-in after a link drop; a GUI's
   file for one date is not cleared between runs that simulate that date. Realtime never deletes audit files.
 
+## A flat position with no quote is worth zero, not NaN (2026-11-12)
+
+`Position.Profit` had a branch per case: with a quote it marked the position at the mid, without one it returned `Total`
+and `Floating` as `NaN`. `Context.TryGetQuote` is false whenever the instrument is not `Open` or either side is empty, so
+every closed instrument took the second branch — including one the client is flat in, where there is nothing to revalue
+and the honest answer is zero. One NaN row then poisoned the positions widget's total, so the desk read "PnL: NaN"
+overnight because two single-stock futures it holds nothing in were shut.
+
+The two branches differed only in the mid price, and `GetProfit` already answers `quantity == 0 ? 0` before it looks at
+either price, so one path does both jobs: take the mid if there is a quote and `NaN` if there is not, and let `GetProfit`
+decide. Flat and closed is now `0` with `Total` equal to `Realized`; holding and closed is still `NaN`, which is correct —
+that position genuinely cannot be marked. Marking a held position at its last known price instead is a separate decision
+and has not been taken. The `IsEmpty()` branch above (a position row never written) still returns `NaN` and has the same
+flaw; it was left alone because nothing was seen taking it.
+
+## Every profit figure is USD (2026-11-12)
+
+`Instrument.GetProfit` was `(sell − buy) × Multiplier × quantity`, and a contract's multiplier is in the currency that
+contract quotes in. Nothing converted, so a yen contract's P&L was shown and banked in yen and a grain's in cents, and a
+desk total added them to a dollar figure as if they were dollars. Of the 2 980 catalog instruments, 612 are not USD:
+grains in `USc` (ZC, ZS, ZW, ZL, the micros, HRS, SIR), the Nikkei and TOPIX in `JPY` (NIY, MNI, TPY), `EUR` (ECF, EHR),
+`CNH`, `NOK` (ENK) and `SEK` (ESK). One tick of NIY is 5 × ¥500 = ¥2 500, which at 158.86 ¥/$ is $15.74 and read as
+2 500; beside one tick of the dollar Nikkei MNK at $2.50, the positions total read 2 502.50 where the truth is $18.24.
+Corn read 100× too big and had since it was listed.
+
+The header carries the **currency**, which is a fact about the contract and never changes; a separate shared array carries
+the **rate**, which is volatile. That split is the whole design: one write to a rate row revalues every instrument in that
+currency, where a rate in the header would mean restamping every header. `InstrumentHeader` gains `Currency` (one byte) at
+offset 72 of its fixed 128, so no existing offset moves and no overlay changes size. `<server>/ExchangeRates` is a
+`SharedArray<double>` of `Currencies.s_capacity` = 16 rows indexed by the enum value, created last so no array id moves —
+sized by a constant rather than the enum's count so that adding a currency later does not change the Mirror's layout hash
+and force every desk to reinstall the same day. The Mirror needs nothing new: `PublishRows` walks every array by id and
+byte-diffs it, and `RewriteNames` touches only `SharedArray<SocketHeader>`.
+
+`Instrument.UsdMultiplier` is `Multiplier` times its currency's row, read live and never cached, because a GUI open for a
+week must see a new rate; `GetValue` goes through it, so `GetProfit` and every caller convert without knowing it. The
+instrument is handed its rate entry at construction, as it already is its header entry — `Data` cannot reference
+`Provider`, and it is one load with no lookup on a path that runs per fill. `PositionHeader.OnFill` takes the converted
+multiplier, so `RealizedProfit` banks in dollars at the rate that applied when it was earned and never moves again, which
+is what the clearer does when it sweeps the day's yen; floating P&L revalues at the current rate, because it should.
+`Currency.USD = 0` is deliberate: an unstamped header reads dollars, exactly what every header meant before.
+
+Rates load once, in `ServerContext`'s write-mode constructor beside the CoreGroups. `USD` 1.0 and `USc` 0.01 are seeded in
+code — they are conversions, not quotes, nothing fetches them, and a box trading only USD products then needs no files at
+all; a file still wins if present. Then every `<server>/ExchangeRates/<currency>.exchangerate` present is read, last line
+first, as `.risklimit` is. Only the files present: a box that trades no yen needs no yen file. The filename is the
+currency through `Currencies.FromString`, which throws on an unknown name, so a typo'd `JYP.exchangerate` fails loudly
+rather than being skipped. `UsdRate` is dollars for one unit of the currency — the reciprocal of a 158.86 ¥/$ quote, not
+the quote; CME's 6J future quotes exactly that number if a live source is ever wanted.
+
+`ThrowIfExchangeRateIsNotValid` has two cold call sites and none on the read path, because the rate is written once at
+startup and cannot change during the run: the load above, and `AllocateInstrument`, which refuses an instrument whose
+currency has no rate rather than pricing it at zero. The test is `!(usdRate > 0)`, not `usdRate <= 0`, because every
+comparison against NaN is false and the `<= 0` form would let a missing rate straight through; NaN means the file is empty
+and 0 means nothing ever wrote the row, and one test catches both. In `AllocateInstrument` it sits above
+`AcquireLock()`, beside the `InstrumentIds.IsFull` throw: a throw past the lock would leave the `ServerHeader` row
+mid-write forever. Nothing checks on the hot path — in `Server.OnFill` the `UsdMultiplier` expression is evaluated between
+`AcquireLock()` on two position rows and their release, where a throw would brick both rows for every reader.
+
+Hot path: one extra 8-byte load and one multiply per profit figure, no allocation. Risk limits are quantity-only, so no
+rate can affect an order decision — a wrong rate misprices a display or a record, never a trade. Prices stay in the
+contract's own quote (¥50 000 for the Nikkei), which is correct and untouched. Residuals: a replay values its yen at the
+file's newest rate, not its own date's, because the load is `ReadLastLine`; and nothing writes `InstrumentHeader.Currency`
+on the C++ side yet, so a C++-fed server prices every instrument as USD until it does (see
+`cpp_alignment_report_2026-11-12_currency.md`).
+
 ## TickHistoryWriter crash safety (day-boundary resume only)
 
 A `TickHistoryWriter` may only be stopped at a day boundary and resumed on a later day. **Stop/resume
@@ -2189,6 +2255,10 @@ Each of these was seen in the harness or reasoned through and left as is on purp
 - **Session-close race (closed 2026-10-21).** Orders in flight when the session closes come back
   `NotInSessionInFlight`, a discarded reason, and do not pause the algo; see "An order in flight
   at a status change". Left: an exchange refusal that reaches the server before the status does.
+- **A replay values a foreign currency at today's rate.** The exchange-rate load is `ReadLastLine`,
+  matching `.risklimit`, so a 2022 Nikkei backtest marks its yen at the file's newest rate rather than
+  2022's. A dated scan was written and then dropped as not worth the code until a yen backtest matters;
+  see "Every profit figure is USD".
 - **Risk limit lowered mid-flight.** A limit lowered between the client's check and the server's
   read of the order refuses it at the server and pauses the algo. A fix (a discarded
   `RiskLimitChanged` reason) was declined.

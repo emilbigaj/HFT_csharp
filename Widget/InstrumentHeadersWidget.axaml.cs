@@ -48,6 +48,7 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
     public string Leg4 { get; private set; } = "";
     public string Leg5 { get; private set; } = "";
 
+    public string Currency { get; private set; } = "";
     public string BaseCurrency { get; private set; } = "";
     public string QuoteCurrency { get; private set; } = "";
 
@@ -76,6 +77,7 @@ public sealed class WidgetInstrumentHeader : INotifyPropertyChanged
         TickSize = (decimal)header.TickSize;
         InverseTickSize = header.InverseTickSize;
         TradingStatus = header.TradingStatus.ToString();
+        Currency = header.Currency.ToString();
 
         Multiplier = 1.0;
         MaturityDate = "";
@@ -164,6 +166,7 @@ public sealed partial class InstrumentHeadersWidget : UserControl, IWidget, IDis
         ["Leg3"] = r => r.Leg3,
         ["Leg4"] = r => r.Leg4,
         ["Leg5"] = r => r.Leg5,
+        ["Currency"] = r => r.Currency,
         ["BaseCurrency"] = r => r.BaseCurrency,
         ["QuoteCurrency"] = r => r.QuoteCurrency,
     };

@@ -1520,6 +1520,7 @@ public class ServerSimulator
                 ProductGroupRoot = new String4(instrumentDetails.ProductGroupRoot),
                 InverseTickSize = instrumentDetails.InverseTickSize,
                 TickSize = instrumentDetails.TickSize,
+                Currency = Currencies.FromString(instrumentDetails.Currency),
             };
             if (instrumentDetails.InstrumentType == InstrumentType.Future)
             {
@@ -1535,6 +1536,8 @@ public class ServerSimulator
                 leggedHeader.Multiplier = instrumentDetails.Multiplier;
 
                 List<(Leg Leg, InstrumentDetails Details)> legDetailsList = instrumentDetails.GetLegDetails();
+                // The legs are the source of truth here too: a spread pays in what its legs pay in, so its own file need not say
+                header.Currency = Currencies.FromString(legDetailsList[0].Details.Currency);
                 if (legDetailsList.Count > 6)
                     throw new NotSupportedException($"{instrumentDetails.Symbol}: {legDetailsList.Count} legs exceeds LeggedHeader capacity of 6.");
 

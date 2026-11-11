@@ -385,13 +385,13 @@ public class Server : IDisposable
 
         // Step 3: both rows under both locks, acquired from-to and released in reverse, as OnFill does with its two rows
         int instrumentId = controlTransferPosition.InstrumentId;
-        double multiplier = _serverContext.GetInstrument(instrumentId).Multiplier;
+        double usdMultiplier = _serverContext.GetInstrument(instrumentId).UsdMultiplier;
         ref SharedArrayEntry<PositionHeader> fromPositionEntry = ref _serverContext.GetPositionHeader(controlTransferPosition.FromStrategyId, instrumentId);
         ref SharedArrayEntry<PositionHeader> toPositionEntry = ref _serverContext.GetPositionHeader(controlTransferPosition.ToStrategyId, instrumentId);
         fromPositionEntry.AcquireLock();
         toPositionEntry.AcquireLock();
-        fromPositionEntry.GetRef().OnFill(in fromFill, multiplier);
-        toPositionEntry.GetRef().OnFill(in toFill, multiplier);
+        fromPositionEntry.GetRef().OnFill(in fromFill, usdMultiplier);
+        toPositionEntry.GetRef().OnFill(in toFill, usdMultiplier);
         toPositionEntry.ReleaseLock();
         fromPositionEntry.ReleaseLock();
 
@@ -741,8 +741,8 @@ public class Server : IDisposable
         {
             int instrumentId = fill.OrderHeader.OrderId.InstrumentId;
             Instrument instrument = _serverContext.GetInstrument(instrumentId);
-            _serverContext.GetPositionHeader(instrumentId).GetRef().OnFill(in fill, instrument.Multiplier);
-            _serverContext.GetPositionHeader(strategyId, instrumentId).GetRef().OnFill(in fill, instrument.Multiplier);
+            _serverContext.GetPositionHeader(instrumentId).GetRef().OnFill(in fill, instrument.UsdMultiplier);
+            _serverContext.GetPositionHeader(strategyId, instrumentId).GetRef().OnFill(in fill, instrument.UsdMultiplier);
             _riskLayer.OnFill(in fill);
         }
 

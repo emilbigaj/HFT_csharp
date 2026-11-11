@@ -581,7 +581,9 @@ public struct PositionHeader()
     public AlgoStatus AlgoStatus = AlgoStatus.Paused;
     public override string ToString() => Json.Serialize(this);
 
-    public void OnFill(in Fill fill, double multiplier)
+    // RealizedProfit banks in dollars at the rate that applied when it was earned, as the clearer sweeps the day's yen: a
+    // realized figure never changes afterwards, so an audit line means the same tomorrow (see Spec.md).
+    public void OnFill(in Fill fill, double usdMultiplier)
     {
         int quantity = fill.Quantity;
         double price = fill.Price;
@@ -602,7 +604,7 @@ public struct PositionHeader()
         {
             // Opposite-side trade: close some or all of the existing position
             int closed = Math.Min(Math.Abs(oldQty), Math.Abs(quantity));
-            double pnl = (price - AvgPrice) * closed * oldSide * multiplier;
+            double pnl = (price - AvgPrice) * closed * oldSide * usdMultiplier;
             RealizedProfit += pnl;
 
             if (newQty == 0)

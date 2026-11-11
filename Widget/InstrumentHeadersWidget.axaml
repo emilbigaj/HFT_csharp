@@ -49,6 +49,7 @@
 			<DataGridTextColumn Header="InverseTickSize" Binding="{Binding InverseTickSize}" SortMemberPath="InverseTickSize" IsVisible="False" />
 
 			<DataGridTextColumn Header="Multiplier" Binding="{Binding Multiplier}" SortMemberPath="Multiplier" IsVisible="True" />
+			<DataGridTextColumn Header="Currency" Binding="{Binding Currency}" SortMemberPath="Currency" IsVisible="True" />
 			<DataGridTextColumn Header="MaturityDate" Binding="{Binding MaturityDate}" SortMemberPath="MaturityDate" IsVisible="False" />
 
 			<DataGridTextColumn Header="Leg0" Binding="{Binding Leg0}" SortMemberPath="Leg0" IsVisible="False" />

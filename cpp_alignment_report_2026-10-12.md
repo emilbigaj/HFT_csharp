@@ -1372,6 +1372,22 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
 - **Not ported, still open:** CME also triples spread volume, counts an eliminated FAK as a raw message weighted 3, and runs
   a firm-level EMT (10 million / 500; SOFR futures 5 million / 50). All three remain accepted residuals on both sides.
 
+### P48. MUST PORT: every profit figure is USD (C# `Data/Currency.cs`, `Data/Instrument.cs`, `Provider/Context.cs`, `Execution/Order.cs`; 2026-11-12)
+
+- **Specified in full in `cpp_alignment_report_2026-11-12_currency.md`.** Summarised here so the list is complete.
+- **Was:** `Instrument::GetProfit` multiplied by the contract's own multiplier, which is in the currency the contract
+  quotes in. 612 of the 2 980 catalog instruments are not USD, so a yen contract's P&L was banked and shown in yen and a
+  grain's in cents, and a desk total added them as if they were dollars.
+- **Now:** `InstrumentHeader` gains `Currency` (1 byte) at offset 72 of its fixed 128, so no existing offset moves and no
+  overlay changes size. A new shared array `<server>/ExchangeRates` (`double`, capacity 16, indexed by the `Currency`
+  value) is created **last**, after `<server>/Latency`. `Instrument::UsdMultiplier` is the multiplier times that row, read
+  live, and `GetValue` goes through it; every `OnFill` call site passes it instead of the raw multiplier.
+- **This changes `GetLayoutHash()`.** Every Mirror end deploys together (§10). Nothing else is needed for the Mirror:
+  `PublishRows` is generic over array id and `RewriteNames` touches only `SharedArray<SocketHeader>`.
+- **Port:** whoever builds an instrument header must set `Currency` from the catalog, a spread from its legs. Until then
+  every instrument answers `USD = 0` and prices as it does today, which is safe for the USD book but still wrong for a
+  yen or grain contract: do not allocate NIY, MNI, TPY or a grain on a C++-fed server until this is stamped.
+
 ---
 
 ## 8. Do not port (C#-only)

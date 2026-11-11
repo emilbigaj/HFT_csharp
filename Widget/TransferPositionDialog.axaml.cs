@@ -159,7 +159,7 @@ public partial class TransferPositionDialog : Window
     private void ShowPreviewRow(TransferBook transferBook, in PositionHeader positionHeader, Fill transferFill, TextBlock nameText, TextBlock beforeText, TextBlock afterText, TextBlock realizedText)
     {
         PositionHeader positionHeaderAfter = positionHeader;
-        positionHeaderAfter.OnFill(in transferFill, _instrument.Multiplier);
+        positionHeaderAfter.OnFill(in transferFill, _instrument.UsdMultiplier);
         nameText.Text = transferBook.Name;
         beforeText.Text = $"{positionHeader.Quantity:+0;-0;0}";
         afterText.Text = $"{positionHeaderAfter.Quantity:+0;-0;0}";

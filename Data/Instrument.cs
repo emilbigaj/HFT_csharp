@@ -59,6 +59,7 @@ public struct InstrumentHeader()
     public int ExchangeInstrumentId;
     public String4 ProductGroupRoot;   // the group CME counts its message efficiency under (MDP3 SecurityGroup), set by whoever builds the header
     public Timestamp TradingStatusTimestamp;   // @64: exchange time TradingStatus last changed; MinValue never. Server only, written before TradingStatus
+    public Currency Currency;   // @72: what the contract pays in, from the catalog; USD unstamped, set by whoever builds the header
 }
 
 // Why every member is readonly: rows are read through ref readonly, where a non-readonly call copies the row and its As* ref points into the dead copy
@@ -231,6 +232,9 @@ public abstract class Instrument
     protected SharedArrayEntry<InstrumentHeader256> _headerEntry;
     public ref readonly InstrumentHeader Header => ref _headerEntry.GetReadonlyRef().AsInstrumentHeader();
 
+    // This instrument's currency's row in the server's ExchangeRates, handed over at construction: Data cannot reach the context.
+    protected SharedArrayEntry<double> _exchangeRateEntry;
+
     // This process's own book, built by its Client from the server's snapshot and the instrument's feed, on the feed thread
     // only; never filled in a process with no feed (the server writes its shared book through its Context, a GUI reads that).
     private MarketByPrice64 _marketByPrice;
@@ -346,9 +350,10 @@ public abstract class Instrument
     // > 1: every instrument is its own single leg (base ctor); legged means legs BEYOND itself.
     public bool IsLegged => _legs.Length > 1;
 
-    protected Instrument(SharedArrayEntry<InstrumentHeader256> headerEntry)
+    protected Instrument(SharedArrayEntry<InstrumentHeader256> headerEntry, SharedArrayEntry<double> exchangeRateEntry)
     {
         _headerEntry = headerEntry;
+        _exchangeRateEntry = exchangeRateEntry;
         _quote = new Quote() { TickSize = TickSize };
         TickDecimals = Tools.Tools.GetNumberOfDecimalPlaces(TickSize);
         PriceFormat = $"N{TickDecimals}";
@@ -357,11 +362,15 @@ public abstract class Instrument
     }
 
     // --- Core HFT Helpers ---
+    // The contract's multiplier in dollars: its own, times its currency's rate. Read live, never cached: a GUI open for a
+    // week must see a new rate, and every profit figure in the system is USD whatever the contract quotes in (see Spec.md).
+    public double UsdMultiplier => Multiplier * _exchangeRateEntry.GetReadonlyRef();
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public double GetProfit(double buyPrice, double sellPrice, int quantity) => quantity == 0 ? 0 : GetValue(sellPrice - buyPrice) * quantity;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public double GetValue(double price) => price * Multiplier;
+    public double GetValue(double price) => price * UsdMultiplier;
 
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -399,8 +408,8 @@ public class Future : Instrument
     public Timestamp MaturityDate => _headerEntry.GetReadonlyRef().AsFuture().MaturityDate;
     public ref readonly FutureHeader FutureHeader => ref _headerEntry.GetReadonlyRef().AsFuture();
 
-    public Future(SharedArrayEntry<FutureHeader> headerEntry)
-        : base(headerEntry.Cast<InstrumentHeader256>())
+    public Future(SharedArrayEntry<FutureHeader> headerEntry, SharedArrayEntry<double> exchangeRateEntry)
+        : base(headerEntry.Cast<InstrumentHeader256>(), exchangeRateEntry)
     {
         Multiplier = FutureHeader.Multiplier;
     }
@@ -436,8 +445,8 @@ public sealed class Forex : Instrument
    public ref readonly ForexHeader ForexHeader => ref _headerEntry.GetReadonlyRef().AsForex();
 
 
-    public Forex(SharedArrayEntry<ForexHeader> headerEntry)
-        : base(headerEntry.Cast<InstrumentHeader256>())
+    public Forex(SharedArrayEntry<ForexHeader> headerEntry, SharedArrayEntry<double> exchangeRateEntry)
+        : base(headerEntry.Cast<InstrumentHeader256>(), exchangeRateEntry)
     {
     }
 }
@@ -454,8 +463,8 @@ public sealed class Spread : Instrument
     public ref readonly LeggedHeader SpreadHeader => ref _headerEntry.GetReadonlyRef().AsLegged();
 
 
-    public Spread(SharedArrayEntry<LeggedHeader> headerEntry, Future @long, Future @short)
-        : base(headerEntry.Cast<InstrumentHeader256>())
+    public Spread(SharedArrayEntry<LeggedHeader> headerEntry, SharedArrayEntry<double> exchangeRateEntry, Future @long, Future @short)
+        : base(headerEntry.Cast<InstrumentHeader256>(), exchangeRateEntry)
     {
         Long = @long;
         Short = @short;

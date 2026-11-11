@@ -99,15 +99,10 @@ public sealed class Position
 
                 PositionHeader positionHeader = _headerEntry.Read();
 
-                if (_context.TryGetQuote(Instrument.InstrumentId, out Quote quote))
-                {
-                    double floating = Instrument.GetProfit(positionHeader.AvgPrice, quote.MidPrice, positionHeader.Quantity);
-                    return new Profit(Clock.Now, floating + positionHeader.RealizedProfit, floating, positionHeader.RealizedProfit, positionHeader.Quantity, positionHeader.AvgPrice, quote.MidPrice);
-                }
-                else
-                {
-                    return new Profit(Clock.Now, double.NaN, double.NaN, positionHeader.RealizedProfit, positionHeader.Quantity, positionHeader.AvgPrice, double.NaN);
-                }
+                // No quote (the instrument is not Open, or a side is empty) marks at NaN, which GetProfit turns into 0 for a flat row: nothing to revalue.
+                double midPrice = _context.TryGetQuote(Instrument.InstrumentId, out Quote quote) ? quote.MidPrice : double.NaN;
+                double floating = Instrument.GetProfit(positionHeader.AvgPrice, midPrice, positionHeader.Quantity);
+                return new Profit(Clock.Now, floating + positionHeader.RealizedProfit, floating, positionHeader.RealizedProfit, positionHeader.Quantity, positionHeader.AvgPrice, midPrice);
             }
         }
     }
