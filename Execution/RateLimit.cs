@@ -13,11 +13,11 @@ public sealed class CMEGetWeightedMessage
     public bool IsRegularTradingHours => SessionManager.IsInSession;
 
     // The MEP's weight, and in emtWeightedMessage the EMT's (Excessive Messaging Threshold's): a new order 0, a cancel 3, an
-    // amend 1, the MEP's ×0.1 outside regular trading hours.
-    public double GetWeightedMessage(OrderTargetAction orderTargetAction, out double emtWeightedMessage)
+    // amend 1, the MEP's ×0.1 outside regular trading hours and for anything but a lead-month outright (see Spec.md).
+    public double GetWeightedMessage(OrderTargetAction orderTargetAction, bool isFrontMonthOutright, out double emtWeightedMessage)
     {
         emtWeightedMessage = orderTargetAction == OrderTargetAction.Create ? 0 : orderTargetAction == OrderTargetAction.Cancel ? 3 : 1;
-        return emtWeightedMessage * (IsRegularTradingHours ? 1 : 0.1);
+        return emtWeightedMessage * (IsRegularTradingHours && isFrontMonthOutright ? 1 : 0.1);
     }
 }
 
@@ -81,10 +81,10 @@ public struct MessageEfficiency()
     };
 
     // Whether one more message keeps the day within the EMT (TierEMT, EMT score) and the MEP tier it is in (Tier1-3, MEP score); a cancel always may.
-    public bool CanSend(OrderTargetAction orderTargetAction, CMEGetWeightedMessage messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages)
+    public bool CanSend(OrderTargetAction orderTargetAction, bool isFrontMonthOutright, CMEGetWeightedMessage messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages)
     {
         rawMessages = RawMessages + 1;
-        weightedMessages = WeightedMessages + messageWeighter.GetWeightedMessage(orderTargetAction, out double emtWeightedMessage);
+        weightedMessages = WeightedMessages + messageWeighter.GetWeightedMessage(orderTargetAction, isFrontMonthOutright, out double emtWeightedMessage);
         emtWeightedMessages = EMTWeightedMessages + emtWeightedMessage;
         bool isWithinEMT = TierEMT.IsWithin(rawMessages, emtWeightedMessages * InverseQuantityTraded);
         bool isWithinMEP = GetMEPTier(rawMessages).IsWithin(rawMessages, weightedMessages * InverseQuantityTraded);
@@ -99,9 +99,9 @@ public struct MessageEfficiency()
     public readonly double GetMEPWarningRatio() => Math.Max(Tier1.GetWarningRatio(RawMessages, Efficiency), Math.Max(Tier2.GetWarningRatio(RawMessages, Efficiency), Tier3.GetWarningRatio(RawMessages, Efficiency)));
 
     // Always sends, regardless of efficiency.
-    public bool Send(OrderTargetAction orderTargetAction, CMEGetWeightedMessage messageWeighter)
+    public bool Send(OrderTargetAction orderTargetAction, bool isFrontMonthOutright, CMEGetWeightedMessage messageWeighter)
     {
-        bool canSend = CanSend(orderTargetAction, messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages);
+        bool canSend = CanSend(orderTargetAction, isFrontMonthOutright, messageWeighter, out int rawMessages, out double weightedMessages, out double emtWeightedMessages);
         RawMessages = rawMessages;
         WeightedMessages = weightedMessages;
         EMTWeightedMessages = emtWeightedMessages;

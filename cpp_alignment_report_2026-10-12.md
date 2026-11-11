@@ -1347,6 +1347,33 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
 
 ---
 
+### P47. MUST PORT: message efficiency's full weight is the lead month's only (C# `Execution/RateLimit.cs`, `Data/Instrument.cs`, `Provider/Client.cs`; 2026-11-11)
+
+- **Was:** `CMEGetWeightedMessage::GetWeightedMessage(action, out emt)` returned the EMT weight (create 0, amend 1, cancel 3)
+  times 1 inside 07:00-16:00 CT and 0.1 outside it. CME scores from three tables, not one (its Messaging Efficiency Program
+  document, section 3): the full weight is charged only for a lead-month **outright** in regular hours, and a back month or a
+  spread is a tenth of it at every hour. So a back-month or spread day scored ten times what CME scores it.
+- **Now:** the method takes `bool isFrontMonthOutright` between `action` and the `out`, and the multiplier is
+  `IsRegularTradingHours && isFrontMonthOutright ? 1 : 0.1`. `MessageEfficiency::CanSend` and `::Send` take the same flag in
+  the same position and pass it through. The EMT weight is untouched: sections 15 and 16 score amend 1 and cancel 3 at every
+  hour and in every month.
+- **Where the flag comes from:** `InstrumentHeader256::IsFrontMonthOutright()`, true only when
+  `InstrumentType == Future` **and** that overlay's `FutureHeader::IsFrontMonth` is set. Do not route it through `AsFuture()`:
+  that throws for a spread, which here is an ordinary answer, not an error. `Instrument::IsFrontMonthOutright` is the
+  one-liner over it, and `Client::OnOrderTarget` reads the instrument once for both the group row and the flag.
+- **Wire and layout:** `FutureHeader` gains `bool IsFrontMonth` (1 byte) after `MaturityDate`, inside the fixed 256-byte
+  `InstrumentHeader256` overlay, so no shared array's `TypeSize` changes and the layout hash is the same. `InstrumentHeader`
+  itself (`Size = 128`) is unchanged, so the other overlays keep their offsets. Both sides must agree on the byte: a C++
+  server that leaves it zero scores every group at a tenth.
+- **Port:** add the field to `FutureHeader`, the two header helpers, and the flag to the three method signatures. Whoever
+  builds a future's header sets `IsFrontMonth` from CME's lead-month flag (its Reference Data API's `Y`/`N`; the box already
+  fetches `LeadMonths.json` into `/mnt/S/CME/Production/Config/` daily). Until something writes it, every instrument answers
+  false and every group scores at a tenth, which is the permissive direction: do not ship the weighting without the writer.
+- **Not ported, still open:** CME also triples spread volume, counts an eliminated FAK as a raw message weighted 3, and runs
+  a firm-level EMT (10 million / 500; SOFR futures 5 million / 50). All three remain accepted residuals on both sides.
+
+---
+
 ## 8. Do not port (C#-only)
 
 Nothing below needs C++ code. Where a C#-only feature put a value on a shared wire or into shared memory, the value is

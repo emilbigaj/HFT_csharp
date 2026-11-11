@@ -1379,8 +1379,8 @@ construction, JSON loads included: a line written before the header existed stil
 **Two CME limits on one row (2026-10-20).** The row judges a product group's day against both of CME's messaging
 limits (CME's "Messaging Efficiency Program" document, sections 6 and 15):
 - **MEP tiers, `Tier1`-`Tier3`** (per Globex firm): the tier the day's `RawMessages` falls in (>50k, >100k, >150k; at or
-  below 50k none) holds `Efficiency` (`WeightedMessages` per lot: amend 1, cancel 3, ×0.1 outside 07:00-16:00 CT) below
-  its benchmark. Values per group from CME's quarterly benchmark list.
+  below 50k none) holds `Efficiency` (`WeightedMessages` per lot: amend 1, cancel 3, ×0.1 outside 07:00-16:00 CT and for
+  anything but a lead-month outright) below its benchmark. Values per group from CME's quarterly benchmark list.
 - **EMT, `TierEMT`** (CME's iLink session Excessive Messaging Threshold): once `RawMessages` passes 1,000,000,
   `EMTEfficiency` (`EMTWeightedMessages` per lot: the same weights with no overnight discount) must stay at or below 500.
   It applies to every group, at all hours, with no waivers; a breach costs $10,000 and closes the iLink port, so every
@@ -1397,10 +1397,23 @@ limits (CME's "Messaging Efficiency Program" document, sections 6 and 15):
 - `S:\CME\MessageEfficiency` holds one file per group: the 75 groups of CME's Q3 2026 list with their tiers and every
   other group in the instrument details with `TierEMT` only (1,000,000 / 500). "J1-JT" in CME's list is written out as
   J1-J6, J9, JT.
-- Not counted, accepted for now: eliminated FAKs (CME counts each as a raw message weighted 3), front/back-month and spread
-  weights (CME weighs back months and spreads in regular hours ×0.1, and triples spread volume), and the firm-level EMT
-  (10 million / 500; SOFR futures 5 million / 50). The counts are the clients' (see above), so a message the server refuses
-  is counted and the server's own cancels are not.
+- Not counted, accepted for now: eliminated FAKs (CME counts each as a raw message weighted 3), spread volume (CME triples
+  it), and the firm-level EMT (10 million / 500; SOFR futures 5 million / 50). The counts are the clients' (see above), so a
+  message the server refuses is counted and the server's own cancels are not.
+
+**The lead month carries the full weight (2026-11-11).** CME scores a message from three tables, not one (its document,
+section 3): amend 1 and cancel 3 for a lead-month outright in regular hours, and a tenth of that for a back month and for
+every spread, at every hour. Before, only the hour was read, so a back-month or spread day scored ten times what CME scores
+it, and a strategy quoting one met our tier at a tenth of its real allowance. `CMEGetWeightedMessage.GetWeightedMessage`
+now takes `isFrontMonthOutright` and applies the ×0.1 when it is false, as it already did outside regular hours;
+`MessageEfficiency.CanSend` and `Send` pass it through. The fact belongs to the header, not the caller:
+`InstrumentHeader256.IsFrontMonthOutright()` is true only for an `InstrumentType.Future` whose `FutureHeader.IsFrontMonth`
+is set, so a spread answers false by construction and no site decides it twice; `Instrument.IsFrontMonthOutright` is the
+one-liner over it, and `Client.OnOrderTarget` reads the instrument once for both the group row and the flag. The EMT is
+unweighted at both ends (sections 15 and 16 score amend 1 and cancel 3 at every hour and in every month), so
+`EMTWeightedMessages` is unchanged. Hot path: no allocation, one byte load and one branch per send. Residual: nothing
+writes `FutureHeader.IsFrontMonth` yet, so until the feed sets it every instrument answers false and every group scores at
+a tenth, which is the permissive direction.
 
 Only Realtime writes the files. Clients never write them: before, every process that allocated the group (each
 strategy, each Workspace, each Local Mirror stand-in) appended its view of the same shared row at every close and at
@@ -1920,6 +1933,14 @@ box as one of this desk's GUIs, the box starts the real stand-in `ManualClient`,
 `AllocatedClientId` path. A phone's call travels phone `RemoteClient` → phone `RemoteMirror` → `Message` → relay
 `LocalMirror.ApplyMessage` → relay `RemoteClient` → relay `RemoteMirror` → `Message` → box stand-in → server. Each hop
 has one representative per GUI, as the box has.
+
+A relay is not only for phones: another desk dials that port the same way, and the relay's `LocalMirror` is the class the
+box itself uses, so it serves as many Remotes as the box does. Since 2026-11-11 Adrian's desk lists the Threadripper's
+relay port first and the box second, so it reaches the box through the Threadripper while that desk is up and falls back
+to a session of its own when it is not. The cost of the arrangement is availability, not latency: his desk now depends on
+the Threadripper's Mirror running, and a fallback is kept until it dies (see "Dialling in order of preference"), so a
+restart of the Threadripper inside the two-second connect timeout brings him back to it and a slower one leaves him on
+the box until his next restart.
 - **To the box the phone is one more Workspace window on the relay desk**: the same session, the same 10 publishes a
   second, one more stand-in (what a second window costs). The box never knows the phone; nothing on it is configured.
   Declined (2026-10-27): the phone as a second session of the box through a port forward on the desk, which would have

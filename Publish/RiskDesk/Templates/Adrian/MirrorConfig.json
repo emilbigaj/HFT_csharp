@@ -4,7 +4,7 @@
   "ClockMode": "Realtime",
   "ListenPort": 0,
   "IPWhitelist": [],
-  "ConnectAddresses": ["100.119.146.54:27793"], // Tailscale; was ListenPort 27793 with IPWhitelist ["204.14.4.196"], the box dialling in
+  "ConnectAddresses": ["100.86.63.127:27794", "100.119.146.54:27793"], // in order of preference: the Threadripper's relay port, then the box direct; no switch back once on the box
   "DirectoriesRoot": "Data",
   "IsConsoleVisible": true,
   "IsFolderSyncOn": true

@@ -119,6 +119,13 @@ public struct InstrumentHeader256
     {
         return ref Unsafe.As<InstrumentHeader256, InstrumentHeader>(ref Unsafe.AsRef(in this));
     }
+
+    // CME charges message efficiency's full weight only for a lead-month outright, a tenth for a back month and for every
+    // spread (see Spec.md). Why not AsFuture: it throws for a spread, which is the common answer here, not an error.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly bool IsFrontMonthOutright() =>
+        AsInstrumentHeader().InstrumentType == InstrumentType.Future
+        && Unsafe.As<InstrumentHeader256, FutureHeader>(ref Unsafe.AsRef(in this)).IsFrontMonth;
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -139,6 +146,7 @@ public struct FutureHeader
     public InstrumentHeader InstrumentHeader;
     public double Multiplier;
     public Timestamp MaturityDate;
+    public bool IsFrontMonth;
 
     public FutureSymbology Symbology =>
         new FutureSymbology(
@@ -217,6 +225,8 @@ public delegate void TradingStatusUpdateEvent(in TradingStatusUpdate tradingStat
 public abstract class Instrument
 {
     public int ProductGroupId => Header.ProductGroupId;
+    // What CME's message-efficiency weight turns on: false for a spread and for a back month (see InstrumentHeader256).
+    public bool IsFrontMonthOutright => _headerEntry.GetReadonlyRef().IsFrontMonthOutright();
 
     protected SharedArrayEntry<InstrumentHeader256> _headerEntry;
     public ref readonly InstrumentHeader Header => ref _headerEntry.GetReadonlyRef().AsInstrumentHeader();

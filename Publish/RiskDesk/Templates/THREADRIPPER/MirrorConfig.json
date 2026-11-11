@@ -8,5 +8,5 @@
   "IsConsoleVisible": true,
   "IsFolderSyncOn": true,
   "RelayListenPort": 27794,
-  "RelayIPWhitelist": ["100.99.246.93"]
+  "RelayIPWhitelist": ["100.99.246.93", "100.125.122.28"] // emils-s22, adrian-laptop
 }

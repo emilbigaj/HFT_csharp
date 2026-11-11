@@ -12,6 +12,7 @@ using System.IO;
 using System.Threading;
 using System.IO.Enumeration;
 using System;
+using System.Collections.Generic;
 
 namespace Simulator;
 
@@ -1291,7 +1292,7 @@ public class ServerSimulator
     }
 
     // One timetable per exchange (XCME, XCBT, ...), made the first time one of its instruments is allocated.
-    public System.Collections.Generic.Dictionary<string, SessionManager> SessionManagerByExchange { get; } = new System.Collections.Generic.Dictionary<string, SessionManager>();
+    public Dictionary<string, SessionManager> SessionManagerByExchange { get; } = new Dictionary<string, SessionManager>();
 
     // Server has already allocated the instrument and opened its broadcast ring; all that is left is
     // to give the exchange sim a matching book to match against, and to drive its TradingStatus from its exchange's session.
@@ -1533,7 +1534,7 @@ public class ServerSimulator
                 ref LeggedHeader leggedHeader = ref Unsafe.As<InstrumentHeader256, LeggedHeader>(ref header256);
                 leggedHeader.Multiplier = instrumentDetails.Multiplier;
 
-                System.Collections.Generic.List<(Leg Leg, InstrumentDetails Details)> legDetailsList = instrumentDetails.GetLegDetails();
+                List<(Leg Leg, InstrumentDetails Details)> legDetailsList = instrumentDetails.GetLegDetails();
                 if (legDetailsList.Count > 6)
                     throw new NotSupportedException($"{instrumentDetails.Symbol}: {legDetailsList.Count} legs exceeds LeggedHeader capacity of 6.");
 
@@ -1577,6 +1578,66 @@ public class ServerSimulator
         }
     }
 
+    // Marks each product's front month for the whole run: at the start every contract and every maturity is known, so one
+    // ordered walk per product schedules every handover and nothing searches when a contract rolls (see spec.txt).
+    // Simulation's stand-in for CME's lead-month flag, which moves days before expiry where this moves at it.
+    private void SetFrontMonths(Timestamp begin)
+    {
+        // Step 1: collect each product's live futures, keyed by exchange and root as GetFutureChain filters them
+        Dictionary<string, List<int>> instrumentHeaderIdsByProduct = new Dictionary<string, List<int>>();
+        for (int instrumentHeaderId = 0; instrumentHeaderId < _instrumentDetailsByInstrumentHeaderId.Count; instrumentHeaderId++)
+        {
+            InstrumentDetails instrumentDetails = _instrumentDetailsByInstrumentHeaderId[instrumentHeaderId];
+            // Why begin: a contract that matured before the run started was never this run's front month
+            if (instrumentDetails.InstrumentType != InstrumentType.Future || instrumentDetails.MaturityDate!.Value <= begin)
+                continue;
+
+            string product = $"{instrumentDetails.Exchange} {instrumentDetails.Root}";
+            if (!instrumentHeaderIdsByProduct.TryGetValue(product, out List<int>? instrumentHeaderIds))
+                instrumentHeaderIdsByProduct[product] = instrumentHeaderIds = new List<int>();
+            instrumentHeaderIds.Add(instrumentHeaderId);
+        }
+
+        // Step 2: walk each product's maturities in order; the nearest is front now, each later one takes over at the one before it
+        foreach (List<int> instrumentHeaderIds in instrumentHeaderIdsByProduct.Values)
+        {
+            instrumentHeaderIds.Sort((leftInstrumentHeaderId, rightInstrumentHeaderId) => GetMaturityDate(leftInstrumentHeaderId).CompareTo(GetMaturityDate(rightInstrumentHeaderId)));
+            SetFrontMonth(instrumentHeaderIds[0], isFrontMonth: true);
+
+            for (int maturityIndex = 1; maturityIndex < instrumentHeaderIds.Count; maturityIndex++)
+            {
+                // Why the locals: a for counter is one variable for every iteration, so a lambda over it would see only the last
+                int previousInstrumentHeaderId = instrumentHeaderIds[maturityIndex - 1];
+                int nextInstrumentHeaderId = instrumentHeaderIds[maturityIndex];
+
+                // Why bounded, and why break: a handover past the run's end never fires, but the clock takes the earliest
+                // pending reminder as its next stop, so one would drag the last tick past End; maturities are ascending
+                Timestamp handoverTimestamp = GetMaturityDate(previousInstrumentHeaderId);
+                if (handoverTimestamp >= Clock.End)
+                    break;
+
+                Clock.AddReminder(new Reminder(handoverTimestamp, timestamp =>
+                {
+                    SetFrontMonth(previousInstrumentHeaderId, isFrontMonth: false);
+                    SetFrontMonth(nextInstrumentHeaderId, isFrontMonth: true);
+                }));
+            }
+        }
+    }
+
+    // The maturity of a loaded future, by header id.
+    private Timestamp GetMaturityDate(int instrumentHeaderId) => _instrumentDetailsByInstrumentHeaderId[instrumentHeaderId].MaturityDate!.Value;
+
+    // Publishes one future's front-month flag, as every other scheduled header change is written: read the row, change the copy, write it back.
+    private void SetFrontMonth(int instrumentHeaderId, bool isFrontMonth)
+    {
+        ref SharedArrayEntry<InstrumentHeader256> header256Entry = ref ServerContext.GetInstrumentHeader(instrumentHeaderId);
+        InstrumentHeader256 changedHeader256 = header256Entry.Read();
+        ref FutureHeader changedFutureHeader = ref changedHeader256.AsFuture();
+        changedFutureHeader.IsFrontMonth = isFrontMonth;
+        header256Entry.Write(changedHeader256);
+    }
+
     public void Init()
     {
         if (Clock.IsRunning)
@@ -1613,6 +1674,9 @@ public class ServerSimulator
 
     public void Connect()
     {
+        // Why here and not the constructor: the scenario loads every product after this call but before the clock starts,
+        // and Init's own Started handler is registered first, so by ours the admin drain is done and every header is published.
+        Clock.Started += SetFrontMonths;
         _server.Connect();
     }
 

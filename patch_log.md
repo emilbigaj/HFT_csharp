@@ -4,6 +4,57 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-11-11 — Adrian's desk reaches the box through the Threadripper, with the box as its fallback
+
+- `Publish/RiskDesk/Templates/Adrian/MirrorConfig.json` — `ConnectAddresses` is now the Threadripper's relay port
+  (`100.86.63.127:27794`) then the box (`100.119.146.54:27793`), in that order of preference.
+- `Publish/RiskDesk/Templates/THREADRIPPER/MirrorConfig.json` — `RelayIPWhitelist` gains `100.125.122.28` (adrian-laptop)
+  beside `100.99.246.93` (emils-s22); the relay admits only the addresses listed there.
+- Why: one fewer direct session on the box. The relay runs the same `LocalMirror` class the box does, so it serves a desk
+  as readily as a phone. Spec.md "Relay: a desk serves its copy onward".
+- Cost: availability, not latency. His desk depends on the Threadripper's Mirror running, and a fallback is kept until it
+  dies, so a Threadripper restart slower than the 2 s connect timeout leaves him on the box until his next restart.
+- Templates only: `Publish.ps1` copies Templates into Staging, so this reaches Adrian on the next publish and install, or
+  he edits the one line in his own `MirrorConfig.json`. Config only, no code.
+
+---
+
+## 2026-11-11 — The simulator marks each product's front month for the whole run
+
+- `Simulator/ServerSimulator.cs` — `SetFrontMonths`, on `Clock.Started` from `Connect`, groups the loaded futures by exchange
+  and root, drops any contract matured before the run began, sorts each product's maturities, marks the nearest front, and adds
+  one `Clock` reminder per later contract at its predecessor's maturity to hand over, stopping at `Clock.End`: a reminder past
+  the run's end never fires, and `RunSimulation` takes the earliest pending one as its next stop, so it would drag the final
+  tick past `End`. `SetFrontMonth` writes the header as the scheduled tick-size change does (read the row, change the copy,
+  write it back); `GetMaturityDate` is the lookup over the details map.
+- Why: nothing wrote `FutureHeader.IsFrontMonth`, so every group scored at a tenth (the entry below). Deciding it at allocation
+  would depend on the order the details search returned files in, and searching siblings at each roll would re-derive an
+  ordering the start of the run already had. Simulator/spec.txt "The Front Month Is Marked for the Whole Run".
+- Accepted: the handover is at expiry where CME's lead month moves several days earlier, and live takes CME's own Y/N flag, so
+  a backtest and a live day can disagree in a contract's last week.
+- Small refactors: `using System.Collections.Generic` added, so `SessionManagerByExchange` and `legDetailsList` drop the
+  fully-qualified names they carried for want of it. Code: +64 lines net, simulation only.
+
+---
+
+## 2026-11-11 — Message efficiency charges the full weight only for a lead-month outright
+
+- `Execution/RateLimit.cs` — `CMEGetWeightedMessage.GetWeightedMessage` takes `isFrontMonthOutright` and applies the MEP's
+  ×0.1 when it is false, as it already did outside 07:00-16:00 CT. `MessageEfficiency.CanSend` and `Send` pass it through.
+  `EMTWeightedMessages` is unchanged: the EMT weighs every hour and every month alike.
+- `Data/Instrument.cs` — `InstrumentHeader256.IsFrontMonthOutright()`, true only for an `InstrumentType.Future` whose
+  `FutureHeader.IsFrontMonth` is set, so a spread answers false by construction (`AsFuture` would throw on one).
+  `Instrument.IsFrontMonthOutright` is the one-liner over it.
+- `Provider/Client.cs` — `OnOrderTarget` reads the instrument once and passes both its `ProductGroupId` and the flag.
+- Why: CME scores a message from three weight tables (its document, section 3), amend 1 / cancel 3 only for a lead-month
+  outright in regular hours and a tenth for a back month or a spread at any hour. Reading the hour alone scored a
+  back-month or spread day ten times what CME scores it, so a strategy quoting one met its tier at a tenth of the real
+  allowance. Spec.md "The lead month carries the full weight".
+- Residual: nothing writes `FutureHeader.IsFrontMonth` yet, so every instrument answers false and every group scores at a
+  tenth until the feed sets it. C++ report P47. Hot path: no allocation, one byte load and one branch per send. Code: +10 lines.
+
+---
+
 ## 2026-11-07 — Every ring has eight channels per direction; a region of another length is refused
 
 - `Socket/Socket.cs` — `SocketChannel.ChannelLengths`, one constant array (eight channels per direction, one hugepage each,

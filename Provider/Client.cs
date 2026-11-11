@@ -735,8 +735,8 @@ public abstract class Client
         if (sent)
         {
             Targets += 1UL;
-            int productGroupId = Context.GetInstrument(orderTarget.OrderHeader.OrderId.InstrumentId).ProductGroupId;
-            Context.GetMessageEfficiency(productGroupId).GetRef().Send(orderTarget.OrderTargetAction, CMEGetWeightedMessage);
+            Instrument instrument = Context.GetInstrument(orderTarget.OrderHeader.OrderId.InstrumentId);
+            Context.GetMessageEfficiency(instrument.ProductGroupId).GetRef().Send(orderTarget.OrderTargetAction, instrument.IsFrontMonthOutright, CMEGetWeightedMessage);
             OrderTarget?.Invoke(in orderTarget);
         }
         return sent;

@@ -4,7 +4,8 @@
   "Workspaces": [
     // if StrategyName is blank, the workspace shows the aggregate of all strategies (a server workspace)
     { "StrategyName": "", "WorkspaceName": "default" },
-    { "StrategyName": "Crypto_Testing_Production", "WorkspaceName": "default" }
-
+    { "StrategyName": "Crypto_November_Testing_Production", "WorkspaceName": "default" },
+    { "StrategyName": "Nikkei_Testing_Production", "WorkspaceName": "default" },
+    { "StrategyName": "Equity_Second_Testing_Production", "WorkspaceName": "default" },
   ]
 }
