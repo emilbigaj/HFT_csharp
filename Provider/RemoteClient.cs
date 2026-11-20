@@ -26,6 +26,8 @@ public interface IManualClient : IDisposable
 public sealed class RemoteClient : IManualClient
 {
     public static readonly Duration s_silenceTimeout = Duration.FromSeconds(10);   // a link silent this long is broken: the Mirrors' TcpLink and the latency display
+    public static readonly Duration s_noLinkLatency = Duration.FromNanoseconds(-1);       // Latency[0] while there is no link at all: the dial thread is trying
+    public static readonly Duration s_brokenLinkLatency = Duration.FromNanoseconds(-2);   // a link that no longer publishes; any other negative is the first snapshot, carrying its latency
 
     private readonly ClientSocket _clientSocket;   // admin channel only: calls up to the Remote Mirror
     private readonly int _clientId;                // the stand-in's id beside the server, which the Remote Mirror's answer to the connect carried

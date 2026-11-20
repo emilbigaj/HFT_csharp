@@ -26,9 +26,15 @@ public class TestingStrategy : Strategy.Strategy
         return _profit;
     }
 
+    private static readonly Duration[] s_markoutDurations =
+    [
+        Duration.FromSeconds(1), Duration.FromSeconds(10), Duration.FromMinutes(1), Duration.FromMinutes(5), Duration.FromMinutes(10),
+    ];
+
     private void OnPosition(Position position)
     {
         _positions.Add(position);
+        NewMarkouts(position, s_markoutDurations);
         if (!_profitByRoot.TryGetValue(position.Instrument.Root, out List<Series<Point>>? profits))
         {
             profits = new List<Series<Point>>();

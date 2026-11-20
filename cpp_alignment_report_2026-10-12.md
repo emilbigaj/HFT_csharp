@@ -1388,6 +1388,31 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
   every instrument answers `USD = 0` and prices as it does today, which is safe for the USD book but still wrong for a
   yen or grain contract: do not allocate NIY, MNI, TPY or a grain on a C++-fed server until this is stamped.
 
+### P49. MUST PORT: `InstrumentHeader` carries the per-contract fees (C# `Data/Instrument.cs`; 2026-11-17)
+
+- **Now:** two `double` fields appended after `Currency`, inside the fixed 128 bytes:
+
+  ```
+    @73  double ExchangeFee;   // the exchange's fee for one contract, in Currency
+    @81  double ClearingFee;   // the clearing fee for one contract, in Currency
+  ```
+
+- **Nothing moves and nothing resizes.** `InstrumentHeader` is `StructLayout(Sequential, Pack = 1, Size = 128)` and used
+  73 of its 128 bytes; it is still 128. Measured on .NET 10 after the change: `InstrumentHeader` 128, `InstrumentHeader256`
+  256, `FutureHeader` 145 (`Multiplier` @128, `MaturityDate` @136, `IsFrontMonth` @144), `ForexHeader` 136,
+  `LeggedHeader` 192. **`GetLayoutHash()` does not change**, so unlike P48 this needs no coordinated Mirror redeploy —
+  a desk, a relay and the phone on the old build keep working against a server on the new one.
+- **Not 8-byte aligned, deliberately.** `Pack = 1` already says this struct is byte-packed, and padding to 80 would cost
+  seven named filler fields to align a value no hot path reads. Both ends must therefore agree on 73 and 81: write
+  `static_assert(offsetof(InstrumentHeader, ExchangeFee) == 73)` and the same for 81 beside the existing offset asserts.
+- **The one trap: zero the struct before writing it.** C# reads `0` as "no fee stamped", which is correct for a C++ server
+  that has not been ported. That only holds if the C++ writer zero-initialises the header (`InstrumentHeader header{};`)
+  rather than writing 128 bytes from an uninitialised stack local — otherwise C# reads whatever was on that stack as a
+  fee. Bytes 73..127 have been padding since P33, so a writer that already leaves them dirty is also making the Mirror
+  resend the row on every pass; this change turns that from invisible to wrong.
+- **Nothing sets them yet, on either side.** The fields are inert: no catalog field feeds them, no P&L reads them. Port
+  the layout and the zeroing now so the two ends cannot drift; the writer and the consumer are a later change.
+
 ---
 
 ## 8. Do not port (C#-only)
@@ -1557,6 +1582,14 @@ listed.
   `Scenario` checks once a second whether its server's process has exited or the header names another one
   (`Client.IsServerAlive` false), then alerts once and ends. It relies on what P22 already requires of the C++ server: post its
   own `ServerProcessId` in the header at startup, and a restarted server posts its new one.
+- **C29. 2026-11-20, `StackList` and `ArrayList` sorts allocate nothing** (C# only, nothing to port): the flaw was .NET's
+  span sort wrapping a comparer in a new delegate on every call; `std::sort` has no such cost. `StackList.Sort<TComparer>`
+  is now a stable insertion sort over a struct comparer, and `ArrayList.Sort` takes a `Comparison<T>`. No caller, layout or
+  wire value changed. Only if the C++ side ever sorts a short stack list by a comparer and needs the same order for equal
+  keys: the C# sort is stable.
+- **C30. 2026-11-21, the GC monitor checks on the Clock thread** (C# only, nothing to port; there is no collector in C++):
+  `GCMonitor` no longer uses a thread-pool timer, so a live C# strategy has no .NET thread pool. No shared layout, wire
+  value or timing a C++ process can observe changed.
 
 ---
 
@@ -1743,3 +1776,31 @@ server reader has seen its close message (answered, not hung).
 - **Not planned** (decided 2026-10-07): a workspace registering a strategy whose algo has not connected, or adding
   instruments to a strategy's book. Emergencies are covered by the server workspace, which trades any instrument at any time
   on the ServerStrategy (strategy 0).
+
+---
+
+## 13. 2026-11-12: the C++ side's seven currencies, carried in C#
+
+Reply to the C++ patch log of 2026-11-12 and §21 of its `csharp_alignment_report_2026-10-12.md`. This section is an
+acknowledgement, not an instruction: the change originates on the C++ side.
+
+- **Ported in C#.** `Data/Currency.cs` has `GBP = 7`, `CHF = 8`, `CAD = 9`, `AUD = 10`, `NZD = 11`, `MXN = 12`,
+  `ZAR = 13`, appended after `NOK` with nothing renumbered, and `Currencies.s_capacity` is 32. Both sides now agree on
+  every name, every number and the capacity, so `<server>/ExchangeRates` is `double` x 32 (4096 bytes) at both ends.
+- **Deploy.** The layout hash moves again, but the currency work of `ff74822` had not been deployed anywhere, so one
+  release covers both changes rather than two. A server holding a 16-row `ExchangeRates` region needs it deleted while
+  stopped; on the C# side only throwaway simulation servers have one.
+- **Confirmed, as asked: a mixed-currency spread needs no rule in C# either.** A fill posts under its own leg's
+  `InstrumentId`, and `Server.OnFill` reads the instrument for each fill in the batch and passes that leg's
+  `UsdMultiplier` to both `PositionHeader.OnFill` calls (`Provider/Server.cs:742-745`). The position transfer does the
+  same for its one instrument (`:388`). So NKD-NIY banks its USD leg in dollars and its JPY leg through the yen rate,
+  and the spread's own tag 15 currency only has to be valid when the spread is allocated.
+- **Confirmed: P47 and P48 need nothing further in C#.** Noted that the message-efficiency weighting stays C#-only and
+  that the header writer setting `Currency` from the catalog is still open on the CME side, so NIY, MNI, TPY, ECF, CNH,
+  ENK and ESK must not be allocated on a C++-fed server until it is.
+- **A difference that is correct on both sides, not a divergence to fix.** `Currencies.FromString` throws in C# on a
+  currency the enum does not name, where `CmeServer` keeps such a contract in the catalog and off the served channels
+  (`CmeServer.hpp:661`). The C++ server reads one security-definition file for the whole exchange and cannot refuse it
+  over one contract; C# only builds a header for an instrument somebody is allocating, where pricing it silently in the
+  wrong currency is worse than refusing it. Leave both as they are.
+- **The grains.** Still 100x on both sides, still a Databento import bug, still not to be "fixed" in C++.

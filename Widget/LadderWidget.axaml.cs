@@ -7,6 +7,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
+using Avalonia.Media.Immutable;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Data;
@@ -37,12 +38,18 @@ public sealed class LadderWidgetState
     public bool ShowMyOrders { get; set; } = true;
 }
 
-/// A price ladder on one instrument: the server's book with my working orders beside their prices, my position and PnL in
-/// the header, and order entry, cancel and amend on right-click. Rows are built on a timer thread into one of two row
-/// caches and applied on the UI thread. Cold path (GUI).
+/// A price ladder on one instrument: the server's book with my working orders beside their prices, the instrument's trading
+/// status, my position, PnL and floating PnL in the header, and order entry, cancel and amend on right-click. Rows are built on a timer
+/// thread into one of two row caches and applied on the UI thread. Cold path (GUI).
 public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
 {
     private const int s_rowDepth = 64;   // rows shown above the best ask and below the best bid
+
+    // The trading status's traffic light, as the Message Efficiency widget keeps its own: these are text, so full strength rather than Lighten()ed
+    private static readonly IBrush s_tradingStatusOpenBrush = new ImmutableSolidColorBrush(Palette.SafeGreen);
+    private static readonly IBrush s_tradingStatusAuctionBrush = new ImmutableSolidColorBrush(Palette.CautionOrange);
+    private static readonly IBrush s_tradingStatusHaltedBrush = new ImmutableSolidColorBrush(Palette.CriticalRed);
+    private static readonly IBrush s_tradingStatusClosedBrush = new ImmutableSolidColorBrush(Color.FromRgb(0x80, 0x80, 0x80));
 
     private readonly WorkspaceContext _context;
     private readonly WidgetRefreshTimer _refreshTimer;
@@ -199,8 +206,8 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         contextMenu.Open(LadderControl);
     }
 
-    /// Builds the rows from the server's book and my active orders on this instrument, and posts them with my position and
-    /// PnL to the UI thread. Timer thread.
+    /// Builds the rows from the server's book and my active orders on this instrument, and posts them with the instrument's
+    /// trading status, my position, PnL and floating PnL to the UI thread. Timer thread.
     private void Refresh()
     {
         // Step 1: the book, then the next row cache. Why the book first: an empty one skips the pass, and must not flip the cache the screen shows
@@ -230,12 +237,14 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
         for (int ticks = startTicks; ticks >= endTicks; ticks--)
             AddPriceRows(writeCache, in marketByPrice, ticks);
 
-        // Step 4: my position and PnL for the header
+        // Step 4: the exchange's status for the instrument, and my position, PnL and floating PnL on it, for the header
+        TradingStatus tradingStatus = Instrument.Header.TradingStatus;
+        IBrush tradingStatusBrush = GetTradingStatusBrush(tradingStatus);
         Profit profit = Position.Profit;
         int positionQuantity = profit.Quantity;
         double profitTotal = profit.Total;
+        double profitFloating = profit.Floating;
         IBrush positionQuantityBrush = Palette.GetSignBrush(positionQuantity, Palette.BidActiveBlue, Palette.AskActivePurple);
-        IBrush profitTotalBrush = Palette.GetSignBrush(profitTotal, Palette.ProfitGreen, Palette.LossRed);
 
         // Step 5: apply on the UI thread, re-centering after layout when asked
         Dispatcher.UIThread.Post(() =>
@@ -243,10 +252,12 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
             if (_refreshTimer.IsDisposed)
                 return;
 
+            TradingStatusValue.Text = tradingStatus.ToString();
+            TradingStatusValue.Foreground = tradingStatusBrush;
             PositionValue.Text = $"{positionQuantity}";
             PositionValue.Foreground = positionQuantityBrush;
-            PnLValue.Text = $"{profitTotal:N2}";
-            PnLValue.Foreground = profitTotalBrush;
+            Widgets.ShowProfit(PnLValue, profitTotal);
+            Widgets.ShowProfit(FloatingValue, profitFloating);
 
             LadderControl.IsCompactMode = !_isShowingMyOrders;
             LadderControl.UpdateRows(_renderedLadderRows);
@@ -255,6 +266,15 @@ public sealed partial class LadderWidget : UserControl, IWidget, IDisposable
                 Dispatcher.UIThread.Post(CenterLadder, DispatcherPriority.Input);
         });
     }
+
+    /// The brush a trading status shows in: green open, amber in an auction, red halted, gray closed or never stamped.
+    private static IBrush GetTradingStatusBrush(TradingStatus tradingStatus) => tradingStatus switch
+    {
+        TradingStatus.Open => s_tradingStatusOpenBrush,
+        TradingStatus.Auction => s_tradingStatusAuctionBrush,
+        TradingStatus.Halted => s_tradingStatusHaltedBrush,
+        _ => s_tradingStatusClosedBrush,
+    };
 
     /// Scrolls the ladder to its middle once its rows overflow the view, clearing the one-time request when it does.
     private void CenterLadder()

@@ -2,6 +2,7 @@
 using Data;
 using Execution;
 using Socket;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -569,6 +570,7 @@ public class LoggingServer : IDisposable
             FileType.Factor => new ObjectWriter<FactorPoint>(clientName),
             FileType.Mean => new ObjectWriter<MeanPoint>(clientName),
             FileType.StdDev => new ObjectWriter<StdDevPoint>(clientName),
+            FileType.Markout => new ObjectWriter<Markout>(clientName),
             FileType.Alert => new AlertWriter(clientName, Alerts),
             FileType.Audit => new AuditWriter(clientName),
             _ => throw new ArgumentException($"Unsupported file type {fileType}")
@@ -877,19 +879,53 @@ public abstract class ObjectWriter : IObjectWriter
     protected readonly FileSystemPath _filePath;
     protected FileStream _fileStream = null!;
     private static readonly byte[] s_newLineBytes = Encoding.UTF8.GetBytes(Environment.NewLine);
+    private const int s_realtimeBufferLength = 4096;
+    private const int s_simulationBufferLength = 64 * 1024;   // measured: 210 ns a record, against 194 ns at 1 MB and 1,011 ns at 4 KB
+    private static ReadOnlySpan<byte> OrderHeaderOpen => "\"OrderHeader\":{"u8;   // where a record's symbol goes: the first member of its OrderHeader
+
+    private readonly ArrayBufferWriter<byte> _lineBuffer = new ArrayBufferWriter<byte>(1024);   // one record's UTF-8 JSON, reused; the writer's Lock serialises it
+    private readonly Utf8JsonWriter _utf8JsonWriter;
 
     public FileSystemPath FilePath => _filePath;
 
     public ObjectWriter(FileSystemPath filePath)
     {
         _filePath = filePath;
+        _utf8JsonWriter = new Utf8JsonWriter(_lineBuffer, new JsonWriterOptions { Encoder = Json.OptionsToLine.Encoder, Indented = false });
         SetFileStream(filePath);
     }
 
     protected virtual void SetFileStream(string filePath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
-        _fileStream = new FileStream(filePath, FileMode.Append, FileAccess.Write, FileShare.Read, 4096, FileOptions.WriteThrough);
+        // Why no write-through in a simulation: it costs about 19,000 ns a record and guards against a crash a backtest just reruns (see Spec.md "Logging's file writes")
+        bool isSimulation = Clock.Mode == ClockMode.Simulation;
+        _fileStream = new FileStream(filePath, FileMode.Append, FileAccess.Write, FileShare.Read,
+            isSimulation ? s_simulationBufferLength : s_realtimeBufferLength, isSimulation ? FileOptions.None : FileOptions.WriteThrough);
+    }
+
+    /// Serialises a record to UTF-8 JSON in this writer's reused buffer, building no string. The span is valid until the next call.
+    protected ReadOnlySpan<byte> SerializeToUtf8<T>(in T record)
+    {
+        _lineBuffer.ResetWrittenCount();
+        _utf8JsonWriter.Reset(_lineBuffer);
+        Json.Serialize(_utf8JsonWriter, record, Json.OptionsToLine);
+        _utf8JsonWriter.Flush();
+        return _lineBuffer.WrittenSpan;
+    }
+
+    /// Appends one line: this JSON with the symbol's member written in as the first member of its OrderHeader.
+    /// Throws if the JSON has no OrderHeader, so a line is never written without its symbol.
+    public void WriteLineWithSymbol(ReadOnlySpan<byte> json, ReadOnlySpan<byte> symbolJson)
+    {
+        int orderHeaderIndex = json.IndexOf(OrderHeaderOpen);
+        if (orderHeaderIndex < 0)
+            throw new InvalidOperationException($"ObjectWriter.WriteLineWithSymbol: {Encoding.UTF8.GetString(json)}, must contain an OrderHeader to carry its symbol; write this record type through Write(string) instead");
+        int insertIndex = orderHeaderIndex + OrderHeaderOpen.Length;
+        _fileStream.Write(json[..insertIndex]);
+        _fileStream.Write(symbolJson);
+        _fileStream.Write(json[insertIndex..]);
+        _fileStream.Write(s_newLineBytes);
     }
 
     public abstract string SerializeToLine(ReadOnlySpan<byte> src);
@@ -923,6 +959,7 @@ public abstract class ObjectWriter : IObjectWriter
         lock (Lock)
         {
             _fileStream?.Dispose();
+            _utf8JsonWriter.Dispose();
         }
     }
 }
@@ -981,6 +1018,7 @@ public class AuditWriter : ObjectWriter
     private readonly Dictionary<string, ObjectWriter> _riskLimitWriters = new Dictionary<string, ObjectWriter>();
 
     private readonly Dictionary<int, string> _symbols = new Dictionary<int, string>();
+    private readonly Dictionary<int, byte[]> _symbolJsons = new Dictionary<int, byte[]>();   // per instrument: "Symbol":"<symbol>", as UTF-8, built once when the symbol is learned
 
     public AuditWriter(FileSystemPath filePath) : base(filePath.GetPathWithoutExtension())
     {
@@ -1006,7 +1044,44 @@ public class AuditWriter : ObjectWriter
             SetFileStreamLazy(FilePath);
         }
 
-        base.Write(src);
+        // The five order records are nearly all of an audit: they go out as UTF-8 with no string built. The rest stay strings.
+        switch (src[0])
+        {
+            case (byte)OrderType.OrderState: WriteWithSymbol<OrderState>(src); break;
+            case (byte)OrderType.OrderRejected: WriteWithSymbol<OrderRejected>(src); break;
+            case (byte)OrderType.OrderTarget: WriteWithSymbol<OrderTarget>(src); break;
+            case (byte)OrderType.Fill: WriteWithSymbol<Fill>(src, GetSymbolWriter<Fill>(_fillWriters, Context.GetFillsFilePath, GetSymbol(src))); break;
+            case (byte)OrderType.Position: WriteWithSymbol<PositionHeader>(src, GetSymbolWriter<PositionHeader>(_positionWriters, Context.GetPositionFilePath, GetSymbol(src))); break;
+            default: base.Write(src); break;
+        }
+    }
+
+    /// Writes an order record's line, symbol included, to its own per-symbol file when it has one and then to the audit file.
+    private void WriteWithSymbol<T>(ReadOnlySpan<byte> src, ObjectWriter? symbolWriter = null) where T : unmanaged
+    {
+        ReadOnlySpan<byte> json = SerializeToUtf8(in MemoryMarshal.AsRef<T>(src));
+        ReadOnlySpan<byte> symbolJson = GetSymbolJson(GetInstrumentId(src));
+        symbolWriter?.WriteLineWithSymbol(json, symbolJson);
+        WriteLineWithSymbol(json, symbolJson);
+    }
+
+    /// The writer of this symbol's own file of T records, opened at the path newFilePath gives the first time the symbol is seen.
+    private ObjectWriter GetSymbolWriter<T>(Dictionary<string, ObjectWriter> writersBySymbol, Func<FileSystemPath, string, FileSystemPath> newFilePath, string symbol) where T : unmanaged
+    {
+        if (!writersBySymbol.TryGetValue(symbol, out ObjectWriter? writer))
+            writersBySymbol[symbol] = writer = new ObjectWriter<T>(newFilePath(_filePath, symbol));
+        return writer;
+    }
+
+    /// The symbol's JSON member as UTF-8, cached once the symbol is known; an unknown instrument's is built each time, as its name may still arrive.
+    private byte[] GetSymbolJson(int instrumentId)
+    {
+        if (_symbolJsons.TryGetValue(instrumentId, out byte[]? symbolJson))
+            return symbolJson;
+        symbolJson = Encoding.UTF8.GetBytes($"\"Symbol\":\"{GetSymbol(instrumentId)}\",");
+        if (_symbols.ContainsKey(instrumentId))
+            _symbolJsons[instrumentId] = symbolJson;
+        return symbolJson;
     }
 
     public override string SerializeToLine(ReadOnlySpan<byte> rsrc)
@@ -1060,12 +1135,7 @@ public class AuditWriter : ObjectWriter
                     string symbol = GetSymbol(riskLimit.InstrumentId);
                     // The server posts the row here instead of writing the .risklimit file itself; the
                     // server reads this file back at allocation, so the path must match Context's.
-                    if (!_riskLimitWriters.TryGetValue(symbol, out ObjectWriter? writer))
-                    {
-                        string filePath = Context.GetRiskLimitsFilePath(_filePath, symbol);
-                        writer = new ObjectWriter<RiskLimit>(filePath);
-                        _riskLimitWriters[symbol] = writer;
-                    }
+                    ObjectWriter writer = GetSymbolWriter<RiskLimit>(_riskLimitWriters, Context.GetRiskLimitsFilePath, symbol);
                     string line = Json.SerializeToLine(riskLimit);
                     line = line.Insert(1, $"\"Symbol\":\"{symbol}\",");
                     writer.Write(line);
@@ -1079,62 +1149,7 @@ public class AuditWriter : ObjectWriter
                     File.AppendAllLines(Context.GetMessageEfficiencyFilePath(_filePath, messageEfficiency.ProductGroupRoot.ToString()), [line]);
                     return line;
                 }
-            case (byte)OrderType.OrderState:
-                {
-                    string symbol = GetSymbol(rsrc);
-                    ref readonly OrderState orderState = ref MemoryMarshal.AsRef<OrderState>(rsrc);
-                    string json = Json.SerializeToLine(orderState);
-                    return json.Replace("\"OrderHeader\":{", $"\"OrderHeader\":{{\"Symbol\":\"{symbol}\",");
-                }
-
-            case (byte)OrderType.OrderRejected:
-                {
-                    string symbol = GetSymbol(rsrc);
-                    ref readonly OrderRejected orderRejected = ref MemoryMarshal.AsRef<OrderRejected>(rsrc);
-                    string json = Json.SerializeToLine(orderRejected);
-                    return json.Replace("\"OrderHeader\":{", $"\"OrderHeader\":{{\"Symbol\":\"{symbol}\",");
-                }
-
-            case (byte)OrderType.OrderTarget:
-                {
-                    string symbol = GetSymbol(rsrc);
-                    ref readonly OrderTarget orderTarget = ref MemoryMarshal.AsRef<OrderTarget>(rsrc);
-                    string json = Json.SerializeToLine(orderTarget);
-                    return json.Replace("\"OrderHeader\":{", $"\"OrderHeader\":{{\"Symbol\":\"{symbol}\",");
-                }
-
-            case (byte)OrderType.Fill:
-                {
-                    string symbol = GetSymbol(rsrc);
-                    ref readonly Fill fill = ref MemoryMarshal.AsRef<Fill>(rsrc);
-                    if (!_fillWriters.TryGetValue(symbol, out ObjectWriter? writer))
-                    {
-                        string filePath = Context.GetFillsFilePath(_filePath, symbol);
-                        writer = new ObjectWriter<Fill>(filePath);
-                        _fillWriters[symbol] = writer;
-                    }
-                    string line = Json.SerializeToLine(fill);
-                    line = line.Replace("\"OrderHeader\":{", $"\"OrderHeader\":{{\"Symbol\":\"{symbol}\",");
-                    writer.Write(line);
-                    return line;
-                }
-
-            case (byte)OrderType.Position:
-                {
-                    string symbol = GetSymbol(rsrc);
-                    ref readonly PositionHeader position = ref MemoryMarshal.AsRef<PositionHeader>(rsrc);
-                    if (!_positionWriters.TryGetValue(symbol, out ObjectWriter? writer))
-                    {
-                        string filePath = Context.GetPositionFilePath(_filePath, symbol);
-                        writer = new ObjectWriter<PositionHeader>(filePath);
-                        _positionWriters[symbol] = writer;
-                    }
-                    string line = Json.SerializeToLine(position);
-                    line = line.Replace("\"OrderHeader\":{", $"\"OrderHeader\":{{\"Symbol\":\"{symbol}\",");
-                    writer.Write(line);
-                    return line;
-                }
-
+            // OrderState, OrderRejected, OrderTarget, Fill and Position never reach here: Write sends them out as UTF-8
             default:
                 return "";
         }

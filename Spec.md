@@ -104,6 +104,32 @@ here; the reasoning lives here.
   zone with its daylight saving, and its weekend close); the shading runs past the data to the session's next close, so the
   session open now shows. A saved layout keeps the ticked sessions by name. The hours are `Session`'s weekly schedule: no
   holidays or early closes, and most non-US sessions are coded 10:00-16:00 local as placeholders.
+- **The ladder shows its instrument's trading status (2026-11-12).** A ladder's header is two rows: the instrument picker
+  with the exchange's status for it (`InstrumentHeader.TradingStatus`) beside it, then the position and PnL beneath.
+  The status is bold, and coloured as a traffic light: green `Open`, amber `Auction`, red `Halted`, gray `Closed` and
+  `Unknown`. `Unknown` is shown as itself rather than hidden or read as closed, because an unstamped header and a closed
+  market are different facts and only one of them is a bug. Why in the widget and not the frame's title bar: the phone
+  hosts the widget without a `WidgetContainer`, so a title-bar status would never reach it. A ladder opens from the
+  Widgets menu with no instrument and its picker already filled, as it does on the phone, as well as from an Instruments
+  or Positions row's right-click, which hands it one. The refresh pass that already
+  runs ten times a second reads the status byte and posts it with the position and PnL, so no timer, thread or channel is
+  added; a pass that skips because the book row is unwritten skips the status too, which is right, since the whole widget
+  is stale in that window.
+- **Floating PnL sits beside PnL (ladder 2026-11-16, Positions 2026-11-17).** The ladder header's second row is three columns: `Pos:`,
+  `PnL:` and `Flt:`. `PnL:` stays `Profit.Total` (floating plus realized); `Flt:` is `Profit.Floating`, the open position
+  revalued at the mid, which is the figure a trader watches while a position is on and the one that moves with the book
+  the ladder is already showing. Both come from the single `Position.Profit` the refresh pass already reads, so no row,
+  timer or thread is added, and both are written by `Widgets.ShowProfit`, which is where every profit figure on the
+  screen gets its two decimals and its colour. The position column
+  is narrowed to `4*` against the money columns' `5*`: a position is a handful of digits where either money figure may run
+  to a signed thousands number. Holding with no quote shows `NaN` in both money columns, unchanged and for the reason in
+  "A flat position with no quote is worth zero, not NaN".
+  The Positions title bar carries the same pair, as the sum down its own `Profit` and `Floating` columns: `PnL:` is every
+  row's total added up and `Flt:` every row's floating, both from the one `WidgetPosition.Refresh` the pass already makes,
+  so the widget walks its rows once and gains no read. One holding with no quote turns that column's total `NaN`, which
+  `PnL:` has always done and is the same fact surfacing in the same place. Between them sits `Rlz:` (2026-11-20), the sum
+  down the `Realized` column from the same pass, so the bar reads total, banked, open: `PnL:` is `Rlz:` plus `Flt:`.
+  A missing quote does not turn `Rlz:` `NaN`, since a realized figure does not depend on one. The ladder header has no `Rlz:`.
 
 ## The era rule (algo tick consistency)
 
@@ -1536,6 +1562,63 @@ its cursor would hide that; not done). Considered and not done: a per-ring lette
 sequence the tap may read up to, which removes the last one or two penalties per pass at the cost of work on every
 writer's hot thread; worth it only if a measurement shows those remaining penalties.
 
+**Logging's file writes (2026-11-20).** The continuous poll was not enough to keep a simulation's tap ahead of its
+rings. On 2026-11-20 a Max-speed backtest left the strategy's `.audit` and `.fill` files with roughly a tenth of its
+records (NQ: ids 0-12, then 49-91, then 257 on; the server's own file had every one). A tap that is overtaken is not
+told: it reads whatever now sits at its place and carries on. The cause was the cost of a write, measured at 32,000 to
+40,000 ns a record, which caps a tap at about 28,000 records a second; that run's audit file grew at 26,600 lines a
+second, so the writer was flat out. Two things were costing it:
+
+- **Write-through.** Every file was opened with a 4 KB buffer and `FileOptions.WriteThrough`, so about every seventh
+  record waited for the disk. That guards a live audit against a crash; a backtest is simply rerun. In `Simulation`
+  the files are now opened with a 64 KB buffer and no write-through (measured: 210 ns a record against 19,000 to
+  24,000 ns; 1 MB bought nothing more, 194 ns). `Realtime` is unchanged. The mode is the Logging server's, set from its
+  name ("realtime" or "simulation"); a name with neither is a simulation, as the poll already assumed.
+- **Three strings a record.** The five order records (OrderState, OrderRejected, OrderTarget, Fill, Position), which are
+  nearly all of an audit, were serialised to a string, patched with `string.Replace` to carry their symbol, and encoded.
+  They are now serialised straight to UTF-8 in a buffer the writer reuses, and written as the half before the
+  OrderHeader's first member, the symbol's `"Symbol":"...",` bytes (built once per instrument), and the rest: no string
+  at all. Measured against the alternatives on an OrderState: `Replace` 2,332 ns and 3,216 B, one `Concat` 1,689 ns
+  and 3,216 B, encoding the pieces 1,596 ns and 2,008 B, straight to UTF-8 1,469 ns and 880 B. A record with no
+  OrderHeader throws; `Replace` would have written it without a symbol. The other record types are rare and stay strings.
+
+Together: 2,500 to 2,800 ns a record in a simulation, against 32,000 to 40,000 ns, so a tap can write about 380,000
+records a second. `Realtime` costs what it did (32,800 ns against 32,700 ns, write-through dominates) and allocates
+880 B a record against 3,448 B. The files are byte-identical to the old code's, checked by running both over the same
+records, symbol known and unknown. **Residual:** the rings still never wait for a reader, so a backtest that outruns
+even this, or a pause longer than a ring holds, still loses tap records without saying so. The server's own files
+arrive on its own sockets and were complete throughout. Not done: making the simulator wait for the tap, which is the
+only change that guarantees a complete file.
+
+**Measured after (2026-11-20): the cheaper writes were not enough.** A rerun with them (five equity futures, eight
+simulated days in eight minutes, a 16 GB strategy audit) left the strategy's `.fill` files with 23,041 of the server's
+29,320 fills: NQ 3,146 of 6,368, YM 5,000 of 6,441, RTY 5,053 of 6,430, NKD 4,268 of 4,480, EMD 5,574 of 5,601. The
+`.markout` files, which travel on the strategy's own sockets, had every fill. An instrumented copy of the code, run for
+two simulated days under its own server name, counted the cause: the tap read 8.75 million records and was lapped 114
+times, jumping over 2.80 million (24%). It was busy only a quarter of the run (33.8 s writing at 3.9 µs a record, 1.8 s
+reading at 0.2 µs, 1.2 s sorting, of 145 s), so its average speed is ample. What loses records is a burst: the strategy
+opens with about 650,000 records in four seconds, a 2 MB ring holds about 16,000, and a pass reads everything and then
+writes everything, so a pass that writes 28,000 records leaves the rings unread for over 100 ms (33 passes did; the
+longest took 1.5 s). Fills come in the busiest moments, so they are lost at a higher rate than records as a whole. Three
+changes tried in the copy only, over the same two days:
+
+| Ring per channel | The tap writes per pass | Laps | Records jumped | Fills missing |
+|---|---|---|---|---|
+| 2 MB (as now) | everything it read (as now) | 114 | 2,801,493 (24%) | 4,434 of 11,202 |
+| 64 MB | everything it read | 1 | 524,287 (4.5%) | 585 of 11,115 |
+| 2 MB | at most 2,048 records, the rest held in order in memory | 21 | 1,081,278 (9.4%) | 1,607 of 11,191 |
+| 64 MB | at most 2,048 records | 0 | 0 | 0 of 11,212 |
+
+Neither change alone is enough: a big ring alone grows the batch a pass writes (565,643 records in one pass, 2.7 s
+away from the ring), and a capped pass alone still meets stalls in Logging itself that outlast a 2 MB ring (a write of
+2,048 records took 0.8 s once; garbage collection paused it 1.7 s in all). Together they lost nothing here, with up to
+2.1 million records waiting in Logging's memory. That is still not a guarantee, and neither is in the code. The four
+runs' fill totals differ although the days are the same: the simulation does not repeat exactly.
+
+**Declined (2026-11-20).** Left as it is: a simulation's tap files (the strategy's `.audit`, `.fill`, `.position`) may be
+incomplete; it does not matter enough for a simulation and cannot happen live, where nothing writes that fast. The
+server's own files and the `.markout` files are complete. Not to be raised again.
+
 ### Connect: every request is answered
 
 - The server's reply carries `ClientId`: the client's id when 0 or more, otherwise a `ConnectRefusal`
@@ -1639,11 +1722,12 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   10 round trips, or, when longer, the age of the oldest unanswered ping (the newest answered one's age less one interval),
   so it climbs through a stall (a new link starts afresh, 2026-10-14: its round trips cleared, its unanswered age counted
   from when it connects, its first ping sent at once; before, the old link's last pong made a Local Mirror restart read as
-  a latency of the whole outage, climbing until the new link's first pong); -1 ns at
-  once when the link drops, and from 10 s without a heartbeat (`RemoteClient.s_silenceTimeout`, also `TcpLink`'s silence
-  limit): a Local end that answers pings but no longer publishes reads as broken, not as a healthy number over a frozen
-  screen. A remote Workspace shows it beside its clock exactly as written, to the microsecond (`232.417 ms`, so a steady
-  link visibly ticks), and below 0 as "Connection broken – reconnecting…": the number only ever comes from the Remote
+  a latency of the whole outage, climbing until the new link's first pong); `RemoteClient.s_noLinkLatency` (-1 ns) at
+  once when the link drops, and `s_brokenLinkLatency` (-2 ns) from 10 s without a heartbeat (`RemoteClient.s_silenceTimeout`,
+  also `TcpLink`'s silence limit): a Local end that answers pings but no longer publishes reads as broken, not as a healthy
+  number over a frozen screen — that heartbeat rule waits until this link's first snapshot has arrived (2026-11-13, below),
+  since until then no heartbeat is due. A remote Workspace shows it beside its clock exactly as written, to the microsecond (`232.417 ms`, so a steady
+  link visibly ticks), at -1 ns as "Connecting…", at -2 ns as "Connection broken – reconnecting…", and otherwise negative as "38.214 ms Initializing…", the number first either way so it keeps its place on the bar: the number only ever comes from the Remote
   Mirror (2026-10-14; before, the Workspace showed the row's age when longer, so a closed Remote Mirror read as a latency
   climbing for 10 s). Two states come from the Workspace itself: "Remote Mirror offline" once the Remote Mirror its
   `RemoteClient` connected to has exited (`RemoteClient.IsRemoteMirrorAlive`, the process id from
@@ -1664,6 +1748,32 @@ dialling out needs no inbound rule at TNS; a desk dialling the box needs none at
   Until 2026-10-21 the clock was `ServerHeader.Timestamp`, which every CoreGroup thread rewrote on every book update: one
   shared line, also read by every order's risk check, pulled between chiplets on each update. The server no longer writes
   it; it is the simulation clock only (written by `ServerSimulator`, followed by a simulated Workspace).
+- **The first snapshot has its own phase, and never kills the link (2026-11-13).** A link's first `Publish` queues every
+  written row of every array, which over a mobile link is seconds of transfer. Three things used to go wrong at once, all
+  of them at 10 s. **The link died:** `TcpLink` set `SendTimeout` to the silence timeout, so a blocking write that had not
+  drained in 10 s threw, the link dropped, the remote redialled and started the snapshot again — a desk whose snapshot
+  does not fit inside one 10 s write window could never converge, which is what the ARB desk was doing (`Unable to write
+  data to the transport connection: Connection timed out`, a new ephemeral port every second). There is now no send
+  timeout: a write that blocks is a peer reading slowly, not a dead one. Liveness stays on the read side, where it
+  belongs — both ends send at least once a second, so a silent peer still fails within 10 s, and the `Dispose` that
+  follows throws the writer out of its blocked `Write`, so no thread can hang. A peer that genuinely cannot keep up is
+  still dropped, by `s_maximumQueuedPackets` rather than by one slow write: a volume bound, not a time bound.
+  **The desk was told it was broken:** `Latency[0]` went to -1 ns from 10 s without a heartbeat, but the heartbeat closes
+  a publish pass and so cannot arrive until the snapshot has, so a healthy transfer read as a dead link. That rule now
+  waits for `RemoteMirror._isSnapshotComplete`, set by the first heartbeat on each link and cleared when a link is taken.
+  **And the number was meaningless:** the latency is the worst round trip or the age of the oldest unanswered ping, and
+  the Pong was queued behind the whole snapshot, so it measured the snapshot's remaining transfer (6,497 ms on a phone)
+  rather than the link. A `Pong` now goes out through `TcpLink.WritePriority`, which puts it in front of everything
+  already queued and flushes it on its own. Only a packet whose meaning does not depend on where it sits in the stream
+  may do that: rows, the heartbeat that closes them and a GUI's `AllocatedClientId` are read in order and must keep it, so
+  a timing probe is the only user. The remaining floor is what TCP has already been handed and cannot reorder, so during a
+  snapshot the number reads a little high, not seconds high. The desk therefore shows one number in every phase —
+  "Connecting…" with no link, "38.214 ms Initializing…" while the first snapshot lands, "38.214 ms" once it has — and the
+  phone starts its bar before the connect finishes, so a cold start shows the same three. `Latency[0]` carries four
+  meanings on one `Duration`: -1 ns no link, -2 ns a link that stopped publishing, any other negative the snapshot with
+  its own latency, and 0 or more a synced link. That is the ceiling: a fifth state wants a row of its own rather than
+  another sentinel. A desk Workspace sees "Initializing…" only on a re-snapshot, never at a cold start: the Remote Mirror's
+  `ServerSocket` does not listen until its first heartbeat, so no Workspace can be open during the very first snapshot.
 - **Folder sync (2026-10-21).** Each desk keeps a byte-for-byte copy, at the same relative paths under its `Data`, of every
   file in the folders of the Workspaces open on it: each GUI's principal (the server for a server workspace, the strategy
   for a strategy workspace) and the GUI's own folder (its stand-in's audit), everything except `Workspaces` folders, which
@@ -2139,10 +2249,24 @@ The header carries the **currency**, which is a fact about the contract and neve
 the **rate**, which is volatile. That split is the whole design: one write to a rate row revalues every instrument in that
 currency, where a rate in the header would mean restamping every header. `InstrumentHeader` gains `Currency` (one byte) at
 offset 72 of its fixed 128, so no existing offset moves and no overlay changes size. `<server>/ExchangeRates` is a
-`SharedArray<double>` of `Currencies.s_capacity` = 16 rows indexed by the enum value, created last so no array id moves —
+`SharedArray<double>` of `Currencies.s_capacity` = 32 rows indexed by the enum value, created last so no array id moves —
 sized by a constant rather than the enum's count so that adding a currency later does not change the Mirror's layout hash
 and force every desk to reinstall the same day. The Mirror needs nothing new: `PublishRows` walks every array by id and
 byte-diffs it, and `RewriteNames` touches only `SharedArray<SocketHeader>`.
+
+**Fourteen currencies, and the array is 32 rows (2026-11-12).** `Currency` gains `GBP` 7, `CHF` 8, `CAD` 9, `AUD` 10,
+`NZD` 11, `MXN` 12 and `ZAR` 13, appended with nothing renumbered. The names are the ISO codes exactly as CME's security
+definition spells them in tag 15, because that tag is what the C++ server reads to stamp the header. CME asked for them:
+it had been keeping about 218 served futures out of trading because their currency had no name — GBP 88, CHF 39, CAD 33,
+MXN 25, NZD 14, AUD 14, ZAR 5. The capacity goes from 16 to 32 at the same time: fourteen values would still fit in 16
+but leave room for only two more, where 32 leaves eighteen, so the next currency needs no layout change. This is the
+C++ side's change (its patch log, 2026-11-12) and C# carries the same names, numbers and capacity because the header
+byte and the rate array both cross the Mirror. `<server>/ExchangeRates` is 4096 bytes rather than 2048, so the layout
+hash moves again — which costs nothing here, since the currency work itself had not been deployed yet and one deploy
+covers both. A server that already holds a 16-row region must have it deleted while stopped: `CreateOrOpenShared`
+refuses a region of another length. A mixed-currency spread needs no rule of its own — NKD–NIY is tag 15 `USD` with one
+USD leg and one JPY leg, and since a fill posts under its own leg's `InstrumentId`, `Server.OnFill` already takes that
+leg's `UsdMultiplier`.
 
 `Instrument.UsdMultiplier` is `Multiplier` times its currency's row, read live and never cached, because a GUI open for a
 week must see a new rate; `GetValue` goes through it, so `GetProfit` and every caller convert without knowing it. The
@@ -2175,6 +2299,24 @@ contract's own quote (¥50 000 for the Nikkei), which is correct and untouched. 
 file's newest rate, not its own date's, because the load is `ReadLastLine`; and nothing writes `InstrumentHeader.Currency`
 on the C++ side yet, so a C++-fed server prices every instrument as USD until it does (see
 `cpp_alignment_report_2026-11-12_currency.md`).
+
+## The instrument header carries its fees (2026-11-17)
+
+`InstrumentHeader` gains `ExchangeFee` at offset 73 and `ClearingFee` at offset 81, both `double`, both the cost of one
+contract in the header's own `Currency`. They go where `Currency` left off inside the fixed 128 bytes, so the struct is
+still 128, `FutureHeader` still 145 with `MaturityDate` at 136, `ForexHeader` 136 and `LeggedHeader` 192. Nothing moves,
+no overlay resizes, no array's `TypeSize` changes, and so **`GetLayoutHash()` is unchanged** — this one needs no
+simultaneous Mirror deploy, unlike the currency byte that preceded it.
+
+They sit at 73 and 81 rather than padded to 80 and 88. `Pack = 1` already declares the struct byte-packed, and seven
+named filler fields would buy alignment for a value no hot path reads; the cost is that both ends must agree on the odd
+offsets, which is what the `static_assert`s in the C++ port are for. Zero is the unstamped sentinel, as `USD = 0` is for
+the currency, so a server that never writes them reads as "no fee known" rather than as free — which also means the
+writer must zero the header struct before filling it (see `cpp_alignment_report_2026-10-12.md` P49).
+
+**Nothing writes or reads them yet.** The catalog has no fee field, `InstrumentDetails` does not carry one, and no P&L
+figure is netted of fees. The fields are the layout half of that work, landed first and on their own so the two ends
+cannot drift once the writer exists.
 
 ## TickHistoryWriter crash safety (day-boundary resume only)
 
@@ -2211,6 +2353,187 @@ a converter resuming a file seeds its counter from it; a fresh file's footer is 
 id 0. `SetHeaders` restores `_nextPriorityId` from the footer, so the resume rollover rewrites the header
 and snapshot from the same base: byte identity holds only while that restore sits directly after the
 footer `Navigate`.
+
+## Markouts (2026-11-20)
+
+A markout is the best bid and ask some time after a fill: how the market moved once we traded. Markouts are recorded
+client side, per strategy, for algo fills only; a manual fill or a position transfer has none.
+
+**Who records.** A strategy opts in per position with `NewMarkouts(position, markoutDurations)`, passing its own
+strictly ascending `Duration[]` (for example 1 s, 10 s, 1 min, 5 min, 10 min). `Strategy.Markouts` subscribes to the
+position's fills and the instrument's book. It is hot path, feed thread only, and allocates nothing after construction.
+
+**What it costs** (measured 2026-11-20 inside a two-day backtest of five instruments, 58.5 million book updates and
+11,202 fills, with a timestamp either side of each call and the timer's own 20 ns taken off): a book update with
+nothing pending about 4 to 7 ns (92.5% of updates); with fills pending and no duration due about 18 ns (7.4%); an update
+that writes records about 280 to 340 ns, 1.55 records on average (0.06%); a fill about 140 to 160 ns. Averaged over
+every book update: 5 to 8 ns. Allocated: 0 bytes over 58.6 million calls. In a tight loop on the same objects, with
+warm caches, the three paths are 4.4, 12.7 and 5.7 to 7.4 ns per record; the difference to the figures in the run is
+memory the recorder had not touched for a while.
+
+**The clock is the book's.** There are no timers. On each `MarketByPriceChanged` (once per read pass), every pending
+fill whose exchange time plus a markout duration is strictly before the book's `ExchangeTimestamp` gets one record,
+stamped with the quote that stood at the end of the previous pass, which is the quote that stood when the duration
+fell. Simulation and live therefore run the same code. The quote is the instrument's raw quote (`Instrument.TryGetQuote`),
+NaN while the instrument is not open or a side is empty.
+
+**One record per fill per markout duration.** `Markout` (58 bytes, `Execution/Markout.cs`) carries `FillId`,
+`FillExchangeTimestamp`, `InstrumentId`, `FillPrice`, `FillQuantity` (signed), `FillType`, `BidPrice`, `AskPrice`,
+`MarkoutDuration` and `MarkoutTag`. It carries those four fill facts, not the whole fill, so the file stands alone and
+a reader needs no join. The first version carried only `FillId` and `FillExchangeTimestamp` and joined to the
+strategy's `.fill` file; that failed on the first real run, because the strategy's `.fill` file is incomplete in a
+simulation (NQ: 228 lines against 1,814 fills; the server's file had them all), so the grid showed about a quarter of
+the fills. `FillId` with `FillExchangeTimestamp` still names the fill for anyone who wants the rest of it; the pair is
+the key because an id alone can repeat (the simulator's counter restarts at 0 each run, and a realtime fill file is
+never wiped). A record is written as soon as its duration passes, so a fill that never reaches a duration has no record
+for it.
+
+**The tag is the strategy's.** `Markouts.Markout` (`MarkoutHandler(in Fill, ref Markout)`) is raised once per algo fill,
+before any observation. The strategy edits the markout there, typically setting `MarkoutTag` (None, Exit, Entry); every
+record of that fill carries what it set. The handler runs on the feed thread inside the fill, so it follows the hot-path
+rules. With no handler the tag is None.
+
+**Where it is written.** `<strategy>/Markouts/<instrument.Symbol>/<date>.markout`, through one `Series<Markout>` per
+position to Logging (`FileType.Markout`), one JSON line per record. The date is the Chicago date when `NewMarkouts` is
+called. A simulation wipes the folder at start with the strategy's other folders (`Strategy.InitDirectories`, which
+now looks into subfolders).
+
+**The GUI.** `MarkoutsWidget` reads every symbol's `.markout` files and shows one instrument at a time: the Instrument
+box always has a selection and offers no "All", because ticks of different instruments do not add up. For that
+instrument it totals by group and markout duration. The markout of an observation is `fill sign * (mid - fill price)`.
+Each row shows fills, quantity, Ticks (the quantity-weighted average markout, per contract), USD (the total), T-test and
+Samples. Mean and StdDev are quantity-weighted too and hidden by default: Mean is Ticks, and StdDev is
+`sqrt(n / (n - 1) * sum(q (x - Ticks)²) / sum(q))` over the n fills, the sample standard deviation when every fill is
+one lot. Groups are All, Day, TimeOfDay (hour of day across all days), Side, FillType and Tag, in Chicago time from the
+fill's exchange time; the Duration box narrows to one markout duration. Tick size and USD multiplier come from the
+instrument the context lists now. New lines add to the rows in place; only a change of selection totals again from the
+start. A one-second timer picks up symbol folders that Logging creates after the widget opened.
+
+**Saved with the workspace** (`MarkoutsWidgetState`): the columns' layout, the view, the grouping, the instrument, the
+duration and the histogram's unit. A workspace restores a widget before any `.markout` line has been read, so the saved
+instrument and duration are put into their boxes at once and selected; the rows are empty until that instrument's
+markouts arrive. An instrument that never trades again stays in the box as a choice with no rows. The Duration box
+keeps its choices in seconds, the form it shows them in, so a saved duration is the same choice when read back.
+
+**T-test: a sample is a bucket of time, not a fill.** T-test asks whether Ticks differs from zero. Fills are not
+independent draws: several arrive in the same instant on one move, and two fills closer together than the markout
+duration share most of the same price path. Counting each fill as a sample calls a markout of zero "significant"
+(|t| > 2) about one time in five at 1 and 10 s whatever the sides, and up to three times in four at 300 and 600 s for
+a strategy that fills on one side; only a book that alternates sides is spared at the long durations, where a buy and
+a sell in one window cancel (simulated 2026-11-20: 2,000 sessions of fills with no edge at all, in bursts, at each of
+five durations and three ways of choosing sides). So time is cut into
+buckets three markout durations long, on a fixed grid from the epoch, and each bucket with fills in it is one sample:
+its fills' ticks times quantity added up, s, and their quantity, q. Then
+`T-test = Ticks / (sqrt(n / (n - 1) * sum((s - Ticks * q)²)) / sum(q))` over the n buckets, and Samples is n. That is
+the cluster form of the weighted mean's standard error; Ticks itself is unchanged. With it the same simulation calls a
+zero markout significant 4 to 6 times in a hundred where there are 150 or more samples, which is what an honest test
+does, and 6 to 8 where there are only 16 to 32, where 2 is a lower bar than it looks. Why three: at one duration a
+fill at the end of a bucket still shares its window with the next bucket's fills (7 to 11 in a hundred for one-sided
+fills at 60 s and longer); at five there are too few samples at 600 s (7 to 9 in a hundred). The row keeps its
+buckets in a dictionary and three running sums, moved as each fill lands, so the figure does not depend on the order
+the lines arrive in. How to read it: above 2 in size with 30 or more samples is evidence; under 30 samples the bar is
+higher (2.13 at 16), and one day seldom holds enough buckets at the long durations, so use All for those. With many
+rows on screen about one in twenty passes 2 by chance, so look for the same sign across days. Not done: Newey-West
+standard errors or a block bootstrap, which use the fills a little more efficiently and need a tuning choice.
+
+**The histogram.** The same rows as bars (`MarkoutHistogram`), one per row and grouped as the rows are: up from the
+zero line when the market moved in the fill's favour, green, and down when against, red. The y axis has gridlines at
+round values labelled in the chosen unit, Ticks (the row's Ticks) or USD (the row's total, in thousands or millions
+from 10,000). There is one unit at a time, so one axis; a click on the axis switches it, and the header says which is
+on and how to switch. Each group is named under its bars, with a name dropped where it would run into the one before;
+each bar's markout duration is written under it when every one fits its slot, and otherwise the durations are listed
+once in the header, shortest first as the bars are. The bar under the pointer is read out in full in the header: group,
+duration, ticks, USD and fills. A bar is at most 24 px wide with air around it and at least 1 px tall. The unit is
+saved with the workspace.
+
+**Accepted residuals.**
+
+- Fills in the last markout durations before a strategy stops or the session closes lose the observations they had not
+  reached; at Closed the pending ones are dropped, because the next quote belongs to another session.
+- The pending ring holds 4,096 fills per position; beyond that the oldest fill loses its remaining observations.
+- The "before" quote is one read pass old, not one book delta old.
+- The loop assumes a position's fills arrive in exchange-time order; a later fill with an earlier time waits behind the
+  one before it.
+- The file keeps the date `NewMarkouts` was called on; it does not roll at midnight. The GUI groups by each fill's own
+  time, so totals are unaffected.
+- Markouts of an instrument the context no longer lists (an expired contract) are not shown: there is no tick size or
+  multiplier to convert with. `InstrumentId` stability across server restarts is unverified.
+- Enums are written by name, so renaming a `MarkoutTag` value breaks reading old files.
+- A `.markout` file written before the record gained its fill facts reads with price and quantity zero; delete it (a
+  simulation wipes its own at start).
+- The strategy's `.fill` file losing fills in a simulation is separate: see "Logging's file writes", which makes the
+  tap's writes about thirteen times cheaper but does not guarantee a complete file.
+
+## Sorting without allocating (2026-11-20)
+
+.NET's span sort allocates whenever it is handed a comparer: it wraps the comparer's `Compare` in a new delegate on
+every call (64 bytes), and a struct comparer is boxed first (24 more). Only two forms are free: no comparer on a type
+that implements `IComparable<T>`, and a `Comparison<T>` delegate that already exists. The two shared lists now use only
+those, so neither sort allocates:
+
+- **`StackList<T>.Sort()`** sorts by T's own order through the library, as before: free for `int`, `long`, `double`,
+  `Timestamp`.
+- **`StackList<T>.Sort<TComparer>(comparer)`** is an insertion sort written out in the list, the comparer a struct so
+  the JIT inlines `Compare`. It is stable. Its time grows with the square of the count, which suits the short lists a
+  stack buffer holds; from about 150 to 200 elements the library's sort would be faster. The overload taking an
+  `IComparer<T>` object is gone: through the interface the insertion sort was three times slower than the library at 64
+  elements, so a class comparer has no place on this list. Sort `AsSpan()` with it if one is ever needed, and accept
+  the 64 bytes.
+- **`ArrayList<T>.Sort(Comparison<T>)`** replaces `Sort(Func<T, T, int>)`, which built a closure, a delegate and a
+  comparer on every call (176 bytes). A lambda that captures nothing is made once by the compiler, so call sites written
+  as lambdas compile unchanged and allocate nothing. The `IComparer<T>` and generic-comparer overloads are gone: nothing
+  called them, and an `ArrayList` can be long, so an insertion sort would be wrong for it.
+
+Measured per call with a stopwatch and the thread's allocation counter, fully optimised, sort time including filling
+the list (`Price` is an 8-byte struct compared on one int):
+
+| Call | Length | Before | After |
+|---|---|---|---|
+| `StackList.Sort(struct comparer)` | 4 | 88 B, 56 ns | 0 B, 19 ns |
+| | 16 | 88 B, 298 ns | 0 B, 90 ns |
+| | 64 | 88 B, 1,381 ns | 0 B, 760 ns |
+| | 256 | 88 B, 7,632 ns | 0 B, 10,215 ns |
+| `StackList.Sort(comparer object)` | 16 | 64 B, 264 ns | removed |
+| `ArrayList<int>.Sort(lambda)` | 16 | 176 B, 372 ns | 0 B, 226 ns |
+| | 1,024 | 176 B, 41,925 ns | 0 B, 28,971 ns |
+
+Nothing in this repository or the strategy repositories beside it called the removed overloads. Three insertion sorts
+now exist (`StackList.Sort`, `UnsafeStackList.InsertionSort`, `Algo.InsertionSortKeysInplace`); folding them into one is
+a hot-path change and has not been done.
+
+## The GC monitor runs on the Clock thread (2026-11-21)
+
+`GCMonitor` writes one console line for each second in which the garbage collector ran. It used a one-second
+`System.Threading.Timer`, whose tick runs on a thread-pool worker, and that timer was the only thing in a live strategy
+that used the thread pool. The pool it started never settled: on the CME box every strategy (SecondOutright,
+SecondOutrightBackup, Nikkei_Testing, MGC; 4 CPUs each, the housekeeping cores) made a new `.NET TP Worker` about
+every 42 seconds, in pairs 21 seconds apart and then a gap of about 62, each idle worker leaving after the pool's
+20-second timeout. A new worker allocates about 1.4 KB of objects plus 8 bytes more for every worker made since the last
+collection (an array of dead workers' queues that grows by one slot each time), and takes about 9.4 KB of a no-GC
+region's budget in all, mostly the 8 KB a new thread reserves for its own allocations. At about 2,070 workers a day that
+drains the 64 MB region a realtime scenario starts with in a few days, after which the process collects again. The
+strategies themselves allocate nothing.
+
+The monitor now schedules its check with a `TickTocker`, as the server-alive check is, so it runs on the Clock thread
+and the process has no timer thread and no pool threads. `GCMonitor.Start()` is unchanged for its callers (33 scenario
+files across the strategy repositories); `Stop()`, which nothing called, is gone. The line's text is the same; it now
+appears on the whole second, where the Clock's timers fall.
+
+Measured on a Linux native-AOT build (4 CPUs, main thread pinned, 64 MB no-GC region), reproducing the box's rhythm
+first: with the timer, new workers at 1, 22, 43, 106 and 127 s; with the check on the Clock thread, no thread created
+in 130 s and 0 bytes allocated by the other threads over 120 checks. The check reads five counters: 12 ns warm, about
+1.2 µs as a once-a-second call finds its memory, 5 µs the worst of 100. The line of a second with a collection costs
+about 960 bytes and 0.3 ms to a console (3.9 ms the worst of 50), on a thread that only runs timers; the strategy's read
+loop is on the main thread and `Clock.Now` reads the system time, so a late Clock thread delays timers and nothing else.
+
+- A check that runs in a simulation follows simulated seconds, so its "per second" figures would be per simulated
+  second. Scenarios start the monitor on their realtime path.
+- The alternative, switching the pool's idle timeout off (`System.Threading.ThreadPool.ThreadTimeoutMs = -1`), also stops
+  the churn (two workers by 22 s, then none in 20 minutes) but is a per-strategy build setting and leaves the timer, the
+  gate thread and two workers in the process. It is set in `PRODUCTION_Second\HFT.targets`; with this change it is
+  unnecessary and harmless.
+- Not verified: a real strategy on the box after a deploy. Anything else in a strategy that uses the thread pool would
+  start it again; `ls /proc/<pid>/task` with the threads' names shows it (`.NET TP Worker`).
 
 ## Open items
 

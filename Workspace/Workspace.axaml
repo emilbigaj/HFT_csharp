@@ -40,8 +40,10 @@
 						<MenuItem Header="Instruments" Tag="InstrumentHeadersWidget" Click="OnAddWidgetClick"/>
 						<MenuItem Header="Chart" Tag="ChartWidget" Click="OnAddWidgetClick"/>
 						<MenuItem Header="Fills" Tag="FillsWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Markouts" Tag="MarkoutsWidget" Click="OnAddWidgetClick"/>
 						<MenuItem Header="Positions" Tag="PositionsWidget" Click="OnAddWidgetClick"/>
 						<MenuItem Header="Orders" Tag="OrdersWidget" Click="OnAddWidgetClick"/>
+						<MenuItem Header="Ladder" Tag="LadderWidget" Click="OnAddWidgetClick"/>
 						<MenuItem Header="Send Order" Tag="SendOrderWidget" Click="OnAddWidgetClick"/>
 						<MenuItem Header="Audit Trail" Tag="AuditTrailWidget" Click="OnAddWidgetClick"/>
 						<MenuItem Header="Risk Limits" Tag="RiskLimitsWidget" Click="OnAddWidgetClick"/>

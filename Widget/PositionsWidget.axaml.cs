@@ -202,7 +202,7 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
     public void OnResumeAllClick(object? sender, RoutedEventArgs e) => PerformChangeAllAlgoStatus(AlgoStatus.Live);
 
     /// Adds a row for each instrument newly allocated to the primary client, refreshes every row and posts them to the grid with
-    /// their total profit in the title bar. Timer thread.
+    /// their total profit, total realized profit and total floating profit in the title bar. Timer thread.
     private void Refresh()
     {
         // Step 1: a row for each newly allocated instrument
@@ -213,25 +213,32 @@ public sealed partial class PositionsWidget : UserControl, IWidget, IDisposable
                 _widgetPositionsByInstrumentId.Add(instrumentId, new WidgetPosition(_context.Primary.GetPosition(instrumentId)));
         }
 
-        // Step 2: refresh every row and add up their profit
+        // Step 2: refresh every row and add up their profit, realized profit and floating profit
         _activeWidgetPositions.Clear();
         double _totalProfit = 0;
+        double _totalRealized = 0;
+        double _totalFloating = 0;
         foreach (WidgetPosition widgetPosition in _widgetPositionsByInstrumentId.Values)
         {
             widgetPosition.Refresh();
             _activeWidgetPositions.Add(widgetPosition);
             _totalProfit += widgetPosition.Profit;
+            _totalRealized += widgetPosition.Realized;
+            _totalFloating += widgetPosition.Floating;
         }
 
-        // Step 3: post the rows to the grid and the total to the title bar, coloured by its sign as the ladder's PnL
+        // Step 3: post the rows to the grid and the totals to the title bar, each coloured by its sign as the ladder's are
         double totalProfit = _totalProfit;
+        double totalRealized = _totalRealized;
+        double totalFloating = _totalFloating;
         Dispatcher.UIThread.Post(() =>
         {
             if (_refreshTimer.IsDisposed)
                 return;
             Rows.ReconcileRows(_activeWidgetPositions);
-            TotalProfitValue.Text = $"{totalProfit:N2}";
-            TotalProfitValue.Foreground = Palette.GetSignBrush(totalProfit, Palette.ProfitGreen, Palette.LossRed);
+            Widgets.ShowProfit(TotalProfitValue, totalProfit);
+            Widgets.ShowProfit(TotalRealizedValue, totalRealized);
+            Widgets.ShowProfit(TotalFloatingValue, totalFloating);
         });
     }
 

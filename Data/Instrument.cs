@@ -60,6 +60,8 @@ public struct InstrumentHeader()
     public String4 ProductGroupRoot;   // the group CME counts its message efficiency under (MDP3 SecurityGroup), set by whoever builds the header
     public Timestamp TradingStatusTimestamp;   // @64: exchange time TradingStatus last changed; MinValue never. Server only, written before TradingStatus
     public Currency Currency;   // @72: what the contract pays in, from the catalog; USD unstamped, set by whoever builds the header
+    public double ExchangeFee;   // @73: the exchange's fee for one contract, in Currency; 0 unstamped, set by whoever builds the header
+    public double ClearingFee;   // @81: the clearing fee for one contract, in Currency; 0 unstamped, set by whoever builds the header
 }
 
 // Why every member is readonly: rows are read through ref readonly, where a non-readonly call copies the row and its As* ref points into the dead copy

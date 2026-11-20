@@ -134,6 +134,17 @@ public abstract class Context
         return Path.Combine(directoryPath, "Fills", $"{symbol}.fill");
     }
 
+    public static FileSystemPath GetMarkoutsFilePath(FileSystemPath directoryPath, string symbol, DateTime date)
+    {
+        string fileName = $"{date:yyyy-MM-dd}.markout";
+        return Path.Combine(GetMarkoutsDirectoryPath(directoryPath), symbol, fileName);
+    }
+
+    public static FileSystemPath GetMarkoutsDirectoryPath(FileSystemPath directoryPath)
+    {
+        return Path.Combine(directoryPath, "Markouts");
+    }
+
     public static FileSystemPath GetAuditFilePath(FileSystemPath directoryPath, DateTime date)
     {
         string fileName = $"{date:yyyy-MM-dd}.audit";
@@ -792,6 +803,9 @@ public sealed class ClientContext : Context
     public FileSystemPath ClientName { get; }
     public int ClientId => _clientId;
     private readonly int _clientId;
+
+    /// This client's markout file for a symbol and date.
+    public FileSystemPath GetMarkoutsFilePath(string symbol, DateTime date) => GetMarkoutsFilePath(DirectoryPath, symbol, date);
 
     public ClientContext(FileSystemPath clientName, FileSystemPath serverName, Access access)
         : base(serverName, clientName, Access.Read, access)

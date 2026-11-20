@@ -1,0 +1,55 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:Widget"
+             x:Class="Widget.MarkoutsWidget"
+             x:DataType="local:WidgetMarkoutGroup">
+
+	<UserControl.Styles>
+		<StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml"/>
+	</UserControl.Styles>
+
+	<DockPanel>
+		<StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="4" Spacing="6">
+			<TextBlock Text="View" VerticalAlignment="Center"/>
+			<ComboBox x:Name="ViewComboBox" SelectionChanged="OnSelectionChanged"/>
+			<TextBlock Text="Group by" VerticalAlignment="Center"/>
+			<ComboBox x:Name="GroupingComboBox" SelectionChanged="OnSelectionChanged"/>
+			<TextBlock Text="Instrument" VerticalAlignment="Center"/>
+			<ComboBox x:Name="InstrumentComboBox" SelectionChanged="OnSelectionChanged"/>
+			<TextBlock Text="Duration" VerticalAlignment="Center"/>
+			<ComboBox x:Name="MarkoutDurationComboBox" SelectionChanged="OnSelectionChanged"/>
+		</StackPanel>
+
+		<Panel>
+			<DataGrid x:Name="MarkoutsGrid"
+                      AutoGenerateColumns="False"
+                      CanUserSortColumns="True"
+                      CanUserResizeColumns="True"
+                      CanUserReorderColumns="True"
+                      IsReadOnly="True"
+                      GridLinesVisibility="All"
+                      HeadersVisibility="Column"
+                      RowHeight="24">
+
+				<DataGrid.ContextMenu>
+					<ContextMenu Opened="OnContextMenuOpened"/>
+				</DataGrid.ContextMenu>
+
+				<DataGrid.Columns>
+					<DataGridTextColumn Header="Group" Binding="{Binding Group}" SortMemberPath="Group" Width="Auto"/>
+					<DataGridTextColumn Header="Duration (s)" Binding="{Binding MarkoutSeconds}" SortMemberPath="MarkoutSeconds" Width="Auto"/>
+					<DataGridTextColumn Header="Fills" Binding="{Binding Fills}" SortMemberPath="Fills" Width="Auto"/>
+					<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity}" SortMemberPath="Quantity" Width="Auto"/>
+					<DataGridTextColumn Header="Ticks" Binding="{Binding Ticks, StringFormat={}{0:N3}}" SortMemberPath="Ticks" Width="Auto"/>
+					<DataGridTextColumn Header="USD" Binding="{Binding Usd, StringFormat={}{0:N2}}" SortMemberPath="Usd" Width="Auto"/>
+					<DataGridTextColumn Header="Mean" Binding="{Binding Mean, StringFormat={}{0:N3}}" SortMemberPath="Mean" Width="Auto" IsVisible="False"/>
+					<DataGridTextColumn Header="StdDev" Binding="{Binding StdDev, StringFormat={}{0:N3}}" SortMemberPath="StdDev" Width="Auto" IsVisible="False"/>
+					<DataGridTextColumn Header="T-test" Binding="{Binding TStatistic, StringFormat={}{0:N2}}" SortMemberPath="TStatistic" Width="Auto"/>
+					<DataGridTextColumn Header="Samples" Binding="{Binding Samples}" SortMemberPath="Samples" Width="Auto"/>
+				</DataGrid.Columns>
+			</DataGrid>
+
+			<local:MarkoutHistogram x:Name="MarkoutHistogram" IsVisible="False"/>
+		</Panel>
+	</DockPanel>
+</UserControl>

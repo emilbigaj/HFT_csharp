@@ -26,23 +26,35 @@
                 BorderThickness="0,0,0,1"
                 PointerPressed="OnHeaderPointerPressed">
 
-			<Grid ColumnDefinitions="5*,3*,5*">
-				<ComboBox x:Name="InstrumentPicker" Grid.Column="0" HorizontalAlignment="Stretch" Padding="6,2" DropDownOpened="OnInstrumentPickerOpened" SelectionChanged="OnInstrumentPicked" ToolTip.Tip="Instrument">
-					<!-- Why a compiled binding: a published (trimmed, NativeAOT) desk strips the property a reflection binding looks up -->
-					<ComboBox.ItemTemplate>
-						<DataTemplate x:DataType="data:Instrument">
-							<TextBlock Text="{Binding ShortSymbol}" TextTrimming="CharacterEllipsis"/>
-						</DataTemplate>
-					</ComboBox.ItemTemplate>
-				</ComboBox>
-				<StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
-					<TextBlock x:Name="PositionText" Foreground="Black" Text="Pos:"/>
-					<TextBlock x:Name="PositionValue" Foreground="Black" Text="0" FontWeight="Bold" />
-				</StackPanel>
-				<StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
-					<TextBlock x:Name="PnLText" Foreground="Black" Text="PnL:" />
-					<TextBlock x:Name="PnLValue" Foreground="Black" Text="0.00" FontWeight="Bold" />
-				</StackPanel>
+			<Grid RowDefinitions="Auto,Auto" RowSpacing="3">
+				<!-- Why in the widget and not the frame's title bar: the phone hosts the widget without a frame, and so shows this row too -->
+				<Grid Grid.Row="0" ColumnDefinitions="7*,6*">
+					<!-- Why MinHeight: the Fluent ComboBox asks for 32 px, which made the header taller than the two rows of text in it need -->
+					<ComboBox x:Name="InstrumentPicker" Grid.Column="0" HorizontalAlignment="Stretch" Padding="6,2" MinHeight="24" DropDownOpened="OnInstrumentPickerOpened" SelectionChanged="OnInstrumentPicked" ToolTip.Tip="Instrument">
+						<!-- Why a compiled binding: a published (trimmed, NativeAOT) desk strips the property a reflection binding looks up -->
+						<ComboBox.ItemTemplate>
+							<DataTemplate x:DataType="data:Instrument">
+								<TextBlock Text="{Binding ShortSymbol}" TextTrimming="CharacterEllipsis"/>
+							</DataTemplate>
+						</ComboBox.ItemTemplate>
+					</ComboBox>
+					<TextBlock x:Name="TradingStatusValue" Grid.Column="1" Foreground="Black" Text="Unknown" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip.Tip="Trading Status"/>
+				</Grid>
+				<!-- Why the narrower first column: a position is a handful of digits, where either money figure may run to a signed thousands number -->
+				<Grid Grid.Row="1" ColumnDefinitions="4*,5*,5*">
+					<StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
+						<TextBlock x:Name="PositionText" Foreground="Black" Text="Pos:"/>
+						<TextBlock x:Name="PositionValue" Foreground="Black" Text="0" FontWeight="Bold" />
+					</StackPanel>
+					<StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
+						<TextBlock x:Name="PnLText" Foreground="Black" Text="PnL:" ToolTip.Tip="Floating plus realized profit"/>
+						<TextBlock x:Name="PnLValue" Foreground="Black" Text="0.00" FontWeight="Bold" />
+					</StackPanel>
+					<StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
+						<TextBlock x:Name="FloatingText" Foreground="Black" Text="Flt:" ToolTip.Tip="Floating profit: the open position revalued at the mid"/>
+						<TextBlock x:Name="FloatingValue" Foreground="Black" Text="0.00" FontWeight="Bold" />
+					</StackPanel>
+				</Grid>
 			</Grid>
 		</Border>
 

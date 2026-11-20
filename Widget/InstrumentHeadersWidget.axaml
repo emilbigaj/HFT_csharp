@@ -13,6 +13,8 @@
 			  AutoGenerateColumns="False"
 			  IsReadOnly="True"
 			  CanUserSortColumns="True"
+			  CanUserResizeColumns="True"
+			  CanUserReorderColumns="True"
 			  GridLinesVisibility="All"
 			  BorderThickness="1"
 			  BorderBrush="Gray"

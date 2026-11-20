@@ -113,8 +113,9 @@ public ref struct StackList<T>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public Span<T> AsSpan() => Span.Slice(0, Count);
 
-    // ----- Sorts (in-place, zero-alloc) -----
+    // ----- Sorts (in place) -----
 
+    /// Sorts by T's own order. Allocates nothing when T implements IComparable<T> (int, long, double, Timestamp).
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Sort()
     {
@@ -122,19 +123,24 @@ public ref struct StackList<T>
         MemoryExtensions.Sort(Span.Slice(0, Count));
     }
 
+    /// Sorts by this comparer and allocates nothing. An insertion sort: stable, and right for the short lists a stack
+    /// buffer holds, since its time grows with the square of the count (see Spec.md "Sorting without allocating").
+    /// The comparer must be a struct, so the JIT inlines Compare.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Sort(IComparer<T> comparer)
+    public void Sort<TComparer>(TComparer comparer) where TComparer : struct, IComparer<T>
     {
-        if (Count <= 1) return;
-        MemoryExtensions.Sort(Span.Slice(0, Count), comparer);
-    }
-
-    // Avoids interface dispatch when TComparer is a struct
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Sort<TComparer>(TComparer comparer) where TComparer : IComparer<T>
-    {
-        if (Count <= 1) return;
-        MemoryExtensions.Sort(Span.Slice(0, Count), comparer);
+        Span<T> span = Span.Slice(0, Count);
+        for (int index = 1; index < span.Length; index++)
+        {
+            T value = span[index];
+            int position = index - 1;
+            while (position >= 0 && comparer.Compare(span[position], value) > 0)
+            {
+                span[position + 1] = span[position];
+                position--;
+            }
+            span[position + 1] = value;
+        }
     }
 
     // ----- Zero-alloc foreach support -----

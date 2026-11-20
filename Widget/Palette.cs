@@ -70,6 +70,9 @@ public static class Palette
     /// The brush for a signed value: positiveBrush above 0, negativeBrush below, black at 0 (a quantity's side, a PnL's sign).
     public static IBrush GetSignBrush(double value, IBrush positiveBrush, IBrush negativeBrush) => value > 0 ? positiveBrush : value < 0 ? negativeBrush : Brushes.Black;
 
+    /// The brush a profit figure is written in, wherever one is shown. The row-background form of the same question is PnLToBrushConverter.
+    public static IBrush GetProfitBrush(double profit) => GetSignBrush(profit, ProfitGreen, LossRed);
+
     public static ISolidColorBrush GetRowBackground(IBrush solidBrush, double opacity = 0.2)
     {
         if (solidBrush is ISolidColorBrush scb)

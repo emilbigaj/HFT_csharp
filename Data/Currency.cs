@@ -16,6 +16,13 @@ public enum Currency : byte
     CNH = 4,
     SEK = 5,
     NOK = 6,
+    GBP = 7,
+    CHF = 8,
+    CAD = 9,
+    AUD = 10,
+    NZD = 11,
+    MXN = 12,
+    ZAR = 13,
 }
 
 // One day's dollars for one unit of a currency, a line in <server>/ExchangeRates/<currency>.exchangerate.
@@ -33,8 +40,8 @@ public struct ExchangeRate()
 public static class Currencies
 {
     // The rate array's size, not the enum's count: a currency added later must not change the Mirror's layout hash and
-    // make every desk reinstall the same day (see Spec.md).
-    public const int s_capacity = 16;
+    // make every desk reinstall the same day (see Spec.md). 32 since the 14th currency, leaving room for 18 more.
+    public const int s_capacity = 32;
 
     // The catalog's Currency string, which is the enum's own name. Throws on an unknown one: falling back to USD would
     // misprice a whole product silently. Startup only.

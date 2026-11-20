@@ -78,8 +78,9 @@ public partial class PhoneView : UserControl, IWidgetHost
             TcpLinkConnector tcpLinkConnector = new(mirrorConfig.ListenPort, mirrorConfig.IPWhitelist, mirrorConfig.ConnectAddresses);
             LowLatency.StartBackgroundThread("Mirror", () => MirrorRunner.RunRemote(_serverName, tcpLinkConnector, mirrorConfig, s_passIntervalMilliseconds));
 
-            // Step 4: the GUI's client, once the copy is up
+            // Step 4: the GUI's client, once the copy is up; the bar ticks from here, so the first snapshot shows its link's latency
             StatusText.Text = $"connecting to {_connectAddress}…";
+            _refreshTimer.Start();
             ConnectAsync();
         }
         catch (Exception exception)
@@ -215,8 +216,13 @@ public partial class PhoneView : UserControl, IWidgetHost
     {
         Dispatcher.UIThread.Post(() =>
         {
+            // Why before the client: the first snapshot takes seconds over a mobile link, and its latency is what says it is still coming
             if (_manualClient is not RemoteClient remoteClient || _isConnecting)
+            {
+                if (ContextManager.IsInitialized)
+                    StatusText.Text = _latencyText.GetText(ContextManager.ServerContext, remoteClient: null);
                 return;
+            }
             // Why: a restarted server is a new run (client ids, instrument ids), so the view rebuilds on it (see Spec.md "Remote workspaces")
             if (remoteClient.IsSessionEnded)
             {

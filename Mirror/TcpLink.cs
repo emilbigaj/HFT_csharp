@@ -25,6 +25,8 @@ public sealed class TcpLink : IDisposable
     private readonly NetworkStream _networkStream;
     private readonly ConcurrentQueue<byte[]> _receivedPackets = new();
     private readonly BlockingCollection<byte[]> _sendPackets = new(s_maximumQueuedPackets);
+    private readonly ConcurrentQueue<byte[]> _priorityPackets = new();   // sent before whatever is already queued: timing probes, which carry no state
+    private static readonly byte[] s_priorityWakeUp = [];                // queued on _sendPackets so a writer waiting on it wakes for a priority packet
     private volatile bool _isConnected = true;
 
     public string RemoteEndPoint { get; }
@@ -36,10 +38,11 @@ public sealed class TcpLink : IDisposable
         // Why: the link owns the socket from here, so a throw below must close it, not leak it
         try
         {
-            // Step 1: a read that waits 10 s means the peer is gone; a stuck write gives up just as soon
+            // Step 1: a read that waits 10 s means the peer is gone. Why no send timeout: a write that blocks is a peer reading
+            // slowly, not a dead one, and a first snapshot over a mobile link takes longer than 10 s; the reader fails a silent
+            // peer within the timeout anyway, and the Dispose that follows throws the writer out of its blocked Write
             tcpClient.NoDelay = true;
             tcpClient.ReceiveTimeout = s_silenceTimeoutMilliseconds;
-            tcpClient.SendTimeout = s_silenceTimeoutMilliseconds;
             _networkStream = tcpClient.GetStream();
             RemoteEndPoint = tcpClient.Client.RemoteEndPoint?.ToString() ?? "";
 
@@ -66,6 +69,17 @@ public sealed class TcpLink : IDisposable
     public void Write(ReadOnlySpan<byte> packet)
     {
         if (_isConnected && !_sendPackets.TryAdd(packet.ToArray()))
+            Disconnect("send queue full");
+    }
+
+    /// Queues one packet ahead of everything already waiting, and flushes it. Only for a packet whose meaning does not depend on
+    /// where it sits in the stream (a Pong): rows, their heartbeat and a GUI's id are read in order and must keep it.
+    public void WritePriority(ReadOnlySpan<byte> packet)
+    {
+        if (!_isConnected)
+            return;
+        _priorityPackets.Enqueue(packet.ToArray());
+        if (!_sendPackets.TryAdd(s_priorityWakeUp))
             Disconnect("send queue full");
     }
 
@@ -103,7 +117,8 @@ public sealed class TcpLink : IDisposable
         }
     }
 
-    // Writer thread: sends queued packets, flushing whenever the queue runs empty so a pass goes out in few segments.
+    // Writer thread: priority packets first and at once, then the queued stream, flushing whenever the queue runs empty so a
+    // pass goes out in few segments.
     private void WritePackets()
     {
         try
@@ -112,9 +127,17 @@ public sealed class TcpLink : IDisposable
             Span<byte> packetLength = stackalloc byte[sizeof(int)];
             foreach (byte[] packet in _sendPackets.GetConsumingEnumerable())
             {
-                BinaryPrimitives.WriteInt32LittleEndian(packetLength, packet.Length);
-                bufferedStream.Write(packetLength);
-                bufferedStream.Write(packet);
+                // Step 1: anything queued ahead of the stream, flushed on its own. Why flushed: a probe held in the buffer behind
+                // a snapshot's rows would time the buffer, not the link, which is what it is there to measure
+                bool isPriorityWaiting = !_priorityPackets.IsEmpty;
+                while (_priorityPackets.TryDequeue(out byte[]? priorityPacket))
+                    WritePacket(bufferedStream, priorityPacket, packetLength);
+                if (isPriorityWaiting)
+                    bufferedStream.Flush();
+
+                // Step 2: the stream itself; a zero-length packet is only the wake-up a priority packet queued
+                if (packet.Length > 0)
+                    WritePacket(bufferedStream, packet, packetLength);
                 if (_sendPackets.Count == 0)
                     bufferedStream.Flush();
             }
@@ -123,6 +146,14 @@ public sealed class TcpLink : IDisposable
         {
             Disconnect(exception.Message);
         }
+    }
+
+    // One framed packet into the buffer: [int32 length][packet].
+    private static void WritePacket(BufferedStream bufferedStream, byte[] packet, Span<byte> packetLength)
+    {
+        BinaryPrimitives.WriteInt32LittleEndian(packetLength, packet.Length);
+        bufferedStream.Write(packetLength);
+        bufferedStream.Write(packet);
     }
 
     private void Disconnect(string reason)

@@ -270,30 +270,16 @@ public sealed class ArrayList<T> : IDisposable
         _count = needed;
     }
 
-    // ---------- Sorting (unchanged) ----------
+    // ---------- Sorting ----------
 
+    /// Sorts in place by this comparison and allocates nothing itself; a lambda that captures nothing is made once by
+    /// the compiler, so the call allocates nothing either (see Spec.md "Sorting without allocating").
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Sort(Func<T, T, int> comparison)
+    public void Sort(Comparison<T> comparison)
     {
         ThrowIfDisposed();
         if (_count <= 1) return;
-        AsSpan().Sort(Comparer<T>.Create((x, y) => comparison(x, y)));
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Sort(IComparer<T> comparer)
-    {
-        ThrowIfDisposed();
-        if (_count <= 1) return;
-        AsSpan().Sort(comparer);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Sort<TComparer>(TComparer comparer) where TComparer : IComparer<T>
-    {
-        ThrowIfDisposed();
-        if (_count <= 1) return;
-        AsSpan().Sort(comparer);
+        AsSpan().Sort(comparison);
     }
 
     // ---------- Capacity management ----------

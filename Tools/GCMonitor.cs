@@ -1,64 +1,50 @@
-﻿
-using System;
+﻿using System;
 
 namespace Tools;
 
+/// Watches the process's garbage collector. Once a second, on the Clock thread, it reads the collector's totals and
+/// writes one console line for a second in which a collection happened. A realtime scenario starts it. Cold path:
+/// the check allocates nothing; only the line of a second with a collection formats, allocates and writes
+/// (see Spec.md "The GC monitor runs on the Clock thread").
 public static class GCMonitor
 {
-    private static System.Threading.Timer? Timer;
+    private const int s_checkPeriodMilliseconds = 1000;
 
-    public static void Stop()
+    /// The collector's running totals since the process started, at one moment.
+    private readonly record struct GcCounters(long AllocatedBytes, TimeSpan Pause, int Gen0Count, int Gen1Count, int Gen2Count)
     {
-        Timer?.Dispose();
-        Timer = null;
+        public static GcCounters NewNow() =>
+            new(GC.GetTotalAllocatedBytes(), GC.GetTotalPauseDuration(), GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2));
     }
+
+    private static GcCounters s_lastGcCounters;   // as of the last check; the Clock thread only, once started
+
+    /// Takes the totals as they stand and schedules the check once a second on the Clock thread.
     public static void Start()
     {
-        // Snapshot baseline counters (since-process-start aggregates).
-        long lastAlloc = GC.GetTotalAllocatedBytes();              // total bytes allocated so far (process-wide)
-        int lastG0 = GC.CollectionCount(0),                        // total Gen0 collections so far
-            lastG1 = GC.CollectionCount(1),                        // total Gen1 collections so far
-            lastG2 = GC.CollectionCount(2);                        // total Gen2 collections so far
-        var lastPause = GC.GetTotalPauseDuration();                // total time spent in GC so far (TimeSpan)
+        s_lastGcCounters = GcCounters.NewNow();
+        new TickTocker("GCMonitor", s_checkPeriodMilliseconds, OnTickTock);
+    }
 
-        // Create a timer that fires every 1000 ms to compute 1-second deltas.
-        Timer = new System.Threading.Timer(_ =>
+    /// Writes a line if a collection happened since the last check, then keeps the totals for the next one.
+    private static void OnTickTock(Timestamp timestamp)
+    {
+        // Step 1: the totals now, and the collections since the last check
+        GcCounters gcCounters = GcCounters.NewNow();
+        int gen0Count = gcCounters.Gen0Count - s_lastGcCounters.Gen0Count;
+        int gen1Count = gcCounters.Gen1Count - s_lastGcCounters.Gen1Count;
+        int gen2Count = gcCounters.Gen2Count - s_lastGcCounters.Gen2Count;
+
+        // Step 2: a line only for a second with a collection, so a quiet second formats and writes nothing
+        bool hasCollected = gen0Count > 0 || gen1Count > 0 || gen2Count > 0;
+        if (hasCollected)
         {
-            // Read current counters.
-            long alloc = GC.GetTotalAllocatedBytes();              // new total allocated bytes (cumulative)
-            var pause = GC.GetTotalPauseDuration();                // new total GC pause (cumulative)
+            Console.WriteLine($"{DateTime.UtcNow.ToLongString()} allocRate={(gcCounters.AllocatedBytes - s_lastGcCounters.AllocatedBytes):n0} B/s, " +
+                $"pause={(gcCounters.Pause - s_lastGcCounters.Pause).TotalMilliseconds:n3} ms/s, " +
+                $"Gen0/s={gen0Count}, Gen1/s={gen1Count}, Gen2/s={gen2Count}");
+        }
 
-            // Print *per-second* rates by subtracting the previous snapshot.
-
-            int g0 = GC.CollectionCount(0);
-            int g1 = GC.CollectionCount(1);
-            int g2 = GC.CollectionCount(2);
-
-            int g0Delta = g0 - lastG0;                // Gen0 collections in the last second
-            int g1Delta = g1 - lastG1;                // Gen1 collections in the last second    
-            int g2Delta = g2 - lastG2;                // Gen2 collections in the last second
-
-            if (g0Delta > 0 || g1Delta > 0 || g2Delta > 0)
-            {
-                string line = $"{DateTime.UtcNow.ToLongString()} allocRate={(alloc - lastAlloc):n0} B/s, " +       // bytes allocated in the last second
-                $"pause={(pause - lastPause).TotalMilliseconds:n3} ms/s, " + // GC pause ms in the last second
-                $"Gen0/s={g0Delta}, " +      // Gen0 collections in the last second
-                $"Gen1/s={g1Delta}, " +      // Gen1 collections in the last second
-                $"Gen2/s={g2Delta}";        // Gen2 collections in the last second
-
-
-                Console.WriteLine(line);
-
-            }
-
-
-            // Advance baselines to “now” so the next tick reports the next 1s window.
-            lastAlloc = alloc;
-            lastPause = pause;
-            lastG0 = g0;
-            lastG1 = g1;
-            lastG2 = g2;
-
-        }, null, 1000, 1000);                                      // dueTime = 1s, period = 1s
+        // Step 3: these totals are the next check's "before"
+        s_lastGcCounters = gcCounters;
     }
 }

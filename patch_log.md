@@ -4,6 +4,365 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-11-21 — The GC monitor checks on the Clock thread; a live strategy no longer has a thread pool
+
+- `Tools/GCMonitor.cs` — the monitor's one-second `System.Threading.Timer` ran its tick on a thread-pool worker, and was
+  the only thread-pool user in a live strategy. On the CME box (looked at read-only) all four live strategies made a
+  new `.NET TP Worker` about every 42 s; each costs about 9.4 KB of the 64 MB no-GC region (1.4 KB of objects, growing
+  by 8 B per worker made, plus the thread's 8 KB allocation context), which is what ends the region after a few days
+  and brings collections back. The check is now scheduled with a `TickTocker` and runs on the Clock thread: no timer
+  thread, no pool threads. `Start()` is unchanged for its 33 callers; `Stop()` had no caller and is removed; the
+  counters moved from a closure's locals into one `GcCounters` record. Same line, now written on the whole second.
+- Reproduced and tested on a Linux native-AOT build in WSL (scratchpad `tpchurn`, `gccheck`, and `GcMonitorHost` in a
+  copy of the repo): the timer gives the box's rhythm (new workers at 1, 22, 43, 106, 127 s); without it there are no
+  pool threads; the new monitor made no thread in 130 s, allocated 0 B over 120 checks and wrote its line after a
+  forced collection. The check costs 12 ns warm, about 1.2 µs once a second; the line about 0.3 ms and 960 B, only
+  in a second with a collection.
+- Lines: `GCMonitor.cs` +35 −49. Spec.md "The GC monitor runs on the Clock thread"; C++ report C30 (nothing to port).
+- Not verified: a strategy on the box after a deploy. The other session's `ThreadTimeoutMs = -1` in
+  `PRODUCTION_Second\HFT.targets` is now unnecessary and harmless; it is not this repository's to change.
+
+## 2026-11-20 — `StackList` and `ArrayList` sorts no longer allocate
+
+- `Tools/Collections/StackList.cs` — the section was headed "zero-alloc", but both comparer overloads went to .NET's
+  span sort, which makes a delegate from the comparer on every call: 64 B with a comparer object, 88 B with a struct
+  comparer (boxed first), the one commented "avoids interface dispatch". `Sort<TComparer>` is now an insertion sort
+  over a struct comparer (0 B; 19 ns against 56 ns at 4 elements, 90 against 298 at 16, 760 against 1,381 at 64; slower
+  than before from about 150 to 200 elements, 10,215 against 7,632 ns at 256). The `IComparer<T>` overload is removed
+  (through the interface the insertion sort was three times slower than the library at 64 elements). `Sort()` is
+  unchanged and its comment now says when it is free.
+- `Tools/Collections/ArrayList.cs` — `Sort(Func<T, T, int>)` built a closure, a delegate and a comparer per call (176 B);
+  it is now `Sort(Comparison<T>)`, which hands the delegate straight to the library (0 B; 226 against 372 ns at 16
+  elements, 28,971 against 41,925 ns at 1,024). Lambda call sites compile unchanged: `Data/InstrumentDetails.cs:146`,
+  `Data/TickHistory.cs:153`, `Data/MarketByOrder.cs:229, 277, 514`, and `RefinitivDownloader/Parser.cs:382-383` outside
+  this repository. The `IComparer<T>` and generic-comparer overloads are removed: nothing called them.
+- Behaviour: the `StackList` comparer sort is now stable (equal keys keep their order); the library's sort was not.
+  No caller exists in this repository or the strategy repositories beside it, so nothing observes the difference.
+- Lines: `StackList.cs` +18 −12, `ArrayList.cs` +5 −19. Measured with a stopwatch harness and the thread's allocation
+  counter, not BenchmarkDotNet. Spec.md "Sorting without allocating"; C++ report C29 (nothing to port).
+- Left: three insertion sorts now exist (`StackList.Sort`, `Tools/UnsafeStackList.cs:59`, `Strategy/Algo.cs:446`).
+  Folding them into one is a hot-path change, proposed, not done.
+
+## 2026-11-20 — Measured: the markout recorder's cost, and the tap after the cheaper writes (no code change)
+
+- **Recorder (`Strategy/Markouts.cs`).** Timed inside a two-day backtest run from a scratch copy of the code under its
+  own server name: about 4 to 7 ns per book update with nothing pending (92.5% of 58.5 million updates), about 18 ns
+  with fills pending, about 280 to 340 ns for an update that writes records (0.06%), about 140 to 160 ns per fill; 5 to
+  8 ns averaged over every update; 0 bytes allocated over 58.6 million calls. Recorded in Spec.md "Markouts".
+- **Tap.** The user's rerun with the cheaper Logging writes still left the strategy's `.fill` files with 23,041 of the
+  server's 29,320 fills (NQ 3,146 of 6,368). The scratch copy counted why: 114 laps of a 2 MB ring, 24% of the tap's
+  records jumped over, although the tap was busy only a quarter of the time: bursts, not average speed. Tried in the
+  copy only: 64 MB rings (1 lap, 4.5% jumped), a tap that writes at most 2,048 records per pass (21 laps, 9.4%), and
+  both together (no lap, every fill in the strategy's files). Recorded in Spec.md "Logging's file writes". Nothing in
+  the repo was changed for this. Declined by the user the same day: not important for a simulation, cannot happen live.
+- **Seen on the way.** The same two simulated days gave 11,202, 11,115, 11,191 and 11,212 fills in four runs: the
+  simulation does not repeat exactly. Not looked into.
+
+## 2026-11-20 — Markouts widget: its choices are saved with the workspace
+
+- `Widget/MarkoutsWidget.axaml.cs` — `SaveStateJson` returned null, so every reopen reset the view, the grouping, the
+  instrument, the duration, the histogram's unit and any column shown or hidden. New `MarkoutsWidgetState` holds all six;
+  `LoadStateJson` puts the saved instrument and duration into their boxes at once (their markouts are still being read
+  when a workspace restores a widget), selects them and totals once. A state that does not parse leaves the defaults.
+- Same file — the Duration box's choices are kept as seconds (`_markoutSecondsChoices`), the form the box shows, in
+  place of a set of `Duration`s converted on every refill: three lines fewer in `ShowChoices`, and a saved duration
+  needs no conversion back.
+- `Widget/MarkoutHistogram.cs` — the unit is a public property (`MarkoutUnit`) so the widget can save and restore it.
+- Tested off-screen on the real widget (no server, so no rows of data): defaults; a state set by hand; choices changed
+  through the controls, saved, loaded into a new widget and saved again (identical); a half-second duration; a state
+  saved before any instrument appeared; and five states that are missing or do not parse. 76 checks pass. Not tested:
+  rows arriving after a restore in a running Workspace.
+- No C++ change (GUI only).
+
+## 2026-11-20 — Markouts: the histogram gets axes, and T-test counts buckets of time, not fills
+
+- `Widget/MarkoutHistogram.cs` — rewritten. It had no y axis, printed every bar's label on top of the next, let bars
+  touch and cut the tallest off at the top. Now: gridlines at round values labelled in the unit on show; a click on the
+  y axis switches between Ticks and USD (one unit, one axis); each group named under its bars, names dropped where they
+  would overlap; each bar's markout duration under it when they all fit, else listed once in the header; the bar under
+  the pointer read out in the header; bars capped at 24 px with gaps, their data end rounded.
+- Looked at, not only built: a scratchpad harness hosts the real control in an off-screen window (Fluent, light, Inter,
+  as the Workspace) with rows from the live EMD file and saves pictures. Eight cases: every hour by every duration (the
+  one in the bug report), the same hovered, the same after a click on the axis, one duration, by day, one group, a
+  380 px wide widget, and no rows. The whole Markouts widget was not opened: it needs a running server's context.
+- `Widget/MarkoutsWidget.axaml.cs`, `WidgetMarkoutGroup` — T-test's samples are buckets of time three markout durations
+  long (`MarkoutBucket`), and a Samples column says how many. Ticks, USD, Mean and StdDev are unchanged. The old
+  figure, each fill a sample, was not a small error: on fills with no edge at all it passed 2 in about one session in
+  five at 1 and 10 s, and in up to three in four for one-sided fills at 300 and 600 s. The new one passes 2 in 4 to 6
+  in a hundred with 150 or more samples, and 6 to 8 with 16 to 32.
+- Verified: the widget's T-test and Samples match an independent two-pass awk calculation on the NQ and EMD files, by
+  All and by Day, with the lines in order and scrambled (90 rows, identical). The simulation that chose three over one
+  and five durations is in Spec.md "Markouts".
+- Net lines up (the histogram is 368 lines where it was 57): it draws an axis, labels and a readout it did not have.
+  GUI only, so no C++ item.
+
+---
+
+## 2026-11-20 — Positions title bar shows realized profit between PnL and Flt
+
+- `Widget/PositionsWidget.axaml` — `Rlz:` and its value sit between `PnL:` and `Flt:`, so the bar reads total, banked,
+  open, and `PnL:` is the other two added up.
+- `Widget/PositionsWidget.axaml.cs` — `Refresh` adds up the rows' `Realized` in the walk it already makes and shows it
+  through `Widgets.ShowProfit`, as the other two totals are. No new read, row, timer or thread.
+- The ladder header keeps `Pos:`, `PnL:`, `Flt:`; it was not asked for there and its row has no room to spare.
+- Built; not seen on screen. GUI only, so no C++ item.
+
+---
+
+## 2026-11-20 — Logging writes a simulation's records about thirteen times cheaper (the tap still loses some: see "Measured" above)
+
+- **What was wrong.** In a Max-speed backtest the strategy's `.audit` and `.fill` files held about a tenth of its
+  records. Logging's tap on the strategy's socket could write about 28,000 records a second and the run produced far
+  more; the rings never wait, so an overtaken tap silently skips a ring's worth.
+- `Logging/LoggingServer.cs`, `ObjectWriter.SetFileStream` — in `Simulation` a 64 KB buffer and no
+  `FileOptions.WriteThrough`. `Realtime` keeps 4 KB and write-through.
+- `ObjectWriter.SerializeToUtf8` and `WriteLineWithSymbol`, `AuditWriter.Write` / `WriteWithSymbol` — the five order
+  records go from struct to UTF-8 in a reused buffer and are written around the symbol's cached bytes. No string, no
+  `string.Replace`. The symbol is always injected: a record with no OrderHeader now throws where it used to be written
+  bare. The five cases leave `SerializeToLine`.
+- Small refactor: `GetSymbolWriter<T>` replaces the same get-or-open block written three times (fill, position,
+  risk limit files).
+- All three string variants were measured first (OrderState, per record): `Replace` 2,332 ns / 3,216 B; `Concat`
+  1,689 ns / 3,216 B; encoded pieces 1,596 ns / 2,008 B; straight to UTF-8 1,469 ns / 880 B. The last is what shipped.
+- Verified by compiling one harness twice, against HEAD's `LoggingServer.cs` and against the new one, and writing the
+  same records through `AuditWriter` (every order type, symbol unknown and known, a risk limit): the audit, fill,
+  position and risk-limit files are byte-identical, in both modes. Simulation: 32,000-40,000 ns a record before,
+  2,500-2,800 ns after. Realtime: 32,700 ns before, 32,800 ns after, 880 B allocated a record against 3,448 B.
+- Not verified: a simulation run showing the strategy's files now complete. Timings are on the local temp disk, not S:.
+- Residual, in Spec.md "Logging's file writes": nothing makes the simulator wait for the tap, so a fast enough
+  backtest can still lose tap records. No C++ item: Logging is C#-only.
+
+---
+
+## 2026-11-20 — Markouts widget: one instrument always selected, Mean / SD / T-test, and no join to the fill file
+
+- **Bug: the grid showed about a quarter of the fills.** The widget joined each markout to the strategy's `.fill` file,
+  and in a simulation that file is incomplete: NQ had 228 lines for 1,814 fills (ids 0-12, then 49), while the server's
+  fill file had every one. The recorder was right all along: 7,102 server fills, 7,102 one-second records, none out of order.
+- `Execution/Markout.cs`, `Strategy/Markouts.cs` — the record now carries `InstrumentId`, `FillPrice`, `FillQuantity`
+  and `FillType` (41 to 58 bytes), so the file stands alone. `FillId` and `FillExchangeTimestamp` stay.
+- `Widget/MarkoutsWidget.axaml(.cs)` — the fill reader, the key type and the join are gone. An Instrument box that
+  always has a selection replaces the Symbol grouping. New columns Mean, SD and T-test, per fill in ticks. New lines add
+  to the rows in place (rows no longer rebuild and lose their sort on every batch); a one-second timer finds symbol
+  folders created after the widget opened, which is why a widget restored at simulation start used to stay empty.
+- Verified: a scratchpad harness ran the widget's own row class and grouping over 35,321 real observations (the live NQ
+  file joined to the server's fills) and matched an independent awk calculation on all 40 day-by-duration rows and all
+  seven figures. Not verified: the widget on screen after these changes.
+- Later the same day: Mean, StdDev and T-test are all quantity-weighted, each fill one sample counting in proportion to
+  its quantity. T-test tests the Ticks column (`Ticks` over its weighted standard error); Mean equals Ticks; the SD
+  column and property are named StdDev. Mean and StdDev are hidden by default. Checked against an independent two-pass
+  awk calculation on the same 40 rows: identical.
+- Open, not part of this change: why the strategy's `.fill` file loses fills in a simulation. It affects the Fills grid too.
+
+---
+
+## 2026-11-20 — Markouts: the quote after every algo fill, recorded by the strategy and shown in the GUI
+
+- `Execution/Markout.cs` (new) — `Markout` (41 bytes: `FillId`, `FillExchangeTimestamp`, `BidPrice`, `AskPrice`,
+  `MarkoutDuration`, `MarkoutTag`), the `MarkoutTag` enum (None, Exit, Entry) and `MarkoutHandler(in Fill, ref Markout)`.
+  It lives in Execution, not beside the recorder, because Widget cannot see the Strategy project.
+- `Strategy/Markouts.cs` (new) — one per position. Takes algo fills into a pre-allocated ring, raises `Markout` so the
+  strategy can tag the fill, and on each book pass writes one record per markout duration the book's exchange time has
+  passed. No timers; hot path, no allocation after construction.
+- `Strategy/Strategy.cs` — `NewMarkouts(position, markoutDurations)`; "Markouts" joins the folders a simulation wipes,
+  and the wipe now looks into subfolders (`SearchOption.AllDirectories`), since markout files sit in `Markouts/<symbol>/`.
+  For Factors, Series, Fills and Positions this changes nothing unless one of them holds a subfolder with files.
+- `Provider/Context.cs` — `GetMarkoutsFilePath` and `GetMarkoutsDirectoryPath` beside their siblings, and the
+  `ClientContext` overload that passes its own directory.
+- `Data/Series.cs`, `Logging/LoggingServer.cs` — `FileType.Markout = 14` and its `ObjectWriter<Markout>`. A Logging
+  process built before this change refuses a `.markout` series, so Logging must be rebuilt with the strategy.
+- `Widget/MarkoutsWidget.axaml(.cs)`, `Widget/MarkoutHistogram.cs` (new) — links markouts to fills on
+  (`FillId`, `FillExchangeTimestamp`) and totals by group and markout duration, as a table or as bars.
+  `Widget/Widgets.cs` registers it and gains `TryGetInstrument`; `Workspace/Workspace.axaml` gets the menu item.
+- Small refactor: `Widget/FillsWidget.axaml.cs` uses `Widgets.TryGetInstrument` in place of its own try/catch lookup
+  (behaviour identical, 6 lines fewer).
+- `Testing/Strategy.cs` — calls `NewMarkouts` per position with 1 s, 10 s, 1 min, 5 min and 10 min; it sets no tag yet.
+- Verified: the solution builds; a scratchpad check confirms the record is 41 bytes and a line round-trips through JSON,
+  NaN included. Not yet verified: a simulation run producing a real file, the widget on screen, and the hot-path
+  benchmark. Design and residuals are in Spec.md "Markouts". No C++ item: the server and the wire are untouched.
+
+---
+
+## 2026-11-17 — Instrument Headers' columns drag and resize like every other grid's
+
+- `Widget/InstrumentHeadersWidget.axaml` — `CanUserResizeColumns` and `CanUserReorderColumns`, which the other seven
+  grids (Audit Trail, Fills, Message Efficiency, Orders, Positions, Rate Limit, Risk Limits) have always carried and this
+  one never did. It was the only grid where a column could not be dragged or hand-sized.
+- Nothing else was needed: `DataGridColumnState` already saves and restores `DisplayIndex` and `Width` by header name,
+  so a dragged order survives a workspace save, and `ColumnRegexFilters` keys its filters on the column object rather
+  than its position, so a reorder leaves every active filter where it was.
+- The regex filter was already case-insensitive — `RegexOptions.IgnoreCase | RegexOptions.CultureInvariant` since
+  8befee8 (2026-09-03), and it is the only text filter in the GUI. No change was needed and none was made.
+
+---
+
+## 2026-11-17 — One place decides how a profit figure looks (refactor, no behaviour change)
+
+- `Widget/Palette.cs` — `GetProfitBrush(double profit)`, one line over the existing `GetSignBrush`. The
+  `ProfitGreen`/`LossRed` pairing was spelled out at four call sites after the two Flt changes; it is now written once.
+- `Widget/Widgets.cs` — `ShowProfit(TextBlock, double)`: the figure to two decimals and the brush for its sign. The
+  ladder header and the Positions title bar were each doing that in two lines per figure, the same block four times over.
+  It lives on `Widgets` because that class already owns what every head of the GUI does the same way, and neither widget
+  owns a profit.
+- `Widget/LadderWidget.axaml.cs`, `Widget/PositionsWidget.axaml.cs` — both call it. The ladder's two brush locals go:
+  the lookup now happens inside the UI post, which is three static reads and a compare against the `N2` formatting that
+  was always there, so nothing measurable moves off the timer thread.
+- `GetSignBrush` keeps exactly one caller, the ladder's position quantity with `BidActiveBlue`/`AskActivePurple` — a
+  different pair for a different question, which is why the primitive stays. `PnLToBrushConverter` is untouched: it is
+  the row-background form, with `Flat` white at zero rather than black, and it has one caller, so folding it in would be
+  an abstraction over a single use.
+- **Net +5 lines**, which a refactor has to justify: the Green/Red pair drops from four statements to one and the
+  format-and-colour block from four to one, so the fifth profit figure on a screen is one call instead of two lines and a
+  100-character brush expression that can silently take the wrong pair. Behaviour is identical, NaN included — it is
+  neither `> 0` nor `< 0`, so it still reads black.
+
+---
+
+## 2026-11-17 — The Positions title bar shows floating PnL beside PnL
+
+- `Widget/PositionsWidget.axaml` — `Flt:` and `TotalFloatingValue` after `PnL:` in the title bar's `TitleBarButtons`
+  panel, spaced and coloured exactly as the pair beside it.
+- `Widget/PositionsWidget.axaml.cs` — `_totalFloating` accumulated in the same walk as `_totalProfit` and posted with it.
+  The widget already refreshed every row and already exposed `WidgetPosition.Floating` for the grid's own column, so no
+  extra read, loop, timer or thread: one more add per row on the refresh pass.
+- Why it earns the space: `PnL:` is total, which is floating plus realized, so a desk holding positions cannot tell from
+  it how much of the number is still moving. The ladder gained the same pair yesterday and this is the same figure one
+  level up — the sum down the grid's own `Floating` column, which was already on screen but never totalled.
+- Unchanged: one holding with no quote makes the column's total `NaN`, which `PnL:` has always done for the same reason
+  (Spec.md "A flat position with no quote is worth zero, not NaN"). GUI only — no wire, shared-memory or C++ impact.
+
+---
+
+## 2026-11-17 — The instrument header carries its fees
+
+- `Data/Instrument.cs` — `InstrumentHeader` gains `ExchangeFee` (offset 73) and `ClearingFee` (offset 81), both `double`,
+  both one contract's cost in the header's own `Currency`. Appended after `Currency` inside the fixed 128 bytes, so no
+  existing offset moves.
+- Measured after the change (.NET 10): `InstrumentHeader` 128, `InstrumentHeader256` 256, `FutureHeader` 145 with
+  `Multiplier` @128, `MaturityDate` @136, `IsFrontMonth` @144, `ForexHeader` 136, `LeggedHeader` 192 — all unchanged, and
+  `LeggedHeader`'s static fit check still passes. No array's `TypeSize` moves, so **`GetLayoutHash()` is unchanged** and
+  the Mirror ends do not have to deploy together for this.
+- Not padded to 8-byte alignment: `Pack = 1` already says byte-packed, and seven filler fields would align a value no hot
+  path reads. The price is that the C++ port must assert 73 and 81 rather than infer them.
+- Zero is the unstamped sentinel, so a server that never writes them reads "no fee known". That holds only if the writer
+  zero-initialises the header struct — bytes 73..127 have been padding since P33, and a writer leaving them dirty now
+  produces garbage fees instead of harmless noise. Recorded as P49 in `cpp_alignment_report_2026-10-12.md`.
+- **Inert so far:** nothing writes them (the catalog has no fee field and `InstrumentDetails` does not carry one) and
+  nothing reads them (no P&L figure is netted of fees). Layout first, on its own, so the two ends cannot drift later.
+
+---
+
+## 2026-11-16 — The ladder's header shows floating PnL beside PnL
+
+- `Widget/LadderWidget.axaml` — the header's second row goes from two columns to three: `Pos:`, `PnL:`, `Flt:`, the
+  position column narrowed to `4*` against the money columns' `5*` because a position is a handful of digits where either
+  money figure may run to a signed thousands number. Both money labels gained a tooltip saying which figure they are.
+- `Widget/LadderWidget.axaml.cs` — `profitFloating` and `profitFloatingBrush` beside the existing total, read from the
+  same `Position.Profit` the pass already takes, posted to the UI thread with it. No new read, row, timer or thread, and
+  the brush rule is the one PnL already used.
+- Why it is worth a column: `PnL:` is `Total`, which is floating plus realized, so a trader holding a position cannot
+  tell from it how much of the number the book in front of them is still moving. `Flt:` is exactly that part, and it is
+  the one the ladder below it explains.
+- Unchanged: holding a position with no quote still shows `NaN` in both money columns, for the reason in Spec.md
+  "A flat position with no quote is worth zero, not NaN". GUI only — no wire, shared-memory or C++ impact.
+
+---
+
+## 2026-11-13 — The first snapshot gets its own phase, and stops killing the link
+
+- `Mirror/TcpLink.cs` — no `SendTimeout`. It was the silence timeout, so a write that had not drained in 10 s threw and
+  dropped the link; the remote redialled and began the snapshot again. A desk whose snapshot does not fit inside one 10 s
+  write window could never converge. That is the ARB desk's log: `Unable to write data to the transport connection:
+  Connection timed out`, then a new ephemeral port every second, forever. A blocking write is a peer reading slowly, not a
+  dead peer. Liveness stays with the reader, which still fails a silent peer in 10 s, and the `Dispose` that follows throws
+  the writer out of its blocked `Write`, so nothing hangs. A peer that truly cannot keep up is still dropped by
+  `s_maximumQueuedPackets` — a volume bound instead of a time bound, which is the right shape.
+- `Mirror/TcpLink.cs` — `WritePriority`, a second queue the writer drains first and flushes on its own, woken through the
+  existing `BlockingCollection` by a zero-length packet so no poll is added. `Mirror/LocalMirror.cs` answers a `Ping` on it.
+  Only a packet whose meaning does not depend on its place in the stream may overtake: rows, the heartbeat that closes
+  them and a GUI's `AllocatedClientId` are read in order, so a timing probe is the only user.
+- `Mirror/RemoteMirror.cs` — `_isSnapshotComplete`, cleared when a link is taken and set by that link's first heartbeat.
+  `GetLatency` is now three-valued: `s_noLinkLatency` with no link, the round trip negated while the snapshot is still
+  coming down, the round trip once synced. The 10 s heartbeat rule applies only after the snapshot, since until then no
+  heartbeat is due. `Provider/RemoteClient.cs` names `s_noLinkLatency` beside `s_silenceTimeout`.
+- `Latency[0]` now carries four meanings on one `Duration`: -1 ns no link, -2 ns (`s_brokenLinkLatency`) a link whose
+  Local end has stopped publishing, any other negative the snapshot with its own latency, 0 or more a synced link. The two
+  faults are kept apart because they are different things to a trader — nobody is dialling in the second case, the link is
+  up and the screen is frozen — and collapsing them would have renamed the old "Connection broken" to "Connecting…".
+  Four is the ceiling: a fifth state wants a row of its own rather than another sentinel.
+- `Widget/Widgets.cs` — "Connecting…", "Connection broken – reconnecting…", "38.214 ms Initializing…", "38.214 ms"; the
+  number leads either way, so it keeps the same place on the bar. `Phone/PhoneView.axaml.cs` starts the bar
+  before the connect finishes and shows the same text while it runs, so a cold phone start shows all three; `GetText`
+  takes a nullable `RemoteClient` for that one case (a GUI mid-snapshot has no client yet).
+- Why the number was wrong rather than merely ugly: the latency is the worst round trip, or the age of the oldest
+  unanswered ping when longer. Queued behind the snapshot, the Pong measured the snapshot's remaining transfer — 6,497 ms
+  on the phone — not the link. Spec.md "The first snapshot has its own phase".
+- Residual: what TCP has already been handed cannot be reordered, so the figure during a snapshot is the link's round trip
+  plus the socket's own backlog. It reads a little high, not seconds high. Making it exact needs the snapshot budgeted per
+  pass (so the socket never holds more than a pass), which is a change to the publish contract and is not done here.
+- Not measured yet: the flush at `TcpLink.WritePackets` fires whenever the send queue momentarily empties, which with
+  `NoDelay` may be putting the snapshot on the wire as thousands of tiny segments. Left alone deliberately — it is a
+  separate behaviour change and wants a measurement first.
+- C++ has no Mirror, so there is nothing to align: `cpp/HFT` is `Data`, `Execution`, `Provider`, `Socket`, `Strategy`,
+  `Tools`. No cpp alignment report.
+- Net +68 lines across six files (88 added, 20 removed), of which `TcpLink`'s priority lane is 31.
+
+---
+
+## 2026-11-12 — Seven more currencies, and the rate array is 32 rows (aligning to C++)
+
+- `Data/Currency.cs` — `Currency` gains `GBP = 7`, `CHF = 8`, `CAD = 9`, `AUD = 10`, `NZD = 11`, `MXN = 12`, `ZAR = 13`,
+  appended after `NOK` with nothing renumbered, and `Currencies.s_capacity` goes from 16 to 32.
+- Why: this is the C++ side's change, not ours — its patch log of 2026-11-12 and §21 of its
+  `csharp_alignment_report_2026-10-12.md` ask C# to carry the same names, numbers and capacity, because the header byte
+  and the rate array both cross the Mirror. CME had been keeping about 218 served futures catalog-only for want of a name
+  for their currency (GBP 88, CHF 39, CAD 33, MXN 25, NZD 14, AUD 14, ZAR 5). The names are the ISO codes exactly as
+  CME's security definition spells them in tag 15, which is what the C++ server reads to stamp the header.
+- 16 → 32 now rather than later: fourteen values still fit in 16, but leave room for two, where 32 leaves eighteen. The
+  cost of the bigger array is the layout hash, and that is already moving for the currency work itself, which has not
+  been deployed — so one deploy covers both instead of two.
+- Breaks: `GetLayoutHash()` changes, so the box, the Threadripper relay, every desk and the phone deploy together.
+  A server that already holds a 16-row `ExchangeRates` region must have it deleted while stopped — `CreateOrOpenShared`
+  refuses to open a region of another length. Production has none (its CmeServer predates the currency work).
+- Unchanged on purpose: a mixed-currency spread needs no rule. NKD–NIY is tag 15 `USD` with a USD leg and a JPY leg, and
+  a fill posts under its own leg's `InstrumentId`, so `Server.OnFill` (`Provider/Server.cs:744`) already reads that leg's
+  instrument and passes that leg's `UsdMultiplier`. Confirmed on this side at the C++ side's request.
+- Also unchanged: `Currencies.FromString` still throws on a currency the enum does not name, where the C++ `CmeServer`
+  keeps such a contract in the catalog and off the served channels (`CmeServer.hpp:661`). The two are right as they are —
+  the C++ server reads one secdef file for the whole exchange and cannot refuse it over one contract, whereas C# only
+  builds a header for an instrument somebody is allocating, and silently pricing that one in the wrong currency would be
+  worse than refusing it.
+- Net +7 lines, one file (9 added, 2 removed).
+
+---
+
+## 2026-11-12 — The ladder's header shows the instrument's trading status
+
+- `Widget/LadderWidget.axaml` — the header becomes two rows: the instrument picker and the trading status on the first,
+  the position and PnL on the second. The picker takes 7/13 of the first row, up from 5/13 of a three-column row, so a
+  symbol as long as "MBT Nov26" no longer runs under the ComboBox's chevron. The second row costs 10 px, not 22: the
+  Fluent ComboBox asks for 32 px of height, which is more than the one line of text in it needs, so the picker is held to
+  `MinHeight="24"` and the two rows sit 3 px apart. Measured: the header is 55 px tall, where one row of it was 65.
+- `Widget/LadderWidget.axaml.cs` — `Refresh` reads `Instrument.Header.TradingStatus` in the step that already gathers the
+  position and PnL, and posts it with them; `GetTradingStatusBrush` gives it a traffic light (green `Open`, amber
+  `Auction`, red `Halted`, gray otherwise), four brushes held like the Message Efficiency widget's but at full strength,
+  since these colour text rather than a cell.
+- `Workspace/Workspace.axaml` — "Ladder" in the Widgets menu, between Orders and Send Order. A ladder could only be
+  opened by right-clicking an Instruments or a Positions row, both of which hand it an instrument; from the menu it opens
+  empty with its picker already filled, which is how the phone has always opened one. `Widgets.NewWidget` already knew
+  the key, so nothing else changed.
+- Why in the widget and not the frame's title bar, which was the first design: the phone hosts widgets without a
+  `WidgetContainer`, so a title-bar status would never show there. Spec.md "The ladder shows its instrument's trading
+  status". The desk frame still shows the bare symbol.
+- No new timer, thread or channel: the ladder's refresh already ran at 100 ms. One byte compared and one enum name taken
+  per pass, beside the full book copy the pass already makes.
+- Unchanged on purpose: a pass that returns early because the book row is unwritten (a Mirror refilling it) skips the
+  status as it skips the position and PnL — the widget is stale as a whole in that window.
+- Net +28 lines across the three files (51 added, 23 removed; most of the XAML's removals are the picker block
+  re-indented into the first row's grid).
+
+---
+
 ## 2026-11-12 — A flat position with no quote is worth zero, not NaN
 
 - `Provider/Position.cs` — `Profit`'s two branches collapse to one: take the mid if there is a quote and `NaN` if there

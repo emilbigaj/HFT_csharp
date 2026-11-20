@@ -195,9 +195,11 @@ public sealed class LocalMirror
                     break;
                 }
                 case MirrorPacketType.Ping:
-                    // Why straight back: the round trip is then the loop and the link; the heartbeat that closes every publish says whether the screen is still fed
+                    // Why straight back and ahead of the queue: the round trip is then the loop and the link, where behind a
+                    // snapshot's rows it would be the snapshot's remaining transfer; the heartbeat that closes every publish
+                    // says whether the screen is still fed
                     MemoryMarshal.AsRef<MirrorPing>(packet).Header = new(MirrorPacketType.Pong);
-                    mirrorSession.TcpLink.Write(packet);
+                    mirrorSession.TcpLink.WritePriority(packet);
                     break;
                 case MirrorPacketType.FileRequest:
                     mirrorSession.FileSyncLocal.OnRequest(packet, mirrorSession.TcpLink);

@@ -43,6 +43,7 @@ public sealed class RemoteMirror : IDisposable
     private uint _pongCount;
     private Timestamp _pongedPingTimestamp = Timestamp.StopwatchNow;   // the newest answered ping (the start, before the first pong)
     private Timestamp _heartbeatTimestamp = Timestamp.StopwatchNow;    // when the last heartbeat arrived: the Local end's last completed publish (the start, before the first)
+    private bool _isSnapshotComplete;                       // false until this link's first heartbeat: until then no heartbeat is due, and silence is not a fault
     private volatile bool _isGuiListDue;
     private volatile bool _isDisposed;                      // read by the listen thread's AllocateClientId wait
     private bool _isListening;
@@ -103,6 +104,7 @@ public sealed class RemoteMirror : IDisposable
             _pongedPingTimestamp = Timestamp.StopwatchNow;
             _heartbeatTimestamp = Timestamp.StopwatchNow;
             _pingTimestamp = default;
+            _isSnapshotComplete = false;
         }
 
         // Step 2: down: the server header (checked against this server), rows, AllocatedClientId, pongs, heartbeats; a restarted server ends this object's work
@@ -208,12 +210,24 @@ public sealed class RemoteMirror : IDisposable
     }
 
     // The worst of the last 10 round trips, or the age of the oldest unanswered ping (sent one interval after the newest answered
-    // one) when longer, so it climbs through a stall; below 0 once the link is down or no publish has closed with a heartbeat for
-    // the silence timeout (a Local end that still answers pings but no longer publishes).
+    // one) when longer, so it climbs through a stall. The three faults have their own values, so the desk can name each one
+    // (see Spec.md "Remote workspaces"): no link, a link that no longer publishes, and the first snapshot still coming down.
     private Duration GetLatency()
     {
         Duration latency = _roundTrips.Append(Timestamp.StopwatchNow - _pongedPingTimestamp - s_pingInterval).Max();
-        return _tcpLink.IsConnected && Timestamp.StopwatchNow - _heartbeatTimestamp < RemoteClient.s_silenceTimeout ? latency : Duration.FromNanoseconds(-1);
+
+        // Step 1: no link: the dial thread is working on it, and there is nothing to measure
+        if (!_tcpLink.IsConnected)
+            return RemoteClient.s_noLinkLatency;
+
+        // Step 2: the snapshot: a pass has not closed with a heartbeat yet because none is due, so silence is not a fault here.
+        // Why at least 3 ns: 0 would read as a synced link, and -1 and -2 ns are the two faults
+        if (!_isSnapshotComplete)
+            return Duration.FromNanoseconds(-Math.Max(3, latency.TotalNanoseconds));
+
+        // Step 3: synced: a Local end that answers pings but whose passes no longer close with a heartbeat has stopped
+        // publishing, which is a broken screen, not a healthy number over a frozen one
+        return Timestamp.StopwatchNow - _heartbeatTimestamp < RemoteClient.s_silenceTimeout ? latency : RemoteClient.s_brokenLinkLatency;
     }
 
     // The Local end's answer for a GUI waiting in AllocateClientId: its id, or a negative ConnectRefusal saying why not.
@@ -223,6 +237,7 @@ public sealed class RemoteMirror : IDisposable
     // The first heartbeat completes the copy: a restarted server's header goes in now (each Workspace rebuilds on its process id), and GUIs may attach.
     private void ApplyHeartbeat()
     {
+        _isSnapshotComplete = true;
         if (_pendingServerHeader is ServerHeader pendingServerHeader)
         {
             _serverContext.ServerHeader.RecoveryWrite(in pendingServerHeader);
@@ -244,7 +259,7 @@ public sealed class RemoteMirror : IDisposable
     {
         Console.WriteLine($"RemoteMirror: {reason}. Close the Workspaces on this machine, then start the Mirror again.");
         // Why: this process stops rewriting the latency, so its last value would freeze on every Workspace until the 10 s age check
-        _serverContext.GetLatency(0).Write(Duration.FromNanoseconds(-1));
+        _serverContext.GetLatency(0).Write(RemoteClient.s_brokenLinkLatency);
         Environment.Exit(1);
     }
 

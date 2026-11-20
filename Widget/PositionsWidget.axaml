@@ -16,6 +16,10 @@
 					ToolTip.Tip="Pause All Algos" ToolTip.ShowDelay="1000" Click="OnPauseAllClick" />
 			<TextBlock Text="PnL:" Foreground="Black" Margin="12,0,0,0" VerticalAlignment="Center" ToolTip.Tip="Every row's Profit added up"/>
 			<TextBlock x:Name="TotalProfitValue" Text="0.00" FontWeight="Bold" VerticalAlignment="Center"/>
+			<TextBlock Text="Rlz:" Foreground="Black" Margin="12,0,0,0" VerticalAlignment="Center" ToolTip.Tip="Every row's Realized added up"/>
+			<TextBlock x:Name="TotalRealizedValue" Text="0.00" FontWeight="Bold" VerticalAlignment="Center"/>
+			<TextBlock Text="Flt:" Foreground="Black" Margin="12,0,0,0" VerticalAlignment="Center" ToolTip.Tip="Every row's Floating added up"/>
+			<TextBlock x:Name="TotalFloatingValue" Text="0.00" FontWeight="Bold" VerticalAlignment="Center"/>
 		</StackPanel>
 		
 	</UserControl.Resources>

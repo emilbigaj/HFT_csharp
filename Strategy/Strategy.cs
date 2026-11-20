@@ -1,5 +1,6 @@
 ﻿
 using Data;
+using Execution;
 using Provider;
 using Socket;
 using System;
@@ -109,7 +110,7 @@ public class Strategy
 
     }
 
-    private string[] _subDirectories = new string[] { "Factors", "Series", "Fills", "Positions" };
+    private string[] _subDirectories = new string[] { "Factors", "Series", "Fills", "Positions", "Markouts" };
     private void InitDirectories()
     {
         foreach (string subDirectory in _subDirectories)
@@ -119,7 +120,8 @@ public class Strategy
             if (Mode == ClockMode.Realtime)
                 continue;
 
-            foreach (string filePath in Directory.EnumerateFiles(subDirectoryPath))
+            // Why AllDirectories: markout files sit one folder down, in Markouts/<symbol>
+            foreach (string filePath in Directory.EnumerateFiles(subDirectoryPath, "*", SearchOption.AllDirectories))
             {
                 try { File.Delete(filePath); }
                 catch { }
@@ -146,6 +148,15 @@ public class Strategy
         }
         LoggableManager.OnLogging(series);
         return series;
+    }
+
+    /// Starts recording the markouts of every algo fill on this position, in Markouts/<symbol>/<today in Chicago>.markout.
+    public virtual Markouts NewMarkouts(Position position, Duration[] markoutDurations)
+    {
+        FileSystemPath filePath = Client.Context.GetMarkoutsFilePath(position.Instrument.Symbol, Session.CME.ConvertToLocal(Clock.Now));
+        Series<Markout> markoutSeries = new Series<Markout>(filePath, Client.Context.LoggingServerName);
+        LoggableManager.OnLogging(markoutSeries);
+        return new Markouts(position, markoutSeries, markoutDurations);
     }
 
     public Position GetPosition(Instrument instrument)

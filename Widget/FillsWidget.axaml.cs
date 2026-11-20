@@ -131,15 +131,9 @@ public sealed partial class FillsWidget : UserControl, IWidget, IDisposable
             Fill fill = Tools.Json.Deserialize<Fill>(line);
             if (fill.OrderHeader.OrderId == 0 && fill.FillId == 0 && fill.Quantity == 0) return false;
 
-            string symbol = "???";
-            string shortSymbol = "???";
-            try
-            {
-                Instrument inst = _context.GetInstrument(fill.OrderHeader.OrderId.InstrumentId);
-                symbol = inst.Symbol;
-                shortSymbol = inst.ShortSymbol;
-            }
-            catch { }
+            bool hasInstrument = Widgets.TryGetInstrument(_context, fill.OrderHeader.OrderId.InstrumentId, out Instrument instrument);
+            string symbol = hasInstrument ? instrument.Symbol : "???";
+            string shortSymbol = hasInstrument ? instrument.ShortSymbol : "???";
 
             widgetFill = new WidgetFill(symbol, shortSymbol, fill);
             return true;
