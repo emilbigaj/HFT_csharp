@@ -31,7 +31,10 @@ public struct MessageEfficiency()
         DateTime tradeDateTime = TradeDate.Add(TradeTime);
         if (dateTime >= tradeDateTime)
         {
-            TradeDate = dateTime.Date.AddDays(1);
+            TradeDate = dateTime.Date;
+            tradeDateTime = TradeDate.Add(TradeTime);
+            if (dateTime >= tradeDateTime)
+                TradeDate = TradeDate.AddDays(1);
             RawMessages = 0;
             WeightedMessages = 0;
             EMTWeightedMessages = 0;

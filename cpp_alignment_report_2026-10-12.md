@@ -1456,10 +1456,11 @@ Full write-up, with P51, C36 and the verification steps: `cpp_alignment_report_2
 - **Port if** the C++ `OpenClient` has the `Reset` branch: collapse it and delete the four members. The C++ server runs
   with `Persistance`, so its behaviour does not change; this keeps the two files the same.
 
-### P52. ALREADY IN C++, NOTHING TO PORT: `MessageEfficiency.Reset` keeps today's close after a restart before it (C++ `Execution/RateLimit.hpp`, 2026-11-23)
+### P52. ALREADY IN C++, NOTHING TO PORT: `MessageEfficiency.Reset` keeps today's close after a restart before it (C++ `Execution/RateLimit.hpp` 2026-11-23, C# `Execution/RateLimit.cs` 2026-11-24)
 
 Recorded here so the two sides' documents agree; the change was made on the C++ side first, in the form the user gave
-(C++ `csharp_alignment_report_2026-10-12.md` §22), and **C# has not taken it yet**.
+(C++ `csharp_alignment_report_2026-10-12.md` §22), and C# took the same three lines a day later. The two are line for
+line the same.
 
 - **Was:** when the row's day had ended, `Reset` moved it to tomorrow: `TradeDate = dateTime.Date().AddDays(1)`. Right at a
   close; wrong at a restart before one. Production, Friday 2026-11-20: the file's last line was Thursday's closed day, the
@@ -1478,8 +1479,9 @@ Recorded here so the two sides' documents agree; the change was made on the C++ 
   counts. The pseudo-code under P24 above is updated to this.
 - **Known and accepted:** a weekend restart before 16:00 labels the next row with that weekend date, and a server running
   through a weekend labels Monday's row Saturday. Counts and posting are right in both cases; only the label is off.
-- **C#:** `Execution/RateLimit.cs` `MessageEfficiency.Reset` still has `TradeDate = dateTime.Date.AddDays(1)`. It takes
-  the same three lines. Until then the C# row behaves the old way, which only shows in a C# server (the simulator).
+- **C#:** `Execution/RateLimit.cs` `MessageEfficiency.Reset` has the same three lines since 2026-11-24, checked in a
+  scratch harness on ten cases (the close, a restart before and after it, a row already today's, a simulation load, the
+  weekend cases). §22 of the C++ side's report, which says C# should port this, is answered by that.
 - **Not the same loss as C36.** C36 is the rows posted at shutdown, dropped by Logging. This is the row posted at the
   close, never produced. With both, a restart before the close keeps the day's counts (the shutdown row is saved and
   reloaded as today's) and, where no shutdown row was saved (a crash), still ends the day at that day's close.

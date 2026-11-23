@@ -39,22 +39,26 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
   socket code (cpp report P50, P51); until P50 is ported a strategy killed half-way through a record can still leave
   the C++ server's CoreGroup thread and a Logging tap waiting on it. Spec.md "Socket close protocol".
 
-## 2026-11-23 — Message efficiency: a restart before the close no longer skips that day's close (the user's change, in the C++ server; not in C# yet)
+## 2026-11-23 — Message efficiency: a restart before the close no longer skips that day's close (the user's change: C++ on 2026-11-23, C# on 2026-11-24)
 
 - **What was wrong.** When a row's day had ended, `MessageEfficiency.Reset` moved it to tomorrow
   (`TradeDate = dateTime.Date.AddDays(1)`). At a close that is right. At a restart before a close it is not: allocation
   loads the file's last line (yesterday's closed day), resets it, and the day's end jumped to tomorrow 16:00, so today's
   16:00 close found nothing ended, posted nothing, and the counters ran on. Production lost Friday 2026-11-20 this way
   after the 08:30 restart: every group's `.messageefficiency` file stops at 2026-11-19.
-- **The change** (the user's form, made in C++ `Execution/RateLimit.hpp`): the new day is today's if it is still before
-  today's `TradeTime`, else tomorrow's: `TradeDate = dateTime.Date; if (dateTime >= TradeDate.Add(TradeTime)) TradeDate =
-  TradeDate.AddDays(1);`. The outer test is unchanged, so a restart while the row is already today's keeps its counts.
+- **The change** (the user's form, in C++ `Execution/RateLimit.hpp` and C# `Execution/RateLimit.cs`): the new day is
+  today's if it is still before today's `TradeTime`, else tomorrow's: `TradeDate = dateTime.Date; if (dateTime >=
+  TradeDate.Add(TradeTime)) TradeDate = TradeDate.AddDays(1);`. The outer test is unchanged, so a restart while the row
+  is already today's keeps its counts.
 - **Known and accepted:** a weekend restart before 16:00 labels the next row with that weekend date, and a server
   running through a weekend labels Monday's row Saturday; counts and posting are right, only the label is off.
-- **C# is behind here.** `Execution/RateLimit.cs` still has the old line; live the server is the C++ one, so only a C#
-  server (the simulator) behaves the old way. Recorded in Spec.md ("Which day the row moves to") and in the cpp report
-  as P52 so both sides' documents agree. Not the same loss as the 2026-11-24 entry above: that is the rows posted at
-  shutdown, this is the row posted at the close.
+- **Both sides have it.** C++ first (the live server); the same three lines went into C# on 2026-11-24. Checked against
+  the C# `Reset` in a scratch harness, ten cases: the close, one second before it, a restart at Friday 08:30 on
+  Thursday's closed day (stays Friday; the old rule gave Saturday) and Friday's close after it, a restart after the
+  close, a restart with the row already today's (counts kept), a simulation load, and the two weekend cases.
+- Recorded in Spec.md ("Which day the row moves to") and in the cpp report as P52. Not the same loss as the 2026-11-24
+  entry above: that is the rows posted at shutdown, this is the row posted at the close. Lines: `Execution/RateLimit.cs`
+  +4 −1.
 
 ## 2026-11-23 — Markouts widget: durations stay in order under any sort; Value gains SameBest and FarBest
 

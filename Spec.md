@@ -1407,8 +1407,9 @@ server does everything else:
   already today's changes nothing: the outer test is false and the counts are kept. Known and accepted: a weekend
   restart before 16:00 labels the next row with that weekend date, and a server that runs through a weekend labels
   Monday's row Saturday; the counts and the posting are right in both cases, only the `TradeDate` label is off.
-  **C# does not have this yet**: `MessageEfficiency.Reset` in `Execution/RateLimit.cs` still moves to tomorrow. It only
-  matters live, where the server is the C++ one; the C# port is the same three lines.
+  C# `MessageEfficiency.Reset` (`Execution/RateLimit.cs`) has the same three lines since 2026-11-24. Checked against it
+  in a scratch harness: the close itself, one second before it, a restart before the close and that day's close after
+  it, a restart after the close, a restart with the row already today's, a simulation load, and the two weekend cases.
 - **Shutdown.** `Server.Dispose` posts every group's row on the audit link's admin channel just before it releases that
   link (after the server socket, whose admin thread is that channel's other writer), and the process exits. Logging reads
   a closed link to its end, so the rows reach the files (see "Logging reads a link to its end" under "Socket close
