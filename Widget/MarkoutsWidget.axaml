@@ -13,11 +13,17 @@
 			<TextBlock Text="View" VerticalAlignment="Center"/>
 			<ComboBox x:Name="ViewComboBox" SelectionChanged="OnSelectionChanged"/>
 			<TextBlock Text="Group by" VerticalAlignment="Center"/>
-			<ComboBox x:Name="GroupingComboBox" SelectionChanged="OnSelectionChanged"/>
+			<ComboBox x:Name="GroupingComboBox" SelectionChanged="OnGroupingSelectionChanged"/>
 			<TextBlock Text="Instrument" VerticalAlignment="Center"/>
 			<ComboBox x:Name="InstrumentComboBox" SelectionChanged="OnSelectionChanged"/>
 			<TextBlock Text="Duration" VerticalAlignment="Center"/>
 			<ComboBox x:Name="MarkoutDurationComboBox" SelectionChanged="OnSelectionChanged"/>
+			<TextBlock Text="Value" VerticalAlignment="Center"/>
+			<ComboBox x:Name="ValueComboBox" SelectionChanged="OnSelectionChanged"/>
+			<TextBlock Text="Against" VerticalAlignment="Center"/>
+			<ComboBox x:Name="ReferenceComboBox" SelectionChanged="OnSelectionChanged"/>
+			<TextBlock x:Name="UnmatchedTextBlock" VerticalAlignment="Center"
+			           ToolTip.Tip="Fills whose markouts are not in the rows: the fill is not in the strategy's fill file, or, against FairValueAtFill, it has no record at duration 0"/>
 		</StackPanel>
 
 		<Panel>
@@ -37,7 +43,7 @@
 
 				<DataGrid.Columns>
 					<DataGridTextColumn Header="Group" Binding="{Binding Group}" SortMemberPath="Group" Width="Auto"/>
-					<DataGridTextColumn Header="Duration (s)" Binding="{Binding MarkoutSeconds}" SortMemberPath="MarkoutSeconds" Width="Auto"/>
+					<DataGridTextColumn Header="Duration" Binding="{Binding MarkoutDurationLabel}" SortMemberPath="MarkoutSeconds" Width="Auto"/>
 					<DataGridTextColumn Header="Fills" Binding="{Binding Fills}" SortMemberPath="Fills" Width="Auto"/>
 					<DataGridTextColumn Header="Quantity" Binding="{Binding Quantity}" SortMemberPath="Quantity" Width="Auto"/>
 					<DataGridTextColumn Header="Ticks" Binding="{Binding Ticks, StringFormat={}{0:N3}}" SortMemberPath="Ticks" Width="Auto"/>

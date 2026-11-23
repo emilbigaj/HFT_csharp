@@ -32,6 +32,7 @@ public enum FileType : byte
     Mean = 12,
     StdDev = 13,
     Markout = 14,
+    Correl = 15,
 }
 
 [RegisterJson]

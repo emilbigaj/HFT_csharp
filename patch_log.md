@@ -4,6 +4,251 @@ Newest first. Each entry says what changed, why, and what it broke or unblocked.
 
 ---
 
+## 2026-11-24 — Logging keeps a writer's last records: a closed link is read to its end, a dead writer's rings are ended, a restart is read
+
+- **Bug: every restart of the production server lost the day's message-efficiency counts.** The rows were not empty
+  (read from the box: sequence 2 on the nine claimed rows) and the C++ server did post them at stop. Logging threw them
+  away: its socket marks a link closed within a millisecond of the writer's process dying, the read then refused the
+  link, and Logging looks for news only every 100 ms. The audit files on the box show it: nine rows at the 16:00 close
+  on 2026-11-19, none on the restart days (2026-11-12, -15, -20). The same loss applied to the last 100 ms of every
+  link Logging serves itself (the server's `.audit` and `.server`, every series, alert and markout link).
+- **Logging reads a link to its end.** `Socket/Socket.cs`: new `ServerSocket.TryReadToEnd`, `TryRead` without the status
+  gate (a close message still requests the close). `Logging/LoggingServer.cs`: `LoggingSocketReader.TryRead` uses it and
+  reports `New` or `Empty`, never `Closed`; new `OnDirectClosed` (the socket's `ClientClosed`) drains the reader the
+  moment the link closes; `LoggingSocketReader.Dispose` sets its flag under the writer's lock and
+  `OnDirectUnsubscribed` calls it on the listen thread before that thread unmaps the ring. The trading server's
+  `TryRead` is unchanged: nothing a dead strategy left unread is processed.
+- **A dead writer's rings are ended for it.** New `ReadOnlySocket.CloseForDeadWriter`, `Socket.CloseForDeadPeer`;
+  `ServerSocket.CloseClient` calls it when the client's process is dead. It writes a close message at the end of each
+  ring, over a record the process left half-written, so no reader waits on that record for ever. Reproduced on the old
+  code: a writer killed half-way through a record, with Logging already waiting on it, crashed Logging a second later
+  (access violation in `Protocol.TryReadFromRing`, the ring unmapped under the waiting worker).
+- **A connect never restarts a ring.** `ServerSocket.OpenClient` always calls `Recover`; without `Persistance` it called
+  `Reset`, which cleared the ring and read from its start while the client was parked after the old records, so a writer
+  restarted within about a second of its last run was not read for that whole session (every second run lost in the
+  test). `Socket.Reset`, `ReadOnlySocket.Reset`, `WriteOnlySocket.Reset` and `SharedMemory.Clear` had no other caller
+  and are deleted. Only Logging's socket ran without `Persistance`.
+- **Tested** in a scratch copy with a writer that posts nine rows on two channels as its last act (Logging live, 100 ms
+  poll), then again on Logging built from these files: old code 0 of 72 saved; now every row in all eleven cases
+  (release, close message, killed between records, killed half-way through one; restarts 2 s apart and at once; a writer
+  that closes and lives on for 500 ms; Logging stopped 300 ms after the writer), no exceptions, no spinning thread.
+- Not covered: a writer that dies while Logging itself is shutting down. The seal assumes no new process attaches to the
+  ring in the millisecond between the old one's death and the write.
+- Lines: `Socket/Socket.cs` +45 −47, `Socket/SharedMemory.cs` −2, `Logging/LoggingServer.cs` +21 −4; code only, 43
+  added and 45 removed. No hot member changed, nothing allocates. C++: the seal and the connect change are in shared
+  socket code (cpp report P50, P51); until P50 is ported a strategy killed half-way through a record can still leave
+  the C++ server's CoreGroup thread and a Logging tap waiting on it. Spec.md "Socket close protocol".
+
+## 2026-11-23 — Markouts widget: durations stay in order under any sort; Value gains SameBest and FarBest
+
+- **Bug: under a sort by Group alone a day's durations were jumbled** (100ms, 0, 5m, 1m, 10s, 1s, 15m, 10m, -20µs).
+  They were not sorted by their text; they were not sorted at all. A click on a header leaves the table sorted by
+  that column only, and the grid places each row that arrives later by a binary search that stops at the first row
+  it ties with. `Widget/MarkoutsWidget.axaml.cs`, `AddToGroups`: when a batch makes a new row the grid sorts afresh
+  (`CollectionView.Refresh`), a stable sort over the rows in their own order, so ties keep durations shortest first.
+  The default sort (Group descending, Duration ascending) was right all along, fresh and restored: checked on the
+  real widget the way the Workspace opens one, state loaded before it is shown.
+- `MarkoutValue` gains `SameBest` (the best price on the fill's own side: the bid for a buy, the ask for a sell) and
+  `FarBest` (the other side), chosen in the Value box like Mid and FairValue; new `GetValuePrice`.
+- Lines: `MarkoutsWidget.axaml.cs` 19 more than before this fix. GUI only: no C++ change.
+
+## 2026-11-23 — Markouts: a record names its fill, looks back before it, and carries the strategy's fair value
+
+- **Why.** To tell "widen" from "the fair value is wrong" from "the quote was stale", a fill needs the book and the
+  fair value from before it, at it and after it, and the record should not copy facts the fill file already holds or
+  an `InstrumentId` that changes over a weekend.
+- `Execution/Markout.cs` — the record is `MarkoutId` (the fill's `FillId`), `ExchangeTimestamp` (the fill's),
+  `BidPrice`, `AskPrice`, `FairValuePrice`, `MarkoutDuration`, `MarkoutTag`: 49 bytes, was 58. Gone: `InstrumentId`,
+  `FillPrice`, `FillQuantity`, `FillType`; `FillId` and `FillExchangeTimestamp` are renamed.
+- `Strategy/Strategy.cs` — `MarkoutDurations` default is -20 µs, 0, 100 ms, 1 s, 10 s, 1 min, 5 min, 10 min, 15 min.
+- `Strategy/Markouts.cs` — a duration may be negative or zero. New `MarkoutHistory<TValue>`: the recorder remembers
+  the quote (on a book update that changed its prices) and the strategy's fair value (when it sets a different one),
+  4,096 each, and a record takes what stood at fill time + duration. New `FairValuePrice`, which the strategy sets
+  whenever its fair value changes; the `Markout` event still tags, once per fill. The fair value is not asked for in
+  the event because the -20 µs and 0 records are written together after the fill arrives and would get the same
+  answer. A book update with nothing due is one compare against the earliest pending moment, not a walk over every
+  duration. The constructor takes the `Client`, for the exchange time a fair value is stamped with.
+- `Widget/MarkoutsWidget.axaml(.cs)`, `Widget/MarkoutHistogram.cs` — the widget reads each symbol's
+  `Fills/<symbol>.fill` beside its markouts and joins them by symbol, id and exchange time; a markout waits until its
+  fill's line arrives, and the fills still waiting are counted beside the selectors. Two new boxes, Value (Mid,
+  FairValue) and Against (FillPrice, FairValueAtFill), saved with the workspace: a row is
+  `fill sign * (value - reference)`. The instrument is found by the folder's symbol. Durations are written short
+  (-20µs, 0, 100ms, 5m) in the table, the Duration box and the histogram, from one function. A t-test bucket is at
+  least one second long.
+- **Tested.** Recorder: a scratch simulation whose strategy logged every quote, fair value and fill; with fills handed
+  over 50 book updates late, all 12,741 records of five instruments matched a brute-force reading of the rule (quote,
+  fair value, tag), looking back up to 56 book updates. Widget: off-screen on the real widget against a held scratch
+  simulation, 11 checks: each Value against each reference equals the figures worked out from the files (NQ, 894
+  fills, 8,036 records), the Side, FillType and Tag groups, the unmatched count, a markout arriving before its fill,
+  the labels and the saved state.
+- **Cost.** Warm: 4.0 ns a book update, against the old 2.3 ns (nothing pending) and 6.3 to 7.7 ns (fills pending).
+  Cold inside a run on a machine at 100% CPU, old and new timed in alternate calls: 24 to 29 ns against 7 to 9 and
+  57 to 59. Not yet measured on a quiet machine. See Spec.md "What it costs now".
+- **Breaks.** Old `.markout` files are skipped (no `MarkoutId`). Logging and strategies deploy together: the record's
+  size changed. A strategy that subclasses `NewMarkouts` or constructs `Markouts` passes the `Client` first. In a fast
+  backtest the table now shows only the fills that reached the strategy's `.fill` file, and counts the rest: the
+  Logging change that would complete that file is not made.
+- Not done: `FillsWidget` still finds its symbol through `InstrumentId`. Lines against the last commit, with comments:
+  `Markout.cs` +12 −13, `Markouts.cs` +122 −44, `Strategy.cs` +5 −3 for this change, `MarkoutsWidget.axaml.cs`
+  about +177 −63 for this change, `MarkoutsWidget.axaml` +7 −1, `MarkoutHistogram.cs` +3 −13. C++: C35, nothing to port.
+
+## 2026-11-23 — Markouts widget: the table lists days newest first
+
+- `Widget/MarkoutsWidget.axaml(.cs)` — grouped by Day, the table opened with the oldest day at the top, so the day
+  being traded was at the bottom of a list that grows every day. New `OnGroupingSelectionChanged` puts a sort on the
+  grid when the grouping becomes Day (Group descending, then Duration ascending) and clears it for any other grouping,
+  which stays in order as before. The headers show the sort; a click on a header still sorts by that column, until
+  the grouping changes. The rows behind the grid are untouched, so the histogram still runs oldest day to newest, left
+  to right.
+- Tested off-screen on the real widget against a scratch simulation's context (18 checks): a fresh widget, a day that
+  arrives while it is open, the histogram, each other grouping, a header click held through a change of duration, and
+  saved Day and TimeOfDay states reopened.
+- Lines: `MarkoutsWidget.axaml.cs` +11 code (+16 −1 with comments), `MarkoutsWidget.axaml` +1 −1. GUI only: no C++
+  change.
+
+## 2026-11-23 — The GC monitor starts once, from `Scenario.Start`, in every realtime process
+
+- `Strategy/Scenario.cs` — the realtime branch of `Start` calls `GCMonitor.Start()` after `BuildRealtime`, so every live
+  strategy has the monitor without its scenario starting it; 32 scenarios across the strategy repositories each started
+  it themselves.
+- `Tools/GCMonitor.cs` — `Start` does nothing after the first call (`s_isStarted`), so those scenarios' own calls, until
+  deleted, give one monitor, not a second one printing every line twice.
+- `Testing/Scenario.cs` (user-local, not committed) — its own call removed.
+- Tested: realtime clock running, three `Start` calls, collections forced in two separate seconds: two lines, one timer.
+- Not done: deleting the call in the other 32 scenario files (13 repositories, among them Adrian's and the Bitcoin
+  workspaces); the user's call. Lines: `GCMonitor.cs` +9 −4, `Scenario.cs` +1. No C++ change.
+
+## 2026-11-22 — Statistics carry their time, and the chart plots any value of a statistic's file
+
+- `Data/Factor.cs` — `MeanPoint`, `StdDevPoint` and `CorrelPoint` get a `Timestamp` (`FactorPoint` through both
+  channels, plus a top-level property), so a saved line can be charted. New `stat += (timestamp, value)`,
+  `OnValue(timestamp, value)`, `correl += (timestamp, x, y)`, `OnValues(timestamp, x, y)` and
+  `Regression.OnValues(timestamp, inputs, target)` stamp a time the caller holds (a timer's tick), the time before the
+  value as the user asked. The existing forms stamp `Clock.Now`; `GetPoint` stamps nothing. Internal `Next` and
+  `ComputeNext` take the time before the value too.
+- `Widget/ChartWidget.axaml.cs` — Add Series takes `.mean`, `.stddev`, `.factor`, `.correl`: it lists the numeric
+  members of the file's last line (`Score`, `Mean.Mean`, `Correl`, ...) and adds a line per value ticked, plotted
+  against `Timestamp`, saved with the workspace as `ChartSeriesState.Value`. The colour-and-series code the point files
+  used is now `NewPointSeries`, shared by both.
+- `Widget/SelectNamesDialog.axaml(.cs)` — new: tick names, confirm. Used by Add Series (values) and Remove Series
+  (series); replaces `Widget/RemoveSeriesDialog.axaml(.cs)`, deleted.
+- Behaviour: (1) every existing `+= value` / `OnValue(value)` / `OnValues(x, y)` now reads the clock: about 25 ns more per
+  update live, nothing in a backtest; passing the time costs nothing; (2) point sizes 24/32/56/48 become 32/40/72/56
+  bytes, so Logging and every strategy deploy together; (3) `Regression.OnValues(inputs, target)` reads the clock once,
+  not once per pair.
+- Measured (native AOT, two runs): `GetPoint` unchanged (3.3, 9.5 to 9.6, 15.3 to 15.4, 14.2 ns); `+= (timestamp,
+  value)` 4.2 to 4.7 ns against 4.1 to 4.3 without a time; `+= value` 26 to 28 ns live (the clock read is 25 ns).
+- Tested: the statistics tests (stamped and plain forms, preview empty, time leads the line, old lines restore, the same
+  values either way); a scratch simulation saving timestamped files; the real chart widget off-screen on them (every
+  point with a time and a finite value plotted, saved and reloaded, Remove Series through the new dialog). Found: a
+  factor stamped with `Client.ExchangeTimestamp` went back in time twice in two hours (cross-instrument exchange times);
+  the chart drops such points. Not tested: the system file picker.
+- Lines: `Factor.cs` +63 −29, `ChartWidget.axaml.cs` about +127 −23 (the picker; more than the 60 estimated),
+  `SelectNamesDialog` +43, `RemoveSeriesDialog` −56. C++ report C34 (nothing to port).
+
+## 2026-11-22 — `FactorPoint.Score` is a property; `FastFactor` and `FastStdDev` deleted
+
+- `Data/Factor.cs` — `FactorPoint.Score` was stored on every update; it is now a property computed from the two
+  channels, so the struct is 56 bytes, was 64. Same values: NaN for a new factor and for a NaN input (which leaves the
+  factor's own score alone), and `Mean / MeanStdDev` otherwise. Still written to `.factor` lines; an old line that
+  stored `Score` reads back to the same score. `FastFactor`, `FastStdDev` and `StdDev.NextEstimate` deleted: no faster
+  (within 0.05 ns of `Factor` in six native-AOT runs) and unused in every repository; `StdDev` and `Factor` sealed,
+  their weight helpers private.
+- Behaviour: none for a caller, except a `FastFactor`/`FastStdDev` would no longer compile (none exists).
+- **Deploy:** Logging before strategies. Points cross to Logging as raw struct bytes; an older Logging cannot read the
+  shorter `FactorPoint` and would lose those lines. A newer Logging reads older strategies' points.
+- Measured (native AOT): factor update 3.41 to 3.50 ns; update and read the score once 4.00 to 4.15 ns; three reads
+  5.67 to 5.79 ns; 0 B. Tested: the statistics tests against the repo code (score equals `Mean / MeanStdDev` on every
+  update, NaN cases, file round trip within 2.4e-15, old line read back).
+- Also measured and not done (Spec.md "What the points hold"): `StdDevPoint.StdDev` as a property (slower almost
+  everywhere), and a slimmer factor variance channel (40 bytes, no faster).
+- `Tools.SqrtEstimate` is now unused in every repository; not deleted (public in Tools), proposed.
+- Lines: `Factor.cs` about +11 −57 (the three deleted classes and method are 42). C++ report C33 (nothing to port).
+
+## 2026-11-22 — Chart: Remove Series works again
+
+- `Widget/ChartWidget.axaml.cs` — Remove Series did nothing, for two reasons. (1) It looked for its owner window with
+  `VisualRoot is Window`; on Avalonia 12 the visual root is a `TopLevelHost`, so the handler returned before opening its
+  dialog. It now uses `TopLevel.GetTopLevel(this)`, as every other widget's dialog does. (2) After removing, it called
+  `InvalidateVisual` on the chart control, which does not redraw the plot inside it, so a removed line stayed on screen
+  until something else redrew the chart. It now sets the stack again, as shading a session does.
+- Tested off-screen on the real widget with two point files: before, no dialog; after, the dialog lists both series,
+  removing one leaves one in the widget, in the saved state and in the picture (the axis rescales).
+- GUI only: no C++ change. Lines: +4 −2.
+
+## 2026-11-22 — Statistics start as a plain average instead of climbing from zero; a seed counts as one half-life
+
+- `Data/Factor.cs` — every value used to get the fixed weight alpha, so an estimate started at 0 and read far too low
+  for several half-lives (a 2 bp volatility at a 600 half-life: 0.21 after 10 periods, 1.41 after 600), which made
+  early factor scores too big. The next value's weight is now the larger of alpha and 1 / (values so far):
+  `Statistic<TPoint>.GetWeight`, used by `Mean`, `StdDev`, `FastStdDev`, `Factor`, `FastFactor` and `Correl`. For the
+  first 1 / alpha values the estimate is the plain average of what it has seen; after that the update is unchanged.
+  `Factor.GetValue` solves with the same weights. The static `Mean.Next` / `StdDev.Next` / `NextEstimate` take the
+  weight where they took alpha (nothing outside this file called them).
+- `Strategy/Strategy.cs` — `NewMean` and `NewStdDev` seed only when the seed is not 0, and set the seeded point's
+  `Count` to the half-life (the user's design), so the rule treats the seed as one half-life of observations.
+- Behaviour: (1) every unseeded statistic reads right from its first value in a backtest or a new live file; (2) a
+  seeded one keeps about its old strength (47.1% of the estimate after one half-life, was 50.0%) but is
+  `IsInitialized` from the start: `LeadRatio` (seeded at 1, half-life 300), gated in SecondOutright,
+  SecondOutrightBackup and PRODUCTION_Second's `QuoteAlgo`, opens at once on a cold start; (3) a `Factor`'s first score
+  is ±1, was ±1 / sqrt(alpha); (4) a live statistic restored with a `Count` at or past 1 / alpha is untouched, a
+  younger one weights its next values by 1 / count until it gets there. Backtest results change.
+- Tested (scratch): the worked example (0.07 / 0.08 / 0.13 becomes 2.00 / 1.58 / 2.16); the plain average and the
+  switch to alpha exactly, at half-lives 1, 5, 60, 600; the steady-volatility table; the seed's share against the old
+  decay; `GetPoint(GetValue(score))` within 7e-16; `FastFactor` equal to `Factor`; `Correl` equal to the sample
+  correlation and beta; a restore mid warm-up; and a scratch simulation through `NewMean` / `NewStdDev` / `NewFactor`
+  (a seeded point saved with Count 301, an unseeded one with Count 1). Not run: a live strategy.
+- Measured (native AOT, statistic in a field, after the warm-up): `Mean` +0.12 ns, `StdDev` +0.22 ns on 3.33 ns,
+  `Factor` unchanged at 3.65 ns; 0 B.
+- Lines: `Factor.cs` +49 −23, `Strategy.cs` +8 −4. Spec.md "The statistics a strategy saves"; C++ report C32
+  (nothing to port).
+
+## 2026-11-22 — A strategy can make and save a `Correl`, with `correl += (x, y)`
+
+- `Data/Factor.cs` — the user's new `Correl` was the maths only: nothing saved, restored or logged it, because
+  `Strategy.AttachSeries` takes a `Factor<TPoint>` and saves through its `Value` event, and `Correl` takes two values
+  so it is not one. What `AttachSeries` uses (name, point, `Value` event, and `AlphaFromHalfLife`) moved from
+  `Factor<TPoint>` into a new base `Statistic<TPoint>`; `Factor<TPoint>` keeps the one-value recursion on top of it and
+  `Correl` derives from `Statistic<CorrelPoint>`. `Correl.OnValues` now raises `Value`, and `correl += (x, y)` applies a
+  pair. `Mean`, `StdDev`, `Factor` and their Fast variants are untouched; `correl += x` does not compile.
+- `Strategy/Strategy.cs` — `NewCorrel(name, halfLife)`, beside `NewMean`; `AttachSeries` is constrained to
+  `Statistic<TPoint>`, its body unchanged. `Data/Series.cs` — `FileType.Correl = 15`. `Logging/LoggingServer.cs` — its
+  writer. Without these two Logging refuses a `.correl` connection.
+- Behaviour: a `Correl` made with a null name now takes its class name, as the other three do.
+- Measured: `Mean`, `StdDev` and `Factor` updates cost the same before and after the split (within 0.05 ns, same
+  harness, three runs each, 0 B). Tested in a scratch simulation: the Testing strategy made a `Correl` and a `Mean` per
+  instrument and fed them on every quote change; the `.correl` and `.mean` files were written (NQ 333,778 lines each,
+  no gaps), every line read back, and a statistic restored from one line carried on to within 8.5e-15 relative (the
+  file keeps 15 digits). Not run: the Realtime restore at a live start.
+- Lines: about +16 net across the four files (the split about +10, the `+=` 5, the rest 1 to 4 each). The two outside
+  users of the generic base (`Features`, `MarkoutSignals`) are unaffected. Spec.md "The statistics a strategy saves";
+  C++ report C31 (nothing to port). Deploy: Logging before any strategy that calls `NewCorrel`.
+
+## 2026-11-21 — Markouts are on for every position a strategy gets; durations on the strategy; UTC dates and hours
+
+- `Strategy/Strategy.cs` — `GetPosition` makes a position's recorder the first time the position is got and keeps it
+  in the new `MarkoutsByPosition` (keyed by the `Position` object); `GetMarkouts(position)` returns it, to subscribe to
+  its `Markout` event and tag fills. `NewMarkouts(position)` is now protected and virtual: a strategy no longer calls
+  it (a second call would make a second recorder on the same file). The durations are the strategy's new
+  `MarkoutDurations` property (1 s, 10 s, 1 min, 5 min, 10 min), which a strategy sets before its first `GetPosition`
+  to use its own. The file's date is the UTC date (`Clock.Now.ToDateTime`); it was the Chicago date, the only dated
+  file that was not UTC.
+- `Widget/MarkoutsWidget.axaml.cs` — the Day and TimeOfDay groups are UTC, from the fill's exchange time; they were
+  Chicago time. Rechecked against an independent calculation on the NQ file by day: 43 rows identical.
+- `Testing/Strategy.cs` — its own copy of the five durations and its `NewMarkouts` call are gone.
+- Behaviour: every strategy now records markouts, every backtest included, with no switch to turn it off; each
+  position adds one connection to Logging. A strategy started between 00:00 UTC and Chicago midnight names its file
+  for the UTC day, one later than before; the widget's days split at 00:00 UTC and its hours are UTC hours.
+- Deploy: Logging must be the build that knows `FileType.Markout` before a strategy built on this starts; an older
+  Logging logs one "Invalid FileType extension" error per position and writes no markout file.
+- Lines: `Strategy.cs` +18 −5, `Markouts.cs` +2 −2, `Testing/Strategy.cs` −6, `MarkoutsWidget.axaml.cs` +4 −4. No C++
+  change (a strategy's own recorder and the GUI).
+- Tested in a scratch copy under its own server name, six simulated hours of the Testing strategy with no markout
+  call in it: each of its five positions wrote `Markouts/<symbol>/2025-11-25.markout` (the UTC date; Chicago's was
+  the 24th), every one-second count equal to the server's fills for that symbol (739, 15, 274, 903, 918), and NQ had
+  903 records at each of the five durations. Not tested: a strategy that sets its own `MarkoutDurations`, and
+  `GetMarkouts` with a tag handler.
+
 ## 2026-11-21 — The GC monitor checks on the Clock thread; a live strategy no longer has a thread pool
 
 - `Tools/GCMonitor.cs` — the monitor's one-second `System.Threading.Timer` ran its tick on a thread-pool worker, and was

@@ -1394,10 +1394,12 @@ server does everything else:
   (`MessageEfficiency.Reset`). Only when the reset changes the row (the group's first instrument to close) does the server
   post the day that ended on its audit channel, and Logging appends it to the group's file. The CoreGroup thread does no
   I/O. The row itself is the record: it starts with `Header<OrderType>` (`OrderType.MessageEfficiency = 18`).
-- **Shutdown.** `Server.Dispose` posts every group's row on the audit link's admin channel just before closing that link
-  (after the server socket, whose admin thread is that channel's other writer). Logging drains a link on close: the pass
-  that reads the close message still writes what it read, and the reader's `Dispose` reads once more and flushes what the
-  watermark held, so the rows reach the files.
+- **Shutdown.** `Server.Dispose` posts every group's row on the audit link's admin channel just before it releases that
+  link (after the server socket, whose admin thread is that channel's other writer), and the process exits. Logging reads
+  a closed link to its end, so the rows reach the files (see "Logging reads a link to its end" under "Socket close
+  protocol"). Until 2026-11-24 they did not: the rows were the last thing written, Logging stopped reading the link the
+  moment the process was gone, and every restart of the server lost the day's counts so far. (Live, this is the C++
+  `CmeServer::Stop`; in C# only the simulator builds a `Server`, in Simulation, and nothing disposes it.)
 
 `MessageEfficiency` has a parameterless constructor so its field initialisers, the header among them, run on every
 construction, JSON loads included: a line written before the header existed still loads as type 18.
@@ -1506,9 +1508,12 @@ on emits only close messages, until a reconnect's `Recover` clears it.
 
 What a `Closed` read means is decided by **whoever owns the session**, not by the reader:
 
-- **`ServerSocket`** (the trading server, Logging's own sockets, the Mirror's remote): `Closed` requests `Open → Closing`,
+- **`ServerSocket`** (the trading server, the Mirror's remote): `Closed` requests `Open → Closing`,
   and every later read and peek is gated on the client being `Open`, so the session ends there until the client
   reconnects; the reconnect's `Recover` skips anything left unread.
+- **Logging's own sockets** (the server's `.audit` and `.server` links, every strategy's series, alert and markout
+  links): a close message requests the close in the same way, but the read is not gated, because Logging records
+  everything its writer wrote (see "Logging reads a link to its end" below).
 - **Logging's audit tap** (`SocketListener`, which reads a trading server client's channels with no `ServerSocket` in
   front, for the whole life of the socket): the close message is a point in the record; the tap keeps reading, and a
   reconnect under the same name writes its next session right after it, so that session is audited too. Every channel
@@ -1541,6 +1546,65 @@ Consequences kept deliberately:
   would read as alive forever and its orders would never be cancelled; on Windows `OpenProcess(0)`
   fails, so the two platforms disagreed. `IsAlive` returns false for `pid <= 0` on every platform:
   the safe direction, because closing cancels. The C++ `IsProcessAlive` keeps the same guard.
+
+### A dead writer's rings are ended for it (2026-11-24)
+
+A writer marks a record as being written, copies it, then marks it done. A process killed between the two leaves the
+mark for ever, and `Protocol.TryReadFromRing` waits on a marked record. So `ServerSocket.CloseClient`, when the client's
+process is dead, first writes a close message at the end of each of that client's rings (`Socket.CloseForDeadPeer`,
+`ReadOnlySocket.CloseForDeadWriter`): it finds the ring's end as a restarting writer does (`SkipRing`, which stops at a
+record left half-written) and writes there, so a half-written record becomes a complete close message. The link is then
+closed exactly as before, at once: nothing waits on a reader. A process that closed its own rings and then exited gets a
+second close message after its own, which no reader treats as data and a reconnect skips. A process that is still alive
+(a link closed by its owner, not by its death) is never written to: a ring has one writer.
+
+Worked example: the ring holds records 1-9 and record 10 marked as being written. The walk passes 1-9 and stops at 10;
+the close message is written over 10. A reader that was waiting on 10 reads a close message.
+
+Measured in a scratch copy (2026-11-24) with a writer that starts a record on two channels and is then killed. Old code,
+when Logging had already reached the record: Logging died of an access violation a second later (its worker was waiting
+on the record when the ring was unmapped). Now: every record the writer finished is saved and no thread is left
+spinning. Precondition: no new process attaches to the ring between the old one's death and this write, which happens
+on the listen thread's next pass (about a millisecond); a restart takes tens of milliseconds. The trading server's
+CoreGroup thread and Logging's taps are protected by the same code in the trading server's socket: in production that is
+the C++ server's port of it (cpp report P50).
+
+### Logging reads a link to its end (2026-11-24)
+
+Logging's reader of its own links (`LoggingSocketReader`) reads with `ServerSocket.TryReadToEnd`, which is `TryRead`
+without the status gate: a close message read while the link is `Open` still requests the close, but a link that is no
+longer `Open` is still read. Why: a writer's last records are written just before it goes (the server posts its
+message-efficiency rows as its last act), the listen thread marks the link closed within a millisecond of the process
+dying, and Logging looks for news only every 100 ms, so with the gate those records were almost always lost.
+
+Three things make that safe:
+- **The read is triggered at the close.** The poller's peek stays gated, so it never looks at a closed link's ring.
+  `LoggingServer.OnDirectClosed` (the socket's `ClientClosed`, on the listen thread) drains the reader once, there and
+  then.
+- **The reader is ended before the ring is unmapped.** Every read holds the writer's lock (`DrainReader`);
+  `LoggingSocketReader.Dispose` sets its flag under that lock, and `OnDirectUnsubscribed` calls it on the listen thread
+  before that thread unmaps the ring. So no read is in the ring when it goes and none starts afterwards.
+- **A worker never ends the reader.** `LoggingSocketReader.TryRead` reports `New` or `Empty`, never `Closed`; the listen
+  thread drops the reader when it drops the link.
+
+The trading server's reads are unchanged: `TryRead` is still gated, so nothing a dead strategy left unread is processed.
+
+### A connect never restarts a ring (2026-11-24)
+
+`ServerSocket.OpenClient` always calls `Recover` (park at the ring's end). On a socket without `Persistance` it used to
+call `Reset`, which moved the server end to the ring's start and cleared the ring. But a client parks its own end when
+it builds its socket, before it connects. If the old ring was still there (a process restarted within the second Logging
+keeps a closed link), the client was parked after the old records, Logging read from the start, and nothing the new
+process wrote was read for that whole session, with no error. `Socket.Reset`, `ReadOnlySocket.Reset`,
+`WriteOnlySocket.Reset` and `SharedMemory.Clear` had no other caller and are deleted. Only Logging's socket ran without
+`Persistance`, so the trading server and the Mirror behave as before. A writer must connect before it writes: anything
+written between building the socket and the connect being accepted is skipped by the park (every writer connects first).
+
+Test of all three (scratch copy, 2026-11-24; a writer posts nine rows on two channels as its last act; Logging live,
+100 ms poll). Old code saved 0 of 72 rows, and with restarts at once every second run was lost even when the writer
+stayed alive long enough to be read. Now every row is saved with the writer releasing the link, sending a close message,
+being killed between records or killed half-way through one, with restarts two seconds apart and with restarts at once,
+and with Logging stopped 300 ms after the writer. Not covered: a writer that dies while Logging itself is shutting down.
 
 **Logging polls every 100 ms live.** `LoggingServer.PollerLoop` checks every reader once and then, in `Realtime`, sleeps
 100 ms; a worker then drains each reader with news to its writer's head. Why: to learn whether a ring has news a poll reads
@@ -2356,11 +2420,20 @@ footer `Navigate`.
 
 ## Markouts (2026-11-20)
 
-A markout is the best bid and ask some time after a fill: how the market moved once we traded. Markouts are recorded
-client side, per strategy, for algo fills only; a manual fill or a position transfer has none.
+A markout is the best bid and ask, and the strategy's fair value, at a moment measured from a fill: just before it, at
+it, and some time after it. It shows what we thought the fill was worth while we could still act, what the fill itself
+told us, and how the market moved once we had traded. Markouts are recorded client side, per strategy, for algo fills
+only; a manual fill or a position transfer has none.
 
-**Who records.** A strategy opts in per position with `NewMarkouts(position, markoutDurations)`, passing its own
-strictly ascending `Duration[]` (for example 1 s, 10 s, 1 min, 5 min, 10 min). `Strategy.Markouts` subscribes to the
+**Who records.** Every strategy, for every position: the first time `Strategy.GetPosition` returns a position it makes
+that position's recorder (`NewMarkouts`, protected and virtual) and keeps it in `MarkoutsByPosition`, keyed by the
+`Position` object, of which a context has one per instrument. `GetMarkouts(position)` returns it, to subscribe to its
+events and to set its `FairValuePrice`. The markout durations are the strategy's `MarkoutDurations`: -20 µs, 0, 100 ms,
+1 s, 10 s, 1 min, 5 min, 10 min and 15 min, unless the strategy sets its own, strictly ascending, before its first
+`GetPosition`. A negative duration is before the fill. 20 µs is our tick-to-execution time at CME, so the book 20 µs
+before a fill is the last one a cancel or a wider quote could still have answered. There is no switch to turn recording off:
+every backtest writes `.markout` files, and against a Logging older than `FileType.Markout` each position logs one
+"Invalid FileType extension" error there and no file is written. `Strategy.Markouts` subscribes to the
 position's fills and the instrument's book. It is hot path, feed thread only, and allocates nothing after construction.
 
 **What it costs** (measured 2026-11-20 inside a two-day backtest of five instruments, 58.5 million book updates and
@@ -2371,22 +2444,61 @@ every book update: 5 to 8 ns. Allocated: 0 bytes over 58.6 million calls. In a t
 warm caches, the three paths are 4.4, 12.7 and 5.7 to 7.4 ns per record; the difference to the figures in the run is
 memory the recorder had not touched for a while.
 
+**What it costs now (2026-11-23).** Every book update reads the quote and compares it with the last one remembered
+(a change is stored: 16 bytes and a time), then makes one compare against the earliest moment any pending observation
+falls. That compare replaced a walk over every duration's first waiting fill, which with nine durations and a
+15-minute one made nearly every update of a trading strategy the dear kind. In a tight loop on a simulation's own NQ
+recorder, with warm caches: 4.0 ns an update, against the old code's 2.3 ns with nothing pending and 6.3 to 7.7 ns
+with fills pending. Inside the run, where the recorder's memory is cold, the old and the new path were timed in
+alternate calls of the same run, because the machine was at 100% CPU from other work and no two runs agreed: 24 to
+29 ns new, against 7 to 9 ns (old, nothing pending) and 57 to 59 ns (old, fills pending); in a second pair of runs
+under heavier load 45 ns against 29 and 87. So an update costs roughly 15 to 20 ns more than the old code's cheapest
+path and about half its pending path, on a loaded machine; on a quiet one the old paths were 4 to 7 and 18 ns, and
+the new figure has not been taken there. Setting a fair value that differs from the last: 13 to 20 ns in the run. A
+fill: 210 to 330 ns. An update that writes records: 360 to 550 ns for 1.6 records. Nothing allocates after
+construction; each recorder holds two histories of 4,096 values (96 KB for the quote, 64 KB for the fair value).
+
 **The clock is the book's.** There are no timers. On each `MarketByPriceChanged` (once per read pass), every pending
 fill whose exchange time plus a markout duration is strictly before the book's `ExchangeTimestamp` gets one record,
-stamped with the quote that stood at the end of the previous pass, which is the quote that stood when the duration
-fell. Simulation and live therefore run the same code. The quote is the instrument's raw quote (`Instrument.TryGetQuote`),
-NaN while the instrument is not open or a side is empty.
+carrying the quote and the fair value that stood at that moment. Simulation and live therefore run the same code. The
+quote is the instrument's raw quote (`Instrument.TryGetQuote`), NaN while the instrument is not open or a side is empty.
 
-**One record per fill per markout duration.** `Markout` (58 bytes, `Execution/Markout.cs`) carries `FillId`,
-`FillExchangeTimestamp`, `InstrumentId`, `FillPrice`, `FillQuantity` (signed), `FillType`, `BidPrice`, `AskPrice`,
-`MarkoutDuration` and `MarkoutTag`. It carries those four fill facts, not the whole fill, so the file stands alone and
-a reader needs no join. The first version carried only `FillId` and `FillExchangeTimestamp` and joined to the
-strategy's `.fill` file; that failed on the first real run, because the strategy's `.fill` file is incomplete in a
-simulation (NQ: 228 lines against 1,814 fills; the server's file had them all), so the grid showed about a quarter of
-the fills. `FillId` with `FillExchangeTimestamp` still names the fill for anyone who wants the rest of it; the pair is
-the key because an id alone can repeat (the simulator's counter restarts at 0 each run, and a realtime fill file is
-never wiped). A record is written as soon as its duration passes, so a fill that never reaches a duration has no record
-for it.
+**It answers from what it remembers (2026-11-23).** A fill reaches us after the exchange made it, so the moments
+20 µs before it and at it are already past when it arrives, and so is any duration shorter than the delay. The recorder
+therefore keeps two histories (`MarkoutHistory<TValue>`, 4,096 values each, the oldest overwritten): the quote, added
+on a book update that changed its prices and stamped with the book's exchange time; and the strategy's fair value, added
+when the strategy sets a different one. "What stood at a moment" is the newest value in a history stamped at or before
+it. A moment further back than a history reaches has no value, and the record carries NaN for it. One rule covers every
+duration: for a long one the answer is simply the last quote before the update that passed it, which is what the first
+version kept as its one "previous quote". Worked example: a fill made at 10:00:00.000100 reaches us 150 µs later; the
+book changed at .000050 (99.75 bid, 100.25 offered) and at .000100, by the trade that filled us (99.50 bid, 100.00
+offered). The -20 µs record asks for .000080 and gets 99.75 / 100.25; the 0 record asks for .000100 and gets
+99.50 / 100.00. So 0 means every event stamped at or before the fill's time, the fill's own trade included, and -20 µs
+is the book before it. Tested 2026-11-23 in a scratch simulation whose test strategy logged every quote, fair value and
+fill: with fills handed to the recorder 50 book updates late, all 12,741 records of five instruments matched a
+brute-force reading of this rule, looking back up to 56 book updates.
+
+**The fair value is the strategy's (2026-11-23).** The strategy sets `GetMarkouts(position).FairValuePrice` whenever
+its fair value of that instrument changes; a strategy that never sets it gets NaN in every record. It is a value the
+strategy pushes, not one the recorder asks for when it writes, because the records for -20 µs and 0 are both written
+at the same instant, after the fill has arrived: asked then, the strategy would give the same fair value for both, and
+it would be the one from after the fill. Each value is stamped with the later of two exchange times: the client's
+(`Client.ExchangeTimestamp`, the last message it read from any instrument) and this instrument's book's. The client's
+dates a fair value that moved because another instrument ticked; the book's stops a fair value worked out from this
+instrument's newest update being dated before that update when a slower instrument was read after it in the same pass,
+which would put the fill's own trade into the record from before the fill.
+
+**One record per fill per markout duration.** `Markout` (49 bytes, `Execution/Markout.cs`) carries `MarkoutId`,
+`ExchangeTimestamp`, `BidPrice`, `AskPrice`, `FairValuePrice`, `MarkoutDuration` and `MarkoutTag`. `MarkoutId` is the
+fill's `FillId` and `ExchangeTimestamp` the fill's exchange time; the pair names the fill in the strategy's
+`Fills/<symbol>.fill`, and is the key because an id alone can repeat (the simulator's counter restarts at 0 each run,
+and a realtime fill file is never wiped). The record carries no fill facts and no instrument (2026-11-23): the price,
+side, quantity and type are read from the fill, and the instrument is the symbol of the folder the record's file sits
+in, because an `InstrumentId` is a different number after a weekend and a symbol is not. This goes back on the
+2026-11-20 decision to copy four fill facts into every record so that the file stood alone; that was made because the
+strategy's `.fill` file is incomplete in a fast backtest (see "Logging's file writes"), and it still is: until Logging
+is changed, a backtest's table shows only the fills that reached the fill file, and says how many did not. A record is
+written as soon as its duration passes, so a fill that never reaches a duration has no record for it.
 
 **The tag is the strategy's.** `Markouts.Markout` (`MarkoutHandler(in Fill, ref Markout)`) is raised once per algo fill,
 before any observation. The strategy edits the markout there, typically setting `MarkoutTag` (None, Exit, Entry); every
@@ -2394,23 +2506,70 @@ record of that fill carries what it set. The handler runs on the feed thread ins
 rules. With no handler the tag is None.
 
 **Where it is written.** `<strategy>/Markouts/<instrument.Symbol>/<date>.markout`, through one `Series<Markout>` per
-position to Logging (`FileType.Markout`), one JSON line per record. The date is the Chicago date when `NewMarkouts` is
-called. A simulation wipes the folder at start with the strategy's other folders (`Strategy.InitDirectories`, which
+position to Logging (`FileType.Markout`), one JSON line per record. The date is the UTC date when `NewMarkouts` is
+called, as every dated file's is. A simulation wipes the folder at start with the strategy's other folders (`Strategy.InitDirectories`, which
 now looks into subfolders).
 
 **The GUI.** `MarkoutsWidget` reads every symbol's `.markout` files and shows one instrument at a time: the Instrument
 box always has a selection and offers no "All", because ticks of different instruments do not add up. For that
-instrument it totals by group and markout duration. The markout of an observation is `fill sign * (mid - fill price)`.
+instrument it totals by group and markout duration.
 Each row shows fills, quantity, Ticks (the quantity-weighted average markout, per contract), USD (the total), T-test and
 Samples. Mean and StdDev are quantity-weighted too and hidden by default: Mean is Ticks, and StdDev is
 `sqrt(n / (n - 1) * sum(q (x - Ticks)²) / sum(q))` over the n fills, the sample standard deviation when every fill is
-one lot. Groups are All, Day, TimeOfDay (hour of day across all days), Side, FillType and Tag, in Chicago time from the
-fill's exchange time; the Duration box narrows to one markout duration. Tick size and USD multiplier come from the
+one lot. Groups are All, Day, TimeOfDay (hour of day across all days), Side, FillType and Tag, in UTC from the
+fill's exchange time; the Duration box narrows to one markout duration, and it and the Duration column write a
+duration short (-20µs, 0, 100ms, 1s, 5m). Tick size and USD multiplier come from the
 instrument the context lists now. New lines add to the rows in place; only a change of selection totals again from the
 start. A one-second timer picks up symbol folders that Logging creates after the widget opened.
 
+**Joined to the fill (2026-11-23).** For each symbol folder under `Markouts` the widget also reads that symbol's
+`Fills/<symbol>.fill`, and joins a markout to its fill by symbol, `MarkoutId` and `ExchangeTimestamp`. The fill gives
+the price, side, quantity and fill type; the instrument is the one the context lists under that symbol. A markout
+whose fill line has not been read waits, and joins its row when the line arrives: live, the first records of a fill
+are written within moments of it and usually reach the widget before Logging's fill line does. The fills still
+waiting are counted beside the selectors ("37 fills unmatched"), so a fill file that has lost lines shows instead of
+quietly thinning the table. Tested 2026-11-23 off-screen on the real widget against a scratch simulation (11 checks):
+every row of every choice below equals the figure worked out from the two files, 894 fills and 8,036 records.
+
+**What a row measures: Value against a reference (2026-11-23).** Two boxes choose it, and every row is
+`fill sign * (value at the row's duration - reference)`, positive when in the fill's favour. Value is Mid (of the best
+bid and ask), FairValue (the strategy's), SameBest (the best price on the fill's own side: the bid for a buy, the ask
+for a sell) or FarBest (the best on the other side: the ask for a buy). Against FillPrice, SameBest at -20 µs says
+whether we were the best price when the fill was decided, and at 0 whether that price survived the fill. Against is
+FillPrice, or FairValueAtFill: the fair value in the fill's own
+record at duration 0, so a fill with no such record waits like one with no fill line. Mid against FillPrice is the
+markout of the first version. Read down the durations of one group. Worked example, a buy of 1 at 100.00, tick 0.25,
+fair value 100.50 at -20 µs, 99.75 at 0 and at 100 ms, 99.50 at 1 s:
+
+| Duration | FairValue against FillPrice | FairValue against FairValueAtFill |
+|---|---|---|
+| -20µs | +2 | +3 |
+| 0 | -1 | 0 |
+| 100ms | -1 | 0 |
+| 1s | -2 | -1 |
+
+We believed the fill was worth +2 ticks while we could still act; the fill's own event took 3 of them; the fair value
+then drifted one more against us. Three patterns answer "widen, or is the fair value wrong": positive at -20 µs and
+negative at 0 against FillPrice means the fill itself is the bad news, so widen, or cancel inside 20 µs; fine at 0
+and falling at the later durations against FairValueAtFill means the fair value is late; negative already at -20 µs
+means we were quoting through our own fair value, a stale quote.
+
+**The table's order (2026-11-23).** Grouped by Day the table has the newest day at the top, each day's markout
+durations shortest first; a day that arrives while the widget is open goes to the top. Every other grouping stays in
+order (00:00 first, Buy before Sell). It is a sort on the grid, set when the grouping becomes Day and cleared when it
+becomes anything else (`OnGroupingSelectionChanged`: Group descending, then Duration ascending), so the two headers
+show their arrows and a click on any header sorts by that column instead, until the grouping changes. The rows behind
+the grid keep the oldest day first, which is the order the histogram draws: time runs left to right there. The sort is
+not saved with the workspace; a widget reopens in its grouping's default order. Rows that tie in the sort keep the
+rows' own order, durations shortest first. That needed a fix (2026-11-23): a click on a header leaves the table
+sorted by that column alone, and the grid places a row that arrives later by a binary search that stops at the first
+row it ties with, so under a sort by Group alone a day's durations came out as 100ms, 0, 5m, 1m, ... with -20µs last.
+Whenever a batch of lines makes a new row the widget now has the grid sort afresh, which is a stable sort over the
+rows in their own order.
+
 **Saved with the workspace** (`MarkoutsWidgetState`): the columns' layout, the view, the grouping, the instrument, the
-duration and the histogram's unit. A workspace restores a widget before any `.markout` line has been read, so the saved
+duration, the value, what it is measured against and the histogram's unit; a state saved before the last two existed
+opens as Mid against FillPrice. A workspace restores a widget before any `.markout` line has been read, so the saved
 instrument and duration are put into their boxes at once and selected; the rows are empty until that instrument's
 markouts arrive. An instrument that never trades again stays in the box as a choice with no rows. The Duration box
 keeps its choices in seconds, the form it shows them in, so a saved duration is the same choice when read back.
@@ -2429,7 +2588,9 @@ the cluster form of the weighted mean's standard error; Ticks itself is unchange
 zero markout significant 4 to 6 times in a hundred where there are 150 or more samples, which is what an honest test
 does, and 6 to 8 where there are only 16 to 32, where 2 is a lower bar than it looks. Why three: at one duration a
 fill at the end of a bucket still shares its window with the next bucket's fills (7 to 11 in a hundred for one-sided
-fills at 60 s and longer); at five there are too few samples at 600 s (7 to 9 in a hundred). The row keeps its
+fills at 60 s and longer); at five there are too few samples at 600 s (7 to 9 in a hundred). A bucket is never
+shorter than one second (2026-11-23): at -20 µs, 0 and 100 ms three durations would be next to nothing, and the fills
+of one sweep, which arrive in the same instant and share one event, would each count as a sample. The row keeps its
 buckets in a dictionary and three running sums, moved as each fill lands, so the figure does not depend on the order
 the lines arrive in. How to read it: above 2 in size with 30 or more samples is evidence; under 30 samples the bar is
 higher (2.13 at 16), and one day seldom holds enough buckets at the long durations, so use All for those. With many
@@ -2451,18 +2612,31 @@ saved with the workspace.
 - Fills in the last markout durations before a strategy stops or the session closes lose the observations they had not
   reached; at Closed the pending ones are dropped, because the next quote belongs to another session.
 - The pending ring holds 4,096 fills per position; beyond that the oldest fill loses its remaining observations.
-- The "before" quote is one read pass old, not one book delta old.
+- A quote is remembered once per read pass, not once per book delta, so the quote "at -20 µs" is the one after the
+  last pass whose book time is at least 20 µs before the fill; when several deltas came in one pass it is older than
+  it need be.
+- Each history holds 4,096 values. A moment further back than that has no value: more than 4,096 changes of the
+  quote's prices, or of the fair value, between the moment and the book update that writes its record. The fair
+  value's history is the one at risk, on an instrument whose own book is quiet while a busy one moves its fair value.
+- A fair value set in a read pass that also read a later message from another instrument is stamped with that later
+  time, so when the fill's own trade was in that pass the record at 0 keeps the fair value from before it; the
+  record at 100 ms has the new one.
+- The first records of a fill are written on the instrument's next book update after the fill arrives, not at the
+  fill, so on a quiet book they wait.
 - The loop assumes a position's fills arrive in exchange-time order; a later fill with an earlier time waits behind the
   one before it.
 - The file keeps the date `NewMarkouts` was called on; it does not roll at midnight. The GUI groups by each fill's own
   time, so totals are unaffected.
-- Markouts of an instrument the context no longer lists (an expired contract) are not shown: there is no tick size or
-  multiplier to convert with. `InstrumentId` stability across server restarts is unverified.
+- Markouts of a symbol the context no longer lists (an expired contract) are not shown: there is no tick size or
+  multiplier to convert with. The symbol is looked up once, when its first markout is read.
 - Enums are written by name, so renaming a `MarkoutTag` value breaks reading old files.
-- A `.markout` file written before the record gained its fill facts reads with price and quantity zero; delete it (a
-  simulation wipes its own at start).
-- The strategy's `.fill` file losing fills in a simulation is separate: see "Logging's file writes", which makes the
-  tap's writes about thirteen times cheaper but does not guarantee a complete file.
+- A `.markout` file written before 2026-11-23 has no `MarkoutId` or `ExchangeTimestamp`; its lines are skipped. Delete
+  it (a simulation wipes its own at start).
+- The strategy's `.fill` file loses fills in a fast backtest (see "Logging's file writes"), and the table now depends
+  on it: those fills are counted as unmatched and left out. Live it is complete. Changing Logging so that it is
+  complete in a backtest too is open (2026-11-23).
+- `FillsWidget` still finds a fill's symbol through its `InstrumentId`, which has the weekend problem the markouts no
+  longer have; the fill line carries the symbol.
 
 ## Sorting without allocating (2026-11-20)
 
@@ -2519,6 +2693,12 @@ and the process has no timer thread and no pool threads. `GCMonitor.Start()` is 
 files across the strategy repositories); `Stop()`, which nothing called, is gone. The line's text is the same; it now
 appears on the whole second, where the Clock's timers fall.
 
+**One owner (2026-11-23).** `Scenario.Start` starts the monitor in every realtime process, right after `BuildRealtime`,
+so a strategy's scenario no longer starts it itself; a simulation does not run it. `Start` has a guard, so a scenario
+that still calls it (32 files in the strategy repositories as of this date) gets one monitor, not two printing every
+line twice. Checked with the realtime clock running: three `Start` calls, then collections forced in two separate
+seconds, printed two lines and queued one timer. Those calls are now redundant and can be deleted.
+
 Measured on a Linux native-AOT build (4 CPUs, main thread pinned, 64 MB no-GC region), reproducing the box's rhythm
 first: with the timer, new workers at 1, 22, 43, 106 and 127 s; with the check on the Clock thread, no thread created
 in 130 s and 0 bytes allocated by the other threads over 120 checks. The check reads five counters: 12 ns warm, about
@@ -2534,6 +2714,151 @@ loop is on the main thread and `Clock.Now` reads the system time, so a late Cloc
   unnecessary and harmless.
 - Not verified: a real strategy on the box after a deploy. Anything else in a strategy that uses the thread pool would
   start it again; `ls /proc/<pid>/task` with the threads' names shows it (`.NET TP Worker`).
+
+## The statistics a strategy saves: Mean, StdDev, Factor, Correl (2026-11-22)
+
+A strategy makes a running statistic with `NewMean`, `NewStdDev`, `NewFactor` or `NewCorrel`. Each is a
+`Statistic<TPoint>` (`Data/Factor.cs`): a name, the current point, and a `Value` event raised after every update that
+changed the point. `Strategy.AttachSeries` needs only those three, so it serves all four:
+
+- **The file** is `<strategy>/Factors/<name>.<class name in lower case>` (`.mean`, `.stddev`, `.factor`, `.correl`),
+  written through a `Series<TPoint>` to Logging, which picks its writer from the extension (`FileType`). A new kind of
+  statistic therefore needs a `FileType` value and a writer line in Logging, or Logging refuses the connection and
+  nothing is written; `Correl = 15` was added for this.
+- **Saved** on every update: the `Value` event appends the point as one JSON line.
+- **Restored** in Realtime only: at start the statistic takes the point of the file's last line. A simulation starts
+  fresh; its Factors folder is wiped with the strategy's others.
+
+`Factor<TPoint>` adds the one-value recursion (`OnValue(double)`, `GetPoint`, `+= value`, the conversion to `double`)
+on top of `Statistic<TPoint>`; `Mean`, `StdDev` and `Factor` derive from it. `Correl` takes two values, so it derives
+from `Statistic<CorrelPoint>` directly and has its own `OnValues(x, y)` and `correl += (x, y)`; `correl += x` does not
+compile. Its line also carries the computed `Correl` and `Beta`, which are ignored when read back.
+
+- **A restored statistic is not bit-for-bit the saved one.** The file keeps 15 significant digits. Measured on a
+  simulation's files (NQ, 333,778 points): a `Correl` restored from one line and fed the pairs of every later line
+  stayed within 8.5e-15 relative of the saved variances and 3.3e-15 of the saved correlation; a `Mean` within 5e-17.
+- **Cost.** Splitting the base changed nothing measurable: `Mean`, `StdDev` and `Factor` updates took the same time
+  before and after (within 0.05 ns of 4.1, 4.4 and 7.5 ns in the same harness, three runs each), 0 bytes allocated.
+  `correl += (x, y)` with a subscriber: about 4 ns, 0 bytes.
+- **Deploy.** Logging must be the build that knows `FileType.Correl` before a strategy calls `NewCorrel`.
+- Not run: the Realtime restore itself (`AttachSeries` reading the last line at a live start) for a `Correl`; the test
+  did the same two steps by hand on a simulation's file.
+
+**The start: a plain average, then alpha (2026-11-22).** A moving average that gives every value the fixed weight
+alpha starts at 0 and climbs: with a 600-period half-life alpha is 1/866, and a volatility that is really 2 bp reads
+0.21 after 10 periods, 1.41 after one half-life and 1.94 after four. A score divides by that, so early scores were too
+big. Each statistic now weights its next value by the larger of alpha and 1 / (the number of values so far, this one
+included): `Statistic<TPoint>.GetWeight(alpha, warmUpCount, count)`, where `warmUpCount` is `1 / alpha`. So for the
+first `1 / alpha` values (866 at a half-life of 600, about 1.44 half-lives) the estimate is the plain average of
+everything seen, and from then on the update is the one it always was. It applies to `Mean`, `StdDev`, both channels
+of `Factor`, and the three averages of `Correl`; `Factor.GetValue`, the inverse of the score, uses the same weights for
+the value it solves for.
+
+- Worked example, returns +2, −1, +3 at a half-life of 600: the old StdDev read 0.07, 0.08, 0.13; it now reads 2.00,
+  1.58, 2.16, the root of the average square each time.
+- Steady 2 bp volatility, 4,000 trials: the new estimate averages 1.96 to 2.00 at every length, with a typical error
+  of 22% after 10 periods, 10% after 50, 5% after 200 and 3% from one half-life on. It is noisy early, not low.
+- The update rule after the warm-up is unchanged, but an estimate made the old way is still low at that point (63% of
+  the truth for a variance) and only meets the new one as its start-up error halves each half-life.
+- A `Factor`'s first score is always +1 or −1 (it was `1 / sqrt(alpha)`, 29 at a half-life of 600). Neither is a
+  signal: gate on `IsInitialized`.
+- **Seeds.** `NewMean` and `NewStdDev` take a seed. A seed other than 0 starts the statistic at the seed with `Count`
+  set to the half-life, so the rule treats it as one half-life of observations: the seed's share of the estimate is
+  96.8% after 10 values, 47.1% after one half-life and 5.9% after four at a half-life of 300, against 97.7%, 50.0% and
+  6.3% before. Two consequences: a seeded statistic is `IsInitialized` from the start (it used to wait a half-life of
+  real values), and its `Count` is the half-life plus the values applied. A seed of 0 is no seed.
+- **Who sees a difference.** A statistic restored from its file with a `Count` at or past `1 / alpha` behaves exactly as
+  before. Every backtest, a live statistic with no file yet, and one restored with a smaller `Count` (younger than
+  about 1.44 half-lives) do not: the last weights its next values by `1 / count` until it reaches `1 / alpha`.
+- **Cost** (native AOT, the statistic held in a field, after the warm-up): `Mean` 3.33 to 3.45 ns per update, `StdDev`
+  3.33 to 3.55 ns, `Factor` 3.65 to 3.63 ns; 0 bytes. During the warm-up each update also divides once.
+
+**What the points hold (2026-11-22).** `FactorPoint.Score` is a property, `Mean.Mean / MeanStdDev.StdDev`, NaN before
+the first value, for a non-finite input (`Mean.Value` NaN) and while the spread is 0, so `FactorPoint` is 56 bytes,
+was 64. It is still written to the file (properties are, as `Correl` and `Beta` are) and ignored when a line is read
+back, so old files restore. `FastFactor` and `FastStdDev`, which used approximate square roots, are deleted: they were
+no faster (within 0.05 ns of `Factor` in every run, native AOT) and nothing used them; `StdDev` and `Factor` are sealed.
+
+- **Deploy Logging first.** A strategy sends each point to Logging as raw struct bytes and Logging reads them as its
+  own copy of the struct (`ObjectWriter<T>`, `MemoryMarshal.Read<T>`). A newer Logging reads an older strategy's
+  longer `FactorPoint` (it takes the first 56 bytes); an older Logging cannot read a newer strategy's shorter one, and
+  those lines are lost. The same holds for any change to a point struct's size.
+- **Kept, and why.** `MeanPoint.Value` and `StdDevPoint.Value` (the input): the NaN input is marked there, and several
+  of Adrian's strategies and MarketMaking store their last mid in `Point.Mean.Value`. `Count`: the warm-up and
+  `IsInitialized` read it. `StdDevPoint.StdDev`: as a property it was slower almost everywhere, since every read pays
+  the square root (a StdDev read once per update 3.8 to 4.5 ns; a factor's score read three times 5.7 to 9.1 ns).
+- **Measured, not done.** `FactorPoint.MeanStdDev` repeats two fields the mean channel holds (its `Value` is always
+  `Mean.Mean`, its `Count` always `Mean.Count`; nothing outside `Factor.cs` reads them). A channel holding only `Var`
+  and `StdDev` makes `FactorPoint` 40 bytes and old files still restore, but it was no faster (within 0.2 ns) and
+  needs a new struct type.
+
+**Every point carries its time, so the chart can plot it (2026-11-22).** `MeanPoint`, `StdDevPoint` and `CorrelPoint`
+have a `Timestamp`; `FactorPoint` has two (one per channel) and a `Timestamp` property that reads the mean channel's, so
+every saved line starts its members with it. Sizes: 32, 40, 72 and 56 bytes. Where the time comes from:
+
+- `stat += (timestamp, value)`, `OnValue(timestamp, value)`, `correl += (timestamp, x, y)`, `OnValues(timestamp, x, y)`
+  and `Regression.OnValues(timestamp, inputs, target)` stamp the time given: a timer's tick, or the message's time. No
+  clock read; the update costs what it did (4.2 to 4.7 ns, native AOT).
+- `stat += value`, `OnValue(value)`, `correl += (x, y)` and `OnValues(x, y)` stamp `Clock.Now`: one clock read, 25 ns
+  live, free in a simulation, where `Clock.Now` is a field. `Regression.OnValues(inputs, target)` reads it once for all
+  its pairs. Existing callers compile unchanged and so pay it until they pass the time.
+- `GetPoint` (a preview) stamps nothing, so it reads no clock and costs what it did (3.3, 9.6, 15.3 and 14.2 ns for a
+  mean, stddev, factor and correl).
+- A time from `Client.ExchangeTimestamp` is the exchange time of the last message from any instrument, and those can
+  interleave a little out of order: a simulation's factor stamped that way went back by 64 µs and 14 µs once each in two
+  hours. The chart drops a point earlier than the one before. `Clock.Now` never goes back.
+- Old lines have no time: they restore (the field reads as default) but are not plotted.
+- **Deploy Logging with the strategies.** Every point's size changed (see "What the points hold").
+
+**Charting a statistic.** Add Series in the chart offers `.mean`, `.stddev`, `.factor` and `.correl` files. For one of
+those it reads the file's last line and lists every numeric member, nested ones as paths (`Score`, `Mean.Mean`,
+`MeanStdDev.StdDev`; `Correl`, `Beta`; a NaN written as `"NaN"` counts), and plots each one ticked as its own line,
+named `<file> <value>`, against the line's `Timestamp`. A line without a time or a finite value there is not plotted.
+The chosen value is saved with the workspace (`ChartSeriesState.Value`); a statistic's file with no value is refused.
+The dialog is `SelectNamesDialog`, which Remove Series also uses (it replaced `RemoveSeriesDialog`, the same window for
+one purpose). Tested off-screen on a simulation's NQ files (235,252 lines each): every point with a time and a finite
+value plotted, less the factor's two whose time went back; saved and reloaded to the same series; one removed through
+the dialog. The picker itself opens the system file dialog, which the off-screen test cannot drive.
+
+### Regression (2026-11-22)
+
+`Regression` (`Data/Factor.cs`) is a rolling regression of one target on several inputs, all taken as zero-mean: the
+betas that best explain the target as the sum of beta × input. `Correl` is the one-input case (its `Beta`); with
+several inputs that are alike, separate betas count their shared move more than once. Example in volatility units,
+correlations EMD–ES 0.85, EMD–NQ 0.70, ES–NQ 0.90: the separate betas are 0.85 and 0.70; the joint ones are 1.16 and
+−0.34.
+
+- **Made of one `Correl` per pair of series**, not a statistic with its own point: each input with the target, and
+  each input with every other input, so `n (n + 1) / 2` Correls for `n` inputs (6 for three). It then takes any number
+  of inputs, needs no `FileType` or Logging change, and is saved and restored through `NewCorrel`
+  (`Strategy.NewRegression`). The betas solve (the inputs' covariance matrix) · betas = (each input's covariance with
+  the target) by Cholesky after every update, and once at construction, so a restored regression has its betas at once.
+  Declined: one statistic with a fixed-size point. It would be one file with the betas on every line and half the
+  moving averages, but a point must be fixed-size, so it caps the inputs and needs a field per pair, a `FileType` and
+  a Logging writer. Worth revisiting if the Logging client count (one per Correl, 1,024 at most) becomes the limit.
+- **The betas are not saved**, only the pairs. A strategy that wants to chart them adds a `Series` per beta.
+- **The time** (2026-11-22): `OnValues(timestamp, inputs, target)` stamps every pair with the time given;
+  `OnValues(inputs, target)` reads `Clock.Now` once for all of them, not once per pair.
+- **A pair's name and file** are `<name> <input>-<input>` with the two names in sorted order (`<name> <input>-Target`
+  for the target), and the pair is fed in that order. The same pair so has the same file however the inputs are
+  ordered; naming pairs by position would reload another pair's file after a reorder. Input names must be distinct.
+- **Ridge.** `ridge` × the mean of the inputs' variances is added to the diagonal before solving; 0 is plain least
+  squares. Like inputs make the plain solution unstable: at a correlation of 0.9 between two inputs it divides by
+  1 − 0.81 = 0.19, so an error of 0.02 in one measured correlation moves each beta by about 0.10. Measured on three
+  inputs correlated about 0.94, a half-life of 2,000: the first beta wanders ±0.028 with no ridge, ±0.015 at 5%. The
+  price is betas shrunk towards 0 (their total size fell from 1.22 to 0.79 in that test).
+- **Linearly dependent inputs** (a pivot below 1e-12 of its diagonal entry) give NaN betas, not huge ones; with a
+  ridge they are solvable, and two identical inputs split the beta evenly.
+- **An observation with a non-finite value is skipped whole**, so every pair counts the same observations.
+- **Pairs with different counts throw at construction.** That happens when the files are of different lengths at a
+  restore: after a crash between two pairs' writes, or when an input was added. Their covariances would then be of
+  different histories. Accepted cost: the operator deletes that regression's `.correl` files and it starts afresh.
+  Declined for now: tolerating a small difference.
+- **Measured** (scratch harness, 16 checks): three known betas (0.4, 0.6, −0.2) recovered to 0.001 on average; one
+  input equal to `Correl.Beta` to 2e-16; equal to hand-kept averages solved by Gaussian elimination to 2e-15, with and
+  without ridge; restore and reorder exact; 0 bytes over 1,000,000 updates. About 0.7 µs per update of three inputs
+  against a Debug build of Data; not measured in Release or AOT.
+- Out of contract: an `inputs` span of a different length from the input names.
 
 ## Open items
 

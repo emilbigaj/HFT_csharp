@@ -121,6 +121,17 @@ public struct Quote
     }
     public double MicroPrice => (Bid.Ticks * Ask.Quantity + Ask.Ticks * Bid.Quantity) * TickSize / (Bid.Quantity + Ask.Quantity) ;
     public double MidPrice => (Bid.Ticks + Ask.Ticks) * 0.5 * TickSize;
+
+    public double ClampedMicroPrice
+    {
+        get
+        {
+            double mid = (Bid.Ticks + Ask.Ticks) * 0.5 * TickSize;
+            double spread = (Ask.Ticks - Bid.Ticks) * TickSize;
+            double imbalance = (Bid.Quantity - Ask.Quantity) / (double)(Bid.Quantity + Ask.Quantity);
+            return mid + imbalance * Math.Min(spread, TickSize) * 0.5;
+        }
+    }
     public double BidPrice => Bid.Ticks * TickSize;
     public double AskPrice => Ask.Ticks * TickSize;
 }

@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Threading.Tasks;
 using Avalonia.Collections;
 using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using Data;
@@ -18,8 +20,26 @@ namespace Widget;
 public enum MarkoutView { Table, Histogram }
 
 /// What the Markouts widget totals the selected instrument's fills by, beside the markout duration. Day and TimeOfDay are
-/// Chicago time, from the fill's exchange time; TimeOfDay is the hour of the day across every day.
+/// UTC, from the fill's exchange time; TimeOfDay is the hour of the day across every day.
 public enum MarkoutGrouping { All, Day, TimeOfDay, Side, FillType, Tag }
+
+/// What the Markouts widget measures at each markout duration: the mid of the best bid and ask, the strategy's fair
+/// value, the best price on the fill's own side (the bid for a buy, the ask for a sell), or the best on the far side.
+public enum MarkoutValue { Mid, FairValue, SameBest, FarBest }
+
+/// What the Markouts widget measures it against: the fill's price, or the strategy's fair value at the fill, which is
+/// the fill's record at markout duration zero.
+public enum MarkoutReference { FillPrice, FairValueAtFill }
+
+/// Names a fill in the Markouts widget: its symbol, which is the folder its markouts were read from and the name of its
+/// fill file, with the id and exchange time that both records carry.
+public readonly record struct MarkoutKey(string Symbol, ulong MarkoutId, Timestamp ExchangeTimestamp);
+
+/// A markout with the symbol of the folder it was read from.
+public readonly record struct SymbolMarkout(string Symbol, Markout Markout)
+{
+    public MarkoutKey MarkoutKey => new(Symbol, Markout.MarkoutId, Markout.ExchangeTimestamp);
+}
 
 /// The fills of one stretch of time, added up to be one sample of a row's t-statistic: their markout in ticks times
 /// quantity, and their quantity.
@@ -33,10 +53,12 @@ public readonly record struct MarkoutBucket(double TicksTimesQuantity, int Quant
 public sealed class WidgetMarkoutGroup(string group, Duration markoutDuration) : INotifyPropertyChanged
 {
     private const int s_bucketMarkoutDurations = 3;   // a bucket is this many markout durations long: 1 overstates t by about 22%, 3 by about 6%
+    private const long s_minimumBucketNanoseconds = Duration.NanosecondsPerSecond;   // the shortest bucket: a sweep's fills land in one instant and are one sample at any duration
 
     public string Group { get; } = group;
     public Duration MarkoutDuration { get; } = markoutDuration;
-    public double MarkoutSeconds => MarkoutDuration.TotalSeconds;   // the Duration column's text and sort key, and the histogram's label
+    public double MarkoutSeconds => MarkoutDuration.TotalSeconds;   // the Duration column's sort key, and what the Duration box chooses by
+    public string MarkoutDurationLabel { get; } = NewMarkoutDurationLabel(markoutDuration);   // the Duration column's text and the histogram's label
     public int Fills { get; private set; }
     public int Quantity { get; private set; }
     public double Ticks => Quantity == 0 ? double.NaN : _ticksTimesQuantity / Quantity;
@@ -81,17 +103,16 @@ public sealed class WidgetMarkoutGroup(string group, Duration markoutDuration) :
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    /// Adds one observation: how far the mid had moved in the fill's favour at this markout duration.
-    public void Add(in Markout markout, double tickSize, double usdMultiplier)
+    /// Adds one observation of a fill of this quantity: how far, in price, the measured value stood from what it is
+    /// measured against, in the fill's favour.
+    public void Add(Timestamp fillExchangeTimestamp, double points, int absQuantity, double tickSize, double usdMultiplier)
     {
-        // Step 1: an observation with no quote is not counted
-        double points = Math.Sign(markout.FillQuantity) * (markout.MidPrice() - markout.FillPrice);
+        // Step 1: an observation with no quote, or no fair value, is not counted
         if (double.IsNaN(points))
             return;
 
         // Step 2: the row's totals
         double ticks = points / tickSize;
-        int absQuantity = Math.Abs(markout.FillQuantity);
         Fills++;
         Quantity += absQuantity;
         _ticksTimesQuantity += ticks * absQuantity;
@@ -99,8 +120,8 @@ public sealed class WidgetMarkoutGroup(string group, Duration markoutDuration) :
         Usd += points * usdMultiplier * absQuantity;
 
         // Step 3: the fill joins its bucket of time: the bucket's old share comes out of the three sums and its new share goes in
-        long bucketNanoseconds = Math.Max(MarkoutDuration.TotalNanoseconds * s_bucketMarkoutDurations, 1);
-        long bucketIndex = markout.FillExchangeTimestamp.NanosSinceEpoch / bucketNanoseconds;
+        long bucketNanoseconds = Math.Max(Math.Abs(MarkoutDuration.TotalNanoseconds) * s_bucketMarkoutDurations, s_minimumBucketNanoseconds);
+        long bucketIndex = fillExchangeTimestamp.NanosSinceEpoch / bucketNanoseconds;
         _bucketsByIndex.TryGetValue(bucketIndex, out MarkoutBucket markoutBucket);
         AddToBucketSums(in markoutBucket, sign: -1);
         markoutBucket = new MarkoutBucket(markoutBucket.TicksTimesQuantity + ticks * absQuantity, markoutBucket.Quantity + absQuantity);
@@ -118,9 +139,24 @@ public sealed class WidgetMarkoutGroup(string group, Duration markoutDuration) :
 
     /// Tells the grid every column changed.
     public void Refresh() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(""));
+
+    /// A markout duration as short text: -20µs, 0, 100ms, 10s, 5m.
+    public static string NewMarkoutDurationLabel(Duration markoutDuration)
+    {
+        double seconds = markoutDuration.TotalSeconds;
+        double absSeconds = Math.Abs(seconds);
+        if (absSeconds == 0)
+            return "0";
+        bool isWholeMinutes = absSeconds >= 60 && absSeconds % 60 == 0;
+        if (isWholeMinutes)
+            return (seconds / 60).ToString("0", CultureInfo.InvariantCulture) + "m";
+        if (absSeconds >= 1)
+            return seconds.ToString("0.###", CultureInfo.InvariantCulture) + "s";
+        return absSeconds >= 0.001 ? (seconds * 1_000).ToString("0.###", CultureInfo.InvariantCulture) + "ms" : (seconds * 1_000_000).ToString("0.###", CultureInfo.InvariantCulture) + "µs";
+    }
 }
 
-/// The Markouts widget's saved state: its columns' layout, its four selections and the histogram's unit. Cold path: a workspace's save and load.
+/// The Markouts widget's saved state: its columns' layout, its six selections and the histogram's unit. Cold path: a workspace's save and load.
 [RegisterJson]
 public sealed class MarkoutsWidgetState
 {
@@ -129,13 +165,17 @@ public sealed class MarkoutsWidgetState
     public MarkoutGrouping MarkoutGrouping { get; set; }
     public string? ShortSymbol { get; set; }       // null = saved before any instrument had appeared
     public double? MarkoutSeconds { get; set; }    // null = "All"
+    public MarkoutValue MarkoutValue { get; set; }
+    public MarkoutReference MarkoutReference { get; set; }
     public MarkoutUnit MarkoutUnit { get; set; }
 }
 
 /// A strategy's markouts for one instrument, which is always selected, totalled by the chosen grouping and markout
-/// duration, as a table or a histogram: every symbol's .markout history, then each new line as Logging writes it. New
-/// lines add to the rows in place; only a change of selection totals again from the start. UI thread; the history parses
-/// on the thread pool. Cold path (see Spec.md "Markouts").
+/// duration, as a table or a histogram. It reads every symbol's .markout history and .fill file, then each new line as
+/// Logging writes it, and joins a markout to its fill by symbol, id and exchange time: the fill gives the price, side
+/// and quantity. A row measures the chosen value (the mid, or the strategy's fair value) against the chosen reference
+/// (the fill's price, or the fair value at the fill). New lines add to the rows in place; only a change of selection
+/// totals again from the start. UI thread; the history parses on the thread pool. Cold path (see Spec.md "Markouts").
 public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
 {
     private const int s_historyBatchSize = 1000;
@@ -145,9 +185,12 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
     private readonly Context _context;
     private readonly DispatcherTimer _symbolDirectoryTimer = new() { Interval = s_symbolDirectoryPollInterval };   // finds symbol folders Logging creates after the widget opened
     private readonly HashSet<string> _symbolDirectoryPaths = new();   // the symbol folders already being read
-    private readonly List<LogReader> _logReaders = new();             // one per symbol folder
-    private readonly List<Markout> _markouts = new();                 // UI thread only
-    private readonly Dictionary<int, Instrument?> _instrumentsByInstrumentId = new();   // null = this context does not list it
+    private readonly List<LogReader> _logReaders = new();             // two per symbol: its markout folder and its fill file
+    private readonly List<SymbolMarkout> _symbolMarkouts = new();     // every markout read; UI thread only
+    private readonly List<SymbolMarkout> _waitingSymbolMarkouts = new();   // of the selection: not in a row yet, because their fill's line or the record they are measured against is unread
+    private readonly Dictionary<MarkoutKey, Fill> _fillsByMarkoutKey = new();
+    private readonly Dictionary<MarkoutKey, Markout> _markoutsAtFillByMarkoutKey = new();   // each fill's record at markout duration zero: what FairValueAtFill measures against
+    private readonly Dictionary<string, Instrument?> _instrumentsBySymbol = new();   // null = this context does not list it
     private readonly Dictionary<(string Group, Duration MarkoutDuration), WidgetMarkoutGroup> _groupsByKey = new();
     private readonly SortedSet<double> _markoutSecondsChoices = new();   // every markout duration seen so far, in seconds: what the Duration box offers
     private readonly SortedSet<string> _shortSymbols = new(StringComparer.Ordinal);   // every instrument seen so far: what the Instrument box offers
@@ -155,7 +198,7 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
     public AvaloniaList<WidgetMarkoutGroup> Rows { get; } = new();
 
     public string Title { get; private set; }
-    public double DefaultWidth => 800;
+    public double DefaultWidth => 1000;
     public double DefaultHeight => 300;
 
     public MarkoutsWidget()
@@ -173,11 +216,16 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
         // Step 1: the grid and the selectors
         InitializeComponent();
         MarkoutsGrid.ItemsSource = Rows;
+        MarkoutDurationComboBox.ItemTemplate = new FuncDataTemplate<object>((choice, _) => new TextBlock { Text = choice is double markoutSeconds ? WidgetMarkoutGroup.NewMarkoutDurationLabel(Duration.FromSeconds(markoutSeconds)) : s_allChoices });
         _isShowingChoices = true;
         ViewComboBox.ItemsSource = Enum.GetValues<MarkoutView>();
         ViewComboBox.SelectedItem = MarkoutView.Table;
         GroupingComboBox.ItemsSource = Enum.GetValues<MarkoutGrouping>();
         GroupingComboBox.SelectedItem = MarkoutGrouping.Day;
+        ValueComboBox.ItemsSource = Enum.GetValues<MarkoutValue>();
+        ValueComboBox.SelectedItem = MarkoutValue.Mid;
+        ReferenceComboBox.ItemsSource = Enum.GetValues<MarkoutReference>();
+        ReferenceComboBox.SelectedItem = MarkoutReference.FillPrice;
         _isShowingChoices = false;
         ShowChoices();
 
@@ -187,7 +235,7 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
         _symbolDirectoryTimer.Start();
     }
 
-    /// Starts reading each symbol folder under Markouts that is not being read yet.
+    /// Starts reading each symbol folder under Markouts that is not being read yet, and that symbol's fill file.
     private void StartNewLogReaders()
     {
         string markoutsDirectoryPath = Context.GetMarkoutsDirectoryPath(_context.DirectoryPath);
@@ -197,60 +245,84 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
         {
             if (!_symbolDirectoryPaths.Add(symbolDirectoryPath))
                 continue;
-            LogReader logReader = new LogReader(symbolDirectoryPath, "*.markout");
-            logReader.LiveLines += lines => Dispatcher.UIThread.Post(() => AddMarkouts(ParseLines(lines)));
-            logReader.Start();
-            _ = LoadHistoryAsync(logReader);
-            _logReaders.Add(logReader);
+            string symbol = Path.GetFileName(symbolDirectoryPath);
+            StartLogReader<Markout>(symbolDirectoryPath, "*.markout", markouts => AddMarkouts(symbol, markouts));
+            StartLogReader<Fill>(_context.FillsDirectoryPath.Path, Path.GetFileName(Context.GetFillsFilePath(_context.DirectoryPath, symbol)), fills => AddFills(symbol, fills));
         }
+    }
+
+    /// Reads the lines of this folder's files of this pattern as records: the whole history, then each new line as Logging writes it.
+    private void StartLogReader<TRecord>(string directoryPath, string pattern, Action<List<TRecord>> addRecords)
+    {
+        LogReader logReader = new LogReader(directoryPath, pattern);
+        logReader.LiveLines += lines => Dispatcher.UIThread.Post(() => addRecords(ParseLines<TRecord>(lines)));
+        logReader.Start();
+        _ = LoadHistoryAsync(logReader, addRecords);
+        _logReaders.Add(logReader);
     }
 
     /// Reads the whole history back, a batch at a time, then adds it at once.
-    private async Task LoadHistoryAsync(LogReader logReader)
+    private static async Task LoadHistoryAsync<TRecord>(LogReader logReader, Action<List<TRecord>> addRecords)
     {
-        List<Markout> history = await Task.Run(() =>
+        List<TRecord> history = await Task.Run(() =>
         {
-            List<Markout> _history = new();
+            List<TRecord> _history = new();
             for (List<string> lines = logReader.LoadHistory(s_historyBatchSize); lines.Count > 0; lines = logReader.LoadHistory(s_historyBatchSize))
-                _history.AddRange(ParseLines(lines));
+                _history.AddRange(ParseLines<TRecord>(lines));
             return _history;
         });
-        AddMarkouts(history);
+        addRecords(history);
     }
 
-    private static List<Markout> ParseLines(List<string> lines)
+    private static List<TRecord> ParseLines<TRecord>(List<string> lines)
     {
-        List<Markout> markouts = new(lines.Count);
+        List<TRecord> records = new(lines.Count);
         foreach (string line in lines)
         {
             // Why the catch: a torn last line must not take down the GUI; the line is skipped
-            try { markouts.Add(Json.Deserialize<Markout>(line)); }
+            try { records.Add(Json.Deserialize<TRecord>(line)); }
             catch { }
         }
-        return markouts;
+        return records;
     }
 
-    /// Keeps these markouts and adds them to the rows; a duration or instrument not seen before also joins its selector.
-    private void AddMarkouts(List<Markout> markouts)
+    /// Keeps these markouts of this symbol and adds them to the rows; a duration or instrument not seen before also joins its selector.
+    private void AddMarkouts(string symbol, List<Markout> markouts)
     {
-        // Step 1: keep them, noting any new choice
-        _markouts.AddRange(markouts);
+        // Step 1: keep them, each fill's record at the fill apart, noting any new choice
+        List<SymbolMarkout> symbolMarkouts = new(markouts.Count);
         bool hasNewChoice = false;
         foreach (Markout markout in markouts)
         {
+            // Why skipped: a line with no fill time is from a file written before a markout was joined to its fill
+            if (markout.ExchangeTimestamp.NanosSinceEpoch == 0)
+                continue;
+            SymbolMarkout symbolMarkout = new(symbol, markout);
+            symbolMarkouts.Add(symbolMarkout);
+            if (markout.MarkoutDuration.TotalNanoseconds == 0)
+                _markoutsAtFillByMarkoutKey[symbolMarkout.MarkoutKey] = markout;
             hasNewChoice |= _markoutSecondsChoices.Add(markout.MarkoutDuration.TotalSeconds);
-            if (TryGetInstrument(markout.InstrumentId, out Instrument instrument))
-                hasNewChoice |= _shortSymbols.Add(instrument.ShortSymbol);
         }
+        _symbolMarkouts.AddRange(symbolMarkouts);
+        if (symbolMarkouts.Count > 0 && TryGetInstrument(symbol, out Instrument instrument))
+            hasNewChoice |= _shortSymbols.Add(instrument.ShortSymbol);
 
         // Step 2: a new choice refills the selectors; the first instrument to appear becomes the selection, so total from the start
         bool hadInstrument = InstrumentComboBox.SelectedItem != null;
         if (hasNewChoice)
             ShowChoices();
         if (hadInstrument)
-            AddToGroups(markouts);
+            AddToGroups(symbolMarkouts);
         else
             ShowGroups();
+    }
+
+    /// Keeps these fills of this symbol, and adds the markouts that were waiting for them to the rows.
+    private void AddFills(string symbol, List<Fill> fills)
+    {
+        foreach (Fill fill in fills)
+            _fillsByMarkoutKey[new MarkoutKey(symbol, fill.FillId, fill.OrderHeader.ExchangeTimestamp)] = fill;
+        AddToGroups([]);
     }
 
     /// Refills the Instrument box with every instrument seen so far and the Duration box with "All" and every markout
@@ -276,6 +348,20 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
         comboBox.SelectedItem = selectedChoice ?? (items.Count > 0 ? items[0] : null);
     }
 
+    /// A new grouping puts the table in its default order, then totals: days newest first, any other group in order, each
+    /// group's markout durations shortest first. A click on a header sorts by that column instead, until the grouping changes.
+    private void OnGroupingSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        DataGridSortDescriptionCollection sortDescriptions = MarkoutsGrid.CollectionView.SortDescriptions;
+        sortDescriptions.Clear();
+        if (GroupingComboBox.SelectedItem is MarkoutGrouping.Day)
+        {
+            sortDescriptions.Add(DataGridSortDescription.FromPath(nameof(WidgetMarkoutGroup.Group), ListSortDirection.Descending));
+            sortDescriptions.Add(DataGridSortDescription.FromPath(nameof(WidgetMarkoutGroup.MarkoutSeconds)));
+        }
+        OnSelectionChanged(sender, e);
+    }
+
     private void OnSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (!_isShowingChoices)
@@ -287,45 +373,83 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
     {
         _groupsByKey.Clear();
         Rows.Clear();
-        AddToGroups(_markouts);
+        _waitingSymbolMarkouts.Clear();
+        AddToGroups(_symbolMarkouts);
         bool isTable = ViewComboBox.SelectedItem is MarkoutView.Table;
         MarkoutsGrid.IsVisible = isTable;
         MarkoutHistogram.IsVisible = !isTable;
     }
 
-    /// Adds these markouts to the rows of the current selection, making a row for each new group, and redraws.
-    private void AddToGroups(List<Markout> markouts)
+    /// Adds these markouts, and the ones that were waiting, to the rows of the current selection, making a row for each
+    /// new group, and redraws. A markout waits while its fill's line, or the record it is measured against, is unread.
+    private void AddToGroups(List<SymbolMarkout> symbolMarkouts)
     {
         if (GroupingComboBox.SelectedItem is not MarkoutGrouping markoutGrouping || InstrumentComboBox.SelectedItem is not string selectedShortSymbol)
             return;
-
-        // Step 1: each markout of the selected instrument and duration goes to its group's row
+        MarkoutValue markoutValue = (MarkoutValue)ValueComboBox.SelectedItem!;
+        MarkoutReference markoutReference = (MarkoutReference)ReferenceComboBox.SelectedItem!;
         double? selectedMarkoutSeconds = MarkoutDurationComboBox.SelectedItem as double?;
-        foreach (Markout markout in markouts)
+
+        // Step 1: the markouts that waited are tried again, then the new ones
+        List<SymbolMarkout> retriedSymbolMarkouts = new(_waitingSymbolMarkouts);
+        _waitingSymbolMarkouts.Clear();
+        bool _hasNewRow = false;
+        foreach (SymbolMarkout symbolMarkout in retriedSymbolMarkouts)
+            AddToGroup(in symbolMarkout);
+        foreach (SymbolMarkout symbolMarkout in symbolMarkouts)
+            AddToGroup(in symbolMarkout);
+
+        // Step 2: the rows that changed redraw in place, and so do the bars
+        // Why sorted again: the grid puts a new row anywhere among the rows that tie in its sort; sorting afresh leaves ties in the rows' own order
+        if (_hasNewRow)
+            MarkoutsGrid.CollectionView.Refresh();
+        foreach (WidgetMarkoutGroup widgetMarkoutGroup in Rows)
+            widgetMarkoutGroup.Refresh();
+        MarkoutHistogram.Show(Rows);
+
+        // Step 3: the fills still waiting are counted, so a fill file that has lost lines shows
+        HashSet<MarkoutKey> unmatchedMarkoutKeys = new();
+        foreach (SymbolMarkout symbolMarkout in _waitingSymbolMarkouts)
+            unmatchedMarkoutKeys.Add(symbolMarkout.MarkoutKey);
+        UnmatchedTextBlock.Text = unmatchedMarkoutKeys.Count == 0 ? "" : $"{unmatchedMarkoutKeys.Count:N0} fills unmatched";
+
+        // A markout of the selected instrument and duration goes to its group's row, or waits for what it is valued with
+        void AddToGroup(in SymbolMarkout symbolMarkout)
         {
             // Why skipped: an instrument this context does not list has no tick size or multiplier to convert with
-            if (!TryGetInstrument(markout.InstrumentId, out Instrument instrument))
-                continue;
+            if (!TryGetInstrument(symbolMarkout.Symbol, out Instrument instrument))
+                return;
+            Markout markout = symbolMarkout.Markout;
             bool isOtherInstrument = instrument.ShortSymbol != selectedShortSymbol;
             bool isOtherMarkoutDuration = selectedMarkoutSeconds.HasValue && markout.MarkoutDuration.TotalSeconds != selectedMarkoutSeconds.Value;
             if (isOtherInstrument || isOtherMarkoutDuration)
-                continue;
-            string group = GetGroup(in markout, markoutGrouping);
+                return;
+
+            // The fill gives the price, side and quantity; against the fair value at the fill, its record at duration zero gives that
+            MarkoutKey markoutKey = symbolMarkout.MarkoutKey;
+            bool hasFill = _fillsByMarkoutKey.TryGetValue(markoutKey, out Fill fill);
+            bool hasMarkoutAtFill = _markoutsAtFillByMarkoutKey.TryGetValue(markoutKey, out Markout markoutAtFill);
+            bool isWaiting = !hasFill || (markoutReference == MarkoutReference.FairValueAtFill && !hasMarkoutAtFill);
+            if (isWaiting)
+            {
+                _waitingSymbolMarkouts.Add(symbolMarkout);
+                return;
+            }
+            double valuePrice = GetValuePrice(in fill, in markout, markoutValue);
+            double referencePrice = markoutReference == MarkoutReference.FillPrice ? fill.Price : markoutAtFill.FairValuePrice;
+            string group = GetGroup(in fill, in markout, markoutGrouping);
             if (!_groupsByKey.TryGetValue((group, markout.MarkoutDuration), out WidgetMarkoutGroup? widgetMarkoutGroup))
             {
                 _groupsByKey[(group, markout.MarkoutDuration)] = widgetMarkoutGroup = new WidgetMarkoutGroup(group, markout.MarkoutDuration);
                 InsertRow(widgetMarkoutGroup);
+                _hasNewRow = true;
             }
-            widgetMarkoutGroup.Add(in markout, instrument.TickSize, instrument.UsdMultiplier);
+            widgetMarkoutGroup.Add(markout.ExchangeTimestamp, fill.Sign * (valuePrice - referencePrice), Math.Abs(fill.Quantity), instrument.TickSize, instrument.UsdMultiplier);
         }
-
-        // Step 2: the rows that changed redraw in place, and so do the bars
-        foreach (WidgetMarkoutGroup widgetMarkoutGroup in Rows)
-            widgetMarkoutGroup.Refresh();
-        MarkoutHistogram.Show(Rows);
     }
 
-    /// Puts a new row where it belongs: groups in order, each group's markout durations shortest first.
+    /// Puts a new row where it belongs: groups in order, each group's markout durations shortest first. The histogram draws
+    /// this order, and the table keeps it among rows that tie in whatever it is sorted by.
     private void InsertRow(WidgetMarkoutGroup widgetMarkoutGroup)
     {
         int rowIndex = 0;
@@ -340,27 +464,47 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
         return groupOrder != 0 ? groupOrder : left.MarkoutDuration.CompareTo(right.MarkoutDuration);
     }
 
-    /// The instrument of this id, looked up once; false when this context does not list it.
-    private bool TryGetInstrument(int instrumentId, out Instrument instrument)
+    /// The instrument of this symbol, looked up once; false when this context does not list it.
+    private bool TryGetInstrument(string symbol, out Instrument instrument)
     {
-        if (!_instrumentsByInstrumentId.TryGetValue(instrumentId, out Instrument? cachedInstrument))
-            _instrumentsByInstrumentId[instrumentId] = cachedInstrument = Widgets.TryGetInstrument(_context, instrumentId, out Instrument listedInstrument) ? listedInstrument : null;
+        if (!_instrumentsBySymbol.TryGetValue(symbol, out Instrument? cachedInstrument))
+        {
+            foreach (Instrument listedInstrument in _context.EnumerateInstruments())
+            {
+                if (listedInstrument.Symbol == symbol)
+                    cachedInstrument = listedInstrument;
+            }
+            _instrumentsBySymbol[symbol] = cachedInstrument;
+        }
         instrument = cachedInstrument!;
         return cachedInstrument != null;
     }
 
-    /// The row group this markout falls in under this grouping.
-    public static string GetGroup(in Markout markout, MarkoutGrouping markoutGrouping)
+    /// The row group this fill and its markout fall in under this grouping.
+    public static string GetGroup(in Fill fill, in Markout markout, MarkoutGrouping markoutGrouping)
     {
-        DateTime chicagoDateTime = Session.CME.ConvertToLocal(markout.FillExchangeTimestamp);
+        DateTime utcDateTime = markout.ExchangeTimestamp.ToDateTime;
         return markoutGrouping switch
         {
-            MarkoutGrouping.Day => chicagoDateTime.ToString("yyyy-MM-dd"),
-            MarkoutGrouping.TimeOfDay => chicagoDateTime.ToString("HH") + ":00",
-            MarkoutGrouping.Side => ((Side)Math.Sign(markout.FillQuantity)).ToString(),
-            MarkoutGrouping.FillType => markout.FillType.ToString(),
+            MarkoutGrouping.Day => utcDateTime.ToString("yyyy-MM-dd"),
+            MarkoutGrouping.TimeOfDay => utcDateTime.ToString("HH") + ":00",
+            MarkoutGrouping.Side => fill.Side.ToString(),
+            MarkoutGrouping.FillType => fill.FillType.ToString(),
             MarkoutGrouping.Tag => markout.MarkoutTag.ToString(),
             _ => "All",
+        };
+    }
+
+    /// The price this markout is measured at under this choice of value; NaN when the record has no quote, or no fair value.
+    public static double GetValuePrice(in Fill fill, in Markout markout, MarkoutValue markoutValue)
+    {
+        bool isBuy = fill.Sign > 0;
+        return markoutValue switch
+        {
+            MarkoutValue.FairValue => markout.FairValuePrice,
+            MarkoutValue.SameBest => isBuy ? markout.BidPrice : markout.AskPrice,
+            MarkoutValue.FarBest => isBuy ? markout.AskPrice : markout.BidPrice,
+            _ => markout.MidPrice(),
         };
     }
 
@@ -373,7 +517,7 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
         contextMenu.AddColumnVisibilityMenuItems(MarkoutsGrid);
     }
 
-    /// The columns' layout, the four selections and the histogram's unit.
+    /// The columns' layout, the six selections and the histogram's unit.
     public string? SaveStateJson() => Json.Serialize(new MarkoutsWidgetState
     {
         Columns = DataGridColumnState.NewDataGridColumnStates(MarkoutsGrid, DataGridColumnState.GetHeader),
@@ -381,6 +525,8 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
         MarkoutGrouping = (MarkoutGrouping)GroupingComboBox.SelectedItem!,
         ShortSymbol = InstrumentComboBox.SelectedItem as string,
         MarkoutSeconds = MarkoutDurationComboBox.SelectedItem as double?,
+        MarkoutValue = (MarkoutValue)ValueComboBox.SelectedItem!,
+        MarkoutReference = (MarkoutReference)ReferenceComboBox.SelectedItem!,
         MarkoutUnit = MarkoutHistogram.MarkoutUnit,
     });
 
@@ -412,6 +558,8 @@ public sealed partial class MarkoutsWidget : UserControl, IWidget, IDisposable
             GroupingComboBox.SelectedItem = markoutsWidgetState.MarkoutGrouping;
             InstrumentComboBox.SelectedItem = markoutsWidgetState.ShortSymbol ?? InstrumentComboBox.SelectedItem;   // null keeps the choice ShowChoices made
             MarkoutDurationComboBox.SelectedItem = markoutsWidgetState.MarkoutSeconds ?? (object)s_allChoices;
+            ValueComboBox.SelectedItem = markoutsWidgetState.MarkoutValue;
+            ReferenceComboBox.SelectedItem = markoutsWidgetState.MarkoutReference;
             _isShowingChoices = false;
             ShowGroups();
         }

@@ -297,16 +297,17 @@ public class LoggingSocketReader : IReader
         return status;
     }
 
+    // New if any channel had records, otherwise Empty. Why never Closed: the listen thread ends this reader, once the link is dropped; a worker must not (see Spec.md).
     public ReadStatus TryRead(List<PooledBuffer> results)
     {
         bool hasData = false;
-        ReadStatus status = ReadStatus.Empty;
 
         // Channel 0 = admin audit (drained first so AllocateInstrument symbol mappings precede the
         // fills that reference them); channels 1..N = per-CoreGroup audit.
         for (int channel = 0; channel < _channelCount; channel++)
         {
-            while ((status = ServerSocket.TryRead(ClientId, channel, out ReadOnlySpan<byte> src)) == ReadStatus.New)
+            // Why not ServerSocket.TryRead: that refuses a closed link, and Logging records everything its writer wrote (see Spec.md)
+            while (ServerSocket.TryReadToEnd(ClientId, channel, out ReadOnlySpan<byte> src) == ReadStatus.New)
             {
                 byte[] buffer = ThreadArrayPool<byte>.Rent(src.Length);
                 src.CopyTo(buffer);
@@ -315,7 +316,7 @@ public class LoggingSocketReader : IReader
             }
         }
 
-        return hasData ? ReadStatus.New : status;
+        return hasData ? ReadStatus.New : ReadStatus.Empty;
     }
 
     public bool Equals(IReader? other)
@@ -330,7 +331,12 @@ public class LoggingSocketReader : IReader
 
     public void Dispose()
     {
-        _isDisposed = true;
+        // Why locked: a read holds this lock (LoggingServer.DrainReader), so none is in the ring when this returns and none starts after it
+        lock (Writer.Lock)
+        {
+            if (_isDisposed) return;
+            _isDisposed = true;
+        }
         Writer.Dispose();
     }
 }
@@ -379,6 +385,7 @@ public class LoggingServer : IDisposable
         _serverSocket.AllocateClientId = ClientIdAllocator;
         _serverSocket.DeallocateClient = ClientDeallocator;
         _serverSocket.ClientAllocated += OnDirectSubscribed;
+        _serverSocket.ClientClosed += OnDirectClosed;
         _serverSocket.ClientDeallocated += OnDirectUnsubscribed;
         Application.AddExitAction("Dispose LoggingServer", Dispose);
     }
@@ -476,6 +483,13 @@ public class LoggingServer : IDisposable
         }
     }
 
+    // The socket's listen thread, the moment a direct link closes: reads what its writer left straight away, since the poller no longer looks at a closed link (see Spec.md).
+    private void OnDirectClosed(int clientId)
+    {
+        if (_clientSocketHeaders[clientId] is SocketHeader socketHeader && _clients.TryGetValue(socketHeader.Name, out IReader? reader))
+            DrainReader(reader);
+    }
+
     private void OnDirectUnsubscribed(in SocketHeader socketHeader)
     {
         try
@@ -490,6 +504,8 @@ public class LoggingServer : IDisposable
                 ["SocketHeader"] = socketHeader,
                 ["ClientId"] = socketHeader.ClientId
             });
+            // Why here and not left to a worker: this is the socket's listen thread, which unmaps the link's ring when this returns (see Spec.md)
+            reader.Dispose();
             RemoveClient(socketHeader.Name);
 
         }
@@ -570,6 +586,7 @@ public class LoggingServer : IDisposable
             FileType.Factor => new ObjectWriter<FactorPoint>(clientName),
             FileType.Mean => new ObjectWriter<MeanPoint>(clientName),
             FileType.StdDev => new ObjectWriter<StdDevPoint>(clientName),
+            FileType.Correl => new ObjectWriter<CorrelPoint>(clientName),
             FileType.Markout => new ObjectWriter<Markout>(clientName),
             FileType.Alert => new AlertWriter(clientName, Alerts),
             FileType.Audit => new AuditWriter(clientName),
@@ -815,6 +832,7 @@ public class LoggingServer : IDisposable
         {
 
             _serverSocket.ClientAllocated -= OnDirectSubscribed;
+            _serverSocket.ClientClosed -= OnDirectClosed;
             _serverSocket.ClientDeallocated -= OnDirectUnsubscribed;
 
             Thread current = Thread.CurrentThread;

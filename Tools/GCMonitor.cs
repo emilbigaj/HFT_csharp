@@ -3,12 +3,13 @@
 namespace Tools;
 
 /// Watches the process's garbage collector. Once a second, on the Clock thread, it reads the collector's totals and
-/// writes one console line for a second in which a collection happened. A realtime scenario starts it. Cold path:
-/// the check allocates nothing; only the line of a second with a collection formats, allocates and writes
-/// (see Spec.md "The GC monitor runs on the Clock thread").
+/// writes one console line for a second in which a collection happened. Scenario.Start starts it in every realtime
+/// process; a second Start does nothing. Cold path: the check allocates nothing; only the line of a second with a
+/// collection formats, allocates and writes (see Spec.md "The GC monitor runs on the Clock thread").
 public static class GCMonitor
 {
     private const int s_checkPeriodMilliseconds = 1000;
+    private static bool s_isStarted;   // set by the first Start; startup thread only
 
     /// The collector's running totals since the process started, at one moment.
     private readonly record struct GcCounters(long AllocatedBytes, TimeSpan Pause, int Gen0Count, int Gen1Count, int Gen2Count)
@@ -19,9 +20,13 @@ public static class GCMonitor
 
     private static GcCounters s_lastGcCounters;   // as of the last check; the Clock thread only, once started
 
-    /// Takes the totals as they stand and schedules the check once a second on the Clock thread.
+    /// Takes the totals as they stand and schedules the check once a second on the Clock thread; nothing if already started.
     public static void Start()
     {
+        // Why the guard: a scenario that still starts it itself must not get a second check and print every line twice
+        if (s_isStarted)
+            return;
+        s_isStarted = true;
         s_lastGcCounters = GcCounters.NewNow();
         new TickTocker("GCMonitor", s_checkPeriodMilliseconds, OnTickTock);
     }

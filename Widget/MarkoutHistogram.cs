@@ -88,7 +88,7 @@ public sealed class MarkoutHistogram : Control
         _widestMarkoutDurationLabelWidth = 0;
         foreach (Duration markoutDuration in markoutDurations)
         {
-            string markoutDurationLabel = NewMarkoutDurationLabel(markoutDuration);
+            string markoutDurationLabel = WidgetMarkoutGroup.NewMarkoutDurationLabel(markoutDuration);
             markoutDurationLabels.Add(markoutDurationLabel);
             _widestMarkoutDurationLabelWidth = Math.Max(_widestMarkoutDurationLabelWidth, NewText(markoutDurationLabel, s_mutedTextBrush).Width);
         }
@@ -236,7 +236,7 @@ public sealed class MarkoutHistogram : Control
         {
             for (int rowIndex = 0; rowIndex < _widgetMarkoutGroups.Count; rowIndex++)
             {
-                FormattedText markoutDurationText = NewText(NewMarkoutDurationLabel(_widgetMarkoutGroups[rowIndex].MarkoutDuration), s_mutedTextBrush);
+                FormattedText markoutDurationText = NewText(_widgetMarkoutGroups[rowIndex].MarkoutDurationLabel, s_mutedTextBrush);
                 double slotCentre = plotLayout.GetSlotLeft(rowIndex, _groupIndexes[rowIndex]) + plotLayout.SlotWidth / 2;
                 drawingContext.DrawText(markoutDurationText, new Point(slotCentre - markoutDurationText.Width / 2, labelsTop));
             }
@@ -276,7 +276,7 @@ public sealed class MarkoutHistogram : Control
         if (_hoveredRowIndex >= 0)
         {
             WidgetMarkoutGroup widgetMarkoutGroup = _widgetMarkoutGroups[_hoveredRowIndex];
-            rightString = $"{widgetMarkoutGroup.Group}  ·  {NewMarkoutDurationLabel(widgetMarkoutGroup.MarkoutDuration)}  ·  {widgetMarkoutGroup.Ticks:N3} ticks  ·  {widgetMarkoutGroup.Usd:N2} USD  ·  {widgetMarkoutGroup.Fills:N0} fills";
+            rightString = $"{widgetMarkoutGroup.Group}  ·  {widgetMarkoutGroup.MarkoutDurationLabel}  ·  {widgetMarkoutGroup.Ticks:N3} ticks  ·  {widgetMarkoutGroup.Usd:N2} USD  ·  {widgetMarkoutGroup.Fills:N0} fills";
             rightBrush = s_textBrush;
         }
         FormattedText rightText = NewText(rightString, rightBrush);
@@ -352,16 +352,6 @@ public sealed class MarkoutHistogram : Control
     }
 
     private double GetValue(WidgetMarkoutGroup widgetMarkoutGroup) => MarkoutUnit == MarkoutUnit.Ticks ? widgetMarkoutGroup.Ticks : widgetMarkoutGroup.Usd;
-
-    /// A markout duration as short text: 500ms, 10s, 5m.
-    private static string NewMarkoutDurationLabel(Duration markoutDuration)
-    {
-        double seconds = markoutDuration.TotalSeconds;
-        bool isWholeMinutes = seconds >= 60 && seconds % 60 == 0;
-        if (isWholeMinutes)
-            return (seconds / 60).ToString("0", CultureInfo.InvariantCulture) + "m";
-        return seconds >= 1 ? seconds.ToString("0.###", CultureInfo.InvariantCulture) + "s" : (seconds * 1000).ToString("0.###", CultureInfo.InvariantCulture) + "ms";
-    }
 
     private static FormattedText NewText(string text, IBrush brush, Typeface? typeface = null) =>
         new(text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight, typeface ?? Typeface.Default, s_fontSize, brush);

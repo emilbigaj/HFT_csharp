@@ -9,6 +9,7 @@ using System.Runtime.Versioning;
 using Execution;
 using Simulator;
 using System.Collections.Generic;
+using System.Runtime;
 
 namespace Strategy;
 
@@ -178,9 +179,16 @@ public class Scenario
         {
             LowLatency.StartBackgroundThread("Clock", Clock.Start);
 
-            GC.Collect(2, GCCollectionMode.Forced, true, true);
+            GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
             GC.WaitForPendingFinalizers();
-            GC.TryStartNoGCRegion(64 * 1024 * 1024, true);
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GCMonitor.Start();
+
+            if (!GC.TryStartNoGCRegion(64L * 1024 * 1024, disallowFullBlockingGC: true))
+                throw new InvalidOperationException("NoGC region not entered");
+            
+
 
             Thread.CurrentThread.Name = Client.ClientName;
             while (!Application.IsExiting && _isServerAlive)

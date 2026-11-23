@@ -72,8 +72,6 @@ public sealed class SharedMemory : IDisposable
         return new SharedMemoryView(_memory.Ptr + offset, length, access);
     }
 
-    public void Clear() => _memory.Clear();
-
     public void Dispose()
     {
         if (_disposed) return;

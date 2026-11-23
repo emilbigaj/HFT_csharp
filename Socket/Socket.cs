@@ -229,17 +229,6 @@ public sealed class ReadOnlySocket : IDisposable
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Reset()
-    {
-        if (_isDisposed) throw new ObjectDisposedException(Name);
-        unsafe
-        {
-            _readPtr = _startPtr;
-        }
-        _readSeq = 0;
-    }
-
     // Closed for a close message (that one read only: see the class comment), otherwise the ring's status.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public unsafe ReadStatus TryRead(out ReadOnlySpan<byte> rdst)
@@ -283,6 +272,21 @@ public sealed class ReadOnlySocket : IDisposable
     {
         if (_isDisposed) throw new ObjectDisposedException(Name);
         return Protocol.GetReadStatusFromRing((Protocol.Header64*)_readPtr, _startPtr, _endPtr, _readSeq);
+    }
+
+    // Ends this ring for a writer whose process is gone: writes the close message it could not, over a record it left half-written,
+    // so no reader waits on that record for ever. Only once the writer is dead: a ring has one writer (see Spec.md "Socket close protocol").
+    public unsafe void CloseForDeadWriter()
+    {
+        if (_isDisposed) throw new ObjectDisposedException(Name);
+
+        // Step 1: find the ring's head as a restarting writer does; the walk stops at a record left half-written
+        byte* writePtr = _startPtr;
+        ulong writeSeq = 0;
+        Protocol.SkipRing(ref writePtr, _startPtr, _endPtr, ref writeSeq);
+
+        // Step 2: write the close message there
+        Protocol.WriteToRing(Socket.CloseMessage, ref writePtr, _startPtr, _endPtr, ref writeSeq);
     }
 
     public void Dispose()
@@ -360,18 +364,6 @@ public sealed class WriteOnlySocket : IDisposable
         {
             Protocol.SkipRing(ref _writePtr, _startPtr, _endPtr, ref _writeSeq);
         }
-        _isClosed = false;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Reset()
-    {
-        if (_isDisposed) throw new ObjectDisposedException(Name);
-        unsafe
-        {
-            _writePtr = _startPtr;
-        }
-        _writeSeq = 0;
         _isClosed = false;
     }
 
@@ -485,27 +477,10 @@ public sealed class Socket : IDisposable
         return 0;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Reset()
-    {
-        if (_isDisposed) throw new ObjectDisposedException(Name);
-        _isClosed = false;
-
-        foreach (WriteOnlySocket writer in _writeOnlySockets)
-        {
-            if (writer != null) writer.Reset();
-        }
-        foreach (ReadOnlySocket reader in _readOnlySockets)
-        {
-            if (reader != null) reader.Reset();
-        }
-        _sharedMemory.Clear();
-    }
-
     // Re-attach to a socket whose peer has restarted, keeping the ring. Same work the constructor
-    // does, minus the Clear(): park every cursor at the head and drop the closed latch, so the
-    // dead incarnation's close message cannot terminate the new one. Reset() cannot serve here —
-    // it wipes shared memory an audit reader is still walking.
+    // does: park every cursor at the head and drop the closed latch, so the dead incarnation's
+    // close message cannot terminate the new one. Nothing clears a ring: its other end's cursors
+    // live in another process, and an audit reader may still be walking it.
     public void Recover()
     {
         if (_isDisposed) throw new ObjectDisposedException(Name);
@@ -527,6 +502,13 @@ public sealed class Socket : IDisposable
         _isClosed = true;
         // Why: only the writers close: a close is a message to the other side; a reader keeps no closed state (see ReadOnlySocket)
         foreach (WriteOnlySocket writer in _writeOnlySockets) writer?.Close();
+    }
+
+    // Ends every ring this socket reads, for a peer whose process is gone (see ReadOnlySocket.CloseForDeadWriter).
+    public void CloseForDeadPeer()
+    {
+        if (_isDisposed) throw new ObjectDisposedException(Name);
+        foreach (ReadOnlySocket reader in _readOnlySockets) reader?.CloseForDeadWriter();
     }
 
     public void Dispose()
@@ -1058,10 +1040,7 @@ public sealed class ServerSocket : IDisposable
         // down, or — if it already consumed it — short-circuits every read on the latch and can
         // never accept this client again. The client side gets this for free by building a fresh
         // Socket, whose constructor recovers; the server reuses the object, so it must ask.
-        if (Persistance)
-            clientHeader.ClientSocket?.Recover();
-        else
-            clientHeader.ClientSocket?.Reset();
+        clientHeader.ClientSocket?.Recover();
 
         clientHeader.ClosedTimestamp = Timestamp.MaxValue;
         clientHeader.ClientProcessId = socketHeader.ClientProcessId;
@@ -1081,6 +1060,9 @@ public sealed class ServerSocket : IDisposable
     {
         _clientIds.AtomicClear(clientId);
         ref ClientHeader clientHeader = ref _clientHeaders[clientId];
+        // Why: a dead process cannot end its own rings; ending them here completes a record it left half-written (see Spec.md)
+        if (!ProcessId.IsAlive(clientHeader.ClientProcessId))
+            clientHeader.ClientSocket?.CloseForDeadPeer();
         if (Persistance)
         {
             // Socket outlives the client process: the server keeps writing into its ring, so fills
@@ -1296,6 +1278,22 @@ public sealed class ServerSocket : IDisposable
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ReadStatus TryRead(int clientId, out ReadOnlySpan<byte> rdst) => TryRead(clientId, 0, out rdst);
+
+    // TryRead without the status check, for a reader that records everything written (Logging); a close message read while the client is
+    // Open still requests the close. The caller stops reading before the ring is unmapped (see Spec.md "Socket close protocol").
+    public ReadStatus TryReadToEnd(int clientId, int channelId, out ReadOnlySpan<byte> rdst)
+    {
+        rdst = default;
+        ref ClientHeader clientHeader = ref _clientHeaders[clientId];
+        AtomicEnum<ClientStatus>.Snapshot snapshot = clientHeader.Status.Load();
+        Socket? clientSocket = clientHeader.ClientSocket;
+        if (clientSocket == null) return ReadStatus.Closed;
+
+        ReadStatus result = clientSocket.TryRead(channelId, out rdst);
+        if (result == ReadStatus.Closed && snapshot.State == ClientStatus.Open)
+            clientHeader.Status.TryTransition(snapshot, ClientStatus.Closing);
+        return result;
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Write<T>(int clientId, int channelId, in T value) where T : unmanaged

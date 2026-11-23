@@ -1415,6 +1415,47 @@ The answer to the CME side's proposal (Server.hpp 511, 571, 733, 742: "stamp onl
 
 ---
 
+### P50. MUST PORT: the server ends a dead client's rings before it closes the client (C# `Socket/Socket.cs`; 2026-11-24)
+
+Full write-up, with P51, C36 and the verification steps: `cpp_alignment_report_2026-11-24_socket_close.md`.
+
+- **Was:** a ring write marks the record as being written (odd sequence), copies it and publishes it (even). A process
+  killed between the two leaves the odd sequence for ever, and `Protocol::TryReadFromRing` spins while the sequence at
+  the reader's cursor is odd. Any reader that reaches that record waits for ever: the server's CoreGroup thread reading a
+  strategy's order targets, and Logging's tap on the same ring. (`SkipRing` already refuses to spin there, for the same
+  reason; the live read did not have that protection.) Reproduced in C# on Logging's own socket: the waiting thread was
+  still in the ring when it was unmapped a second later, and the process died of an access violation.
+- **Now:** `ServerSocket::CloseClient`, before it stores `Detached`/`Closed`, checks the client's process
+  (`ProcessId::IsAlive(clientHeader.ClientProcessId)`); if it is dead it calls `Socket::CloseForDeadPeer`, which calls
+  `ReadOnlySocket::CloseForDeadWriter` on every ring the socket reads (the client-to-server channels):
+
+  ```
+    byte* writePtr = _startPtr; uint64 writeSeq = 0;
+    Protocol::SkipRing(writePtr, _startPtr, _endPtr, writeSeq);      // the ring's end; stops at a half-written record
+    Protocol::WriteToRing(Socket::CloseMessage, writePtr, _startPtr, _endPtr, writeSeq);
+  ```
+
+  The close message lands on the half-written record and completes it (same odd sequence, then the even one), so a
+  reader waiting there reads a close message. The client is then closed exactly as before, at once.
+- **Rules to keep:** only when the process is dead (a ring has one writer; a client that closed its own rings and lives
+  on is never written to). No allocation (two locals). A client that wrote its own close message and exited gets a
+  second one after it: harmless, `Recover` on reconnect parks past both and a tap reads a close message as a point in
+  the record. Nothing waits on a reader, so the cancel-on-close timing is unchanged.
+- **Port:** the two methods and the three lines in `CloseClient`. Wire: none (a close message is the existing one byte).
+
+### P51. PORT-IF: a connect always recovers; the ring resets are deleted (C# `Socket/Socket.cs`, `Socket/SharedMemory.cs`; 2026-11-24)
+
+- **Was:** `ServerSocket::OpenClient` called `ClientSocket->Recover()` under `Persistance` and `Reset()` without it.
+  `Reset` moved the server end's cursors to the ring's start and cleared the ring, but the client parked its own cursors
+  when it built its socket, before the connect: over a ring that still held the last session's records the two ends
+  stood in different places and nothing the client wrote was read for the session.
+- **Now:** `OpenClient` calls `Recover()` whatever `Persistance` is. `Socket::Reset`, `ReadOnlySocket::Reset`,
+  `WriteOnlySocket::Reset` and `SharedMemory::Clear` had no other caller and are deleted.
+- **Port if** the C++ `OpenClient` has the `Reset` branch: collapse it and delete the four members. The C++ server runs
+  with `Persistance`, so its behaviour does not change; this keeps the two files the same.
+
+---
+
 ## 8. Do not port (C#-only)
 
 Nothing below needs C++ code. Where a C#-only feature put a value on a shared wire or into shared memory, the value is
@@ -1590,6 +1631,28 @@ listed.
 - **C30. 2026-11-21, the GC monitor checks on the Clock thread** (C# only, nothing to port; there is no collector in C++):
   `GCMonitor` no longer uses a thread-pool timer, so a live C# strategy has no .NET thread pool. No shared layout, wire
   value or timing a C++ process can observe changed.
+- **C31. 2026-11-22, `Correl`, `Statistic<TPoint>` and `FileType.Correl = 15`** (C# only, nothing to port; statistics
+  belong to C# strategies and `FileType` only names a file extension for the C# Logging): a strategy can make and save
+  an exponentially-weighted correlation. Likewise `FileType.Markout = 14` (2026-11-20). If the C++ side ever mirrors
+  `FileType`, these two values are taken.
+- **C32. 2026-11-22, statistics start as a plain average** (C# only, nothing to port): `Mean`, `StdDev`, `Factor` and
+  `Correl` weight each of their first 1 / alpha values by 1 / (values so far), and a seed counts as one half-life of
+  observations. No layout or wire value changed; the saved point structs are the same.
+- **C33. 2026-11-22, `FactorPoint.Score` is computed, `FastFactor`/`FastStdDev` deleted** (C# only, nothing to port): the
+  struct a C# strategy sends its own C# Logging shrinks from 64 to 56 bytes; no C++ process reads it.
+- **C34. 2026-11-22, statistics' points carry a `Timestamp`; the chart plots them** (C# only, nothing to port): the
+  points a C# strategy sends its C# Logging grow by 8 bytes each (16 for a factor); no C++ process reads them.
+- **C35. 2026-11-23, `Markout` names its fill and carries a fair value** (C# only, nothing to port): the record a C#
+  strategy sends its C# Logging is now `MarkoutId` (the fill's `FillId`), `ExchangeTimestamp`, `BidPrice`, `AskPrice`,
+  `FairValuePrice`, `MarkoutDuration`, `MarkoutTag`, 49 bytes where it was 58; no C++ process reads it. `Fill` and
+  `FileType.Markout = 14` are unchanged. If the C++ side ever writes markouts, the fill is joined by `FillId` with
+  `OrderHeader.ExchangeTimestamp`, and the symbol is the file's folder, not an `InstrumentId`.
+- **C36. 2026-11-24, Logging reads a closed link to its end** (C# only, nothing to port): `ServerSocket.TryReadToEnd`
+  (`TryRead` without the status gate; a close message still requests the close) exists for Logging's reader alone, with
+  `LoggingServer.OnDirectClosed` and the locked `LoggingSocketReader.Dispose`. It is why the message-efficiency rows the
+  C++ server posts at stop (P24) now reach the files: until this they were lost at every restart, with nothing wrong on
+  the C++ side. Do not give the trading server an ungated read: nothing a dead strategy left unread may be processed.
+  P50 and P51, in the same change, are the parts in shared socket code.
 
 ---
 

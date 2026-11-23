@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -25,9 +27,10 @@ public sealed class ChartWidgetState { public List<ChartPanelState> Panels { get
 [RegisterJson]
 public sealed class ChartPanelState { public string Name { get; set; } = ""; public List<ChartSeriesState> Series { get; set; } = new(); }
 [RegisterJson]
-public sealed class ChartSeriesState { public string Name { get; set; } = ""; public string FilePath { get; set; } = ""; }
+public sealed class ChartSeriesState { public string Name { get; set; } = ""; public string FilePath { get; set; } = ""; public string Value { get; set; } = ""; }   // Value: for a statistic's file, the member plotted ("Score", "Mean.Mean"); "" otherwise
 
-/// A stack of chart panels, each plotting series streamed from chart files (.point, .candle, .fill, .histogram) as they grow.
+/// A stack of chart panels, each plotting series streamed from chart files (.point, .candle, .fill, .histogram) and from a
+/// strategy's statistics (.mean, .stddev, .factor, .correl: one chosen value of each line against its time) as they grow.
 /// UI thread, except each series' file streamer, which parses its lines on its own thread and posts them to the UI. Cold path.
 public partial class ChartWidget : UserControl, IWidget, IDisposable
 {
@@ -131,7 +134,8 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
         UpdateEmptyState();
     }
 
-    /// Asks for chart files and adds a series for each to the right-clicked panel (else the last, else a new one); logs a failure.
+    /// Asks for chart files and adds a series for each to the right-clicked panel (else the last, else a new one); for a
+    /// statistic's file, asks which of its values to plot and adds a series for each. Logs a failure.
     private async void OnAddSeriesClick(object? sender, RoutedEventArgs e)
     {
         try
@@ -140,10 +144,9 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
             ChartPanel chartPanel = _contextMenuTargetPanel ?? _chartPanels.LastOrDefault() ?? AddChartPanel();
 
             // Step 2: the files, picked from the context's series directory
-            TopLevel? topLevel = TopLevel.GetTopLevel(this);
-            if (topLevel == null)
+            if (TopLevel.GetTopLevel(this) is not Window window)
                 return;
-            IStorageProvider storageProvider = topLevel.StorageProvider;
+            IStorageProvider storageProvider = window.StorageProvider;
             IStorageFolder? startStorageFolder = await storageProvider.TryGetFolderFromPathAsync(_context.SeriesDirectoryPath);
             IReadOnlyList<IStorageFile> storageFiles = await storageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
             {
@@ -152,13 +155,27 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
                 SuggestedStartLocation = startStorageFolder,
                 FileTypeFilter = new[]
                 {
-                    new FilePickerFileType("Chart files") { Patterns = new[] { "*.point", "*.candle", "*.fill", "*.histogram", "*.txt", "*.csv", "*.*" } }
+                    new FilePickerFileType("Chart files") { Patterns = new[] { "*.point", "*.candle", "*.fill", "*.histogram", "*.mean", "*.stddev", "*.factor", "*.correl", "*.txt", "*.csv", "*.*" } }
                 }
             });
 
-            // Step 3: a series per file
+            // Step 3: a series per file, or per chosen value of a statistic's file
             foreach (IStorageFile storageFile in storageFiles)
-                CreateAndBindSeries(chartPanel, storageFile.Path.LocalPath);
+            {
+                string filePath = storageFile.Path.LocalPath;
+                if (!IsStatisticFile(filePath))
+                {
+                    CreateAndBindSeries(chartPanel, filePath);
+                    continue;
+                }
+                string? lastLine = Tools.Tools.ReadLastLine(filePath);
+                if (lastLine == null)
+                    continue;
+                SelectNamesDialog selectNamesDialog = new SelectNamesDialog($"Chart {Path.GetFileName(filePath)}", "Add", NewValuePaths(lastLine));
+                List<string>? valuePaths = await selectNamesDialog.ShowDialog<List<string>?>(window);
+                foreach (string valuePath in valuePaths ?? [])
+                    CreateAndBindSeries(chartPanel, filePath, valuePath);
+            }
             UpdateEmptyState();
         }
         catch (Exception exception)
@@ -167,15 +184,17 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
         }
     }
 
-    /// Adds a series streamed from this chart file to the panel, typed by the file's extension (anything not Candle, Fill or
-    /// Histogram plots as points); nothing when the panel already has a series of that file name, logs an unknown extension.
-    private void CreateAndBindSeries(ChartPanel chartPanel, string filePath)
+    /// Adds a series streamed from this chart file to the panel, typed by the file's extension (anything not Candle, Fill,
+    /// Histogram or a statistic plots as points); for a statistic's file, the series plots the value at valuePath. Nothing when
+    /// the panel already has a series of that name; logs an unknown extension, or a statistic's file with no value chosen.
+    private void CreateAndBindSeries(ChartPanel chartPanel, string filePath, string valuePath = "")
     {
         try
         {
-            // Step 1: one series per file name in a panel, of a type its extension names
+            // Step 1: one series per name in a panel (the file's, and the value's for a statistic), of a type its extension names
             string fileName = Path.GetFileName(filePath);
-            if (chartPanel.Series.Any(series => series.Name.Equals(fileName, StringComparison.OrdinalIgnoreCase)))
+            string seriesName = valuePath.Length == 0 ? fileName : $"{fileName} {valuePath}";
+            if (chartPanel.Series.Any(series => series.Name.Equals(seriesName, StringComparison.OrdinalIgnoreCase)))
                 return;
             string extension = Path.GetExtension(fileName).TrimStart('.');
             if (!Enum.TryParse(extension, ignoreCase: true, out FileType fileType))
@@ -203,13 +222,27 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
                     seriesBinding = new SeriesBinding<Histogram>(this, chartPanel, histogramSeries, filePath, Json.Deserialize<Histogram>, histogramSeries.Append);
                     break;
 
+                case FileType.Mean:
+                case FileType.StdDev:
+                case FileType.Factor:
+                case FileType.Correl:
+                    if (valuePath.Length == 0)
+                    {
+                        Console.WriteLine($"ChartWidget.CreateAndBindSeries: {fileName} is a statistic's file, must be given which value to plot; not added");
+                        return;
+                    }
+                    // Why no filter: a line with no time or no finite value parses to NaN, which PointSeries.Append skips
+                    string[] valuePathParts = valuePath.Split('.');
+                    PointSeries statisticSeries = NewPointSeries(chartPanel, seriesName);
+                    seriesBinding = new SeriesBinding<Data.Point>(this, chartPanel, statisticSeries, filePath, line => NewStatisticPoint(line, valuePathParts), point => statisticSeries.Append(point.Timestamp, point.Value));
+                    break;
+
                 default:
-                    int colorIndex = _panelColorIndices.GetValueOrDefault(chartPanel);
-                    _panelColorIndices[chartPanel] = colorIndex + 1;
-                    PointSeries pointSeries = new PointSeries(fileName, s_seriesColors[colorIndex % s_seriesColors.Length], 1.0, YAxisSide.Left, 16 * 1024);
+                    PointSeries pointSeries = NewPointSeries(chartPanel, seriesName);
                     seriesBinding = new SeriesBinding<Data.Point>(this, chartPanel, pointSeries, filePath, Json.Deserialize<Data.Point>, point => pointSeries.Append(point.Timestamp, point.Value));
                     break;
             }
+            seriesBinding.ValuePath = valuePath;
 
             // Step 3: the series in its panel, the panel in the stack, the series drawn
             chartPanel.AddSeries(seriesBinding.Series);
@@ -222,6 +255,76 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
         {
             Console.WriteLine($"ChartWidget.CreateAndBindSeries: {exception}");
         }
+    }
+
+    /// A line series in the panel's next colour, on the left axis.
+    private PointSeries NewPointSeries(ChartPanel chartPanel, string seriesName)
+    {
+        int colorIndex = _panelColorIndices.GetValueOrDefault(chartPanel);
+        _panelColorIndices[chartPanel] = colorIndex + 1;
+        return new PointSeries(seriesName, s_seriesColors[colorIndex % s_seriesColors.Length], 1.0, YAxisSide.Left, 16 * 1024);
+    }
+
+    /// Whether this file holds a strategy's statistic (.mean, .stddev, .factor, .correl), whose lines hold several values.
+    private static bool IsStatisticFile(string filePath) =>
+        Enum.TryParse(Path.GetExtension(filePath).TrimStart('.'), ignoreCase: true, out FileType fileType)
+        && fileType is FileType.Mean or FileType.StdDev or FileType.Factor or FileType.Correl;
+
+    /// The values a statistic's saved line holds, as paths ("Score", "Mean.Mean"), in the line's order: every member that
+    /// is a number, or a string such as "NaN" that parses as one. The time is not among them.
+    private static List<string> NewValuePaths(string line)
+    {
+        List<string> valuePaths = new();
+        using JsonDocument jsonDocument = JsonDocument.Parse(line);
+        AddValuePaths(jsonDocument.RootElement, "", valuePaths);
+        return valuePaths;
+    }
+
+    /// Adds the path of each number in this object to valuePaths, looking into the objects inside it.
+    private static void AddValuePaths(JsonElement jsonElement, string prefix, List<string> valuePaths)
+    {
+        foreach (JsonProperty jsonProperty in jsonElement.EnumerateObject())
+        {
+            string path = prefix + jsonProperty.Name;
+            if (jsonProperty.Value.ValueKind == JsonValueKind.Object)
+                AddValuePaths(jsonProperty.Value, path + ".", valuePaths);
+            else if (TryGetDouble(jsonProperty.Value, out _))
+                valuePaths.Add(path);
+        }
+    }
+
+    /// A member's number: a JSON number, or a string such as "NaN" that parses as one (how the files write NaN).
+    private static bool TryGetDouble(JsonElement jsonElement, out double value)
+    {
+        value = double.NaN;
+        return jsonElement.ValueKind switch
+        {
+            JsonValueKind.Number => jsonElement.TryGetDouble(out value),
+            JsonValueKind.String => double.TryParse(jsonElement.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out value),
+            _ => false,
+        };
+    }
+
+    /// A statistic's line as a chart point: its Timestamp and the value at this path. The value is NaN, so the point is not
+    /// plotted, when the line has no time (written before points carried one, or a default time) or nothing at the path.
+    private static Data.Point NewStatisticPoint(string line, string[] valuePathParts)
+    {
+        // Step 1: the time, which leads the line
+        using JsonDocument jsonDocument = JsonDocument.Parse(line);
+        JsonElement jsonElement = jsonDocument.RootElement;
+        if (!jsonElement.TryGetProperty("Timestamp", out JsonElement timestampElement) || timestampElement.GetString() is not string timestampText)
+            return new Data.Point(default, double.NaN);
+        Timestamp timestamp = Timestamp.FromString(timestampText);
+
+        // Step 2: the value, one member at a time down the path
+        foreach (string valuePathPart in valuePathParts)
+        {
+            if (jsonElement.ValueKind != JsonValueKind.Object || !jsonElement.TryGetProperty(valuePathPart, out jsonElement))
+                return new Data.Point(timestamp, double.NaN);
+        }
+        bool hasValue = TryGetDouble(jsonElement, out double value);
+        bool isPlotted = hasValue && timestamp.NanosSinceEpoch != 0;
+        return new Data.Point(timestamp, isPlotted ? value : double.NaN);
     }
 
     /// A fill file's line as the chart's fill marker: its exchange time, price, quantity and type. Throws on a line that does not parse.
@@ -237,20 +340,22 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
         try
         {
             ChartPanel? chartPanel = _contextMenuTargetPanel;
-            if (chartPanel == null || chartPanel.Series.Count == 0 || VisualRoot is not Window window)
+            // Why GetTopLevel: on Avalonia 12 VisualRoot is not the window, and the dialog needs its owner window
+            if (chartPanel == null || chartPanel.Series.Count == 0 || TopLevel.GetTopLevel(this) is not Window window)
                 return;
 
-            RemoveSeriesDialog removeSeriesDialog = new RemoveSeriesDialog(chartPanel.Series);
-            List<ISeries>? selectedSeries = await removeSeriesDialog.ShowDialog<List<ISeries>?>(window);
-            if (selectedSeries == null || selectedSeries.Count == 0)
+            SelectNamesDialog selectNamesDialog = new SelectNamesDialog("Remove Series", "Remove", chartPanel.Series.Select(series => series.Name));
+            List<string>? selectedNames = await selectNamesDialog.ShowDialog<List<string>?>(window);
+            if (selectedNames == null || selectedNames.Count == 0)
                 return;
 
-            foreach (ISeries series in selectedSeries)
+            foreach (ISeries series in chartPanel.Series.Where(series => selectedNames.Contains(series.Name)).ToList())
             {
                 chartPanel.RemoveSeries(series);
                 RemoveSeriesBindings(seriesBinding => ReferenceEquals(seriesBinding.Series, series));
             }
-            ChartControlHost.InvalidateVisual();
+            // Why the same stack again: setting it redraws the plot (ChartControl.Stack); InvalidateVisual only reached the control around it
+            ChartControlHost.Stack = _chartStack;
         }
         catch (Exception exception)
         {
@@ -320,7 +425,7 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
             foreach (SeriesBinding seriesBinding in _seriesBindings)
             {
                 if (ReferenceEquals(seriesBinding.Panel, chartPanel))
-                    chartPanelState.Series.Add(new ChartSeriesState { Name = seriesBinding.Series.Name, FilePath = seriesBinding.FilePath });
+                    chartPanelState.Series.Add(new ChartSeriesState { Name = seriesBinding.Series.Name, FilePath = seriesBinding.FilePath, Value = seriesBinding.ValuePath });
             }
             chartWidgetState.Panels.Add(chartPanelState);
         }
@@ -362,7 +467,7 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
             foreach (ChartSeriesState chartSeriesState in chartPanelState.Series)
             {
                 if (!string.IsNullOrWhiteSpace(chartSeriesState.FilePath) && File.Exists(chartSeriesState.FilePath))
-                    CreateAndBindSeries(chartPanel, chartSeriesState.FilePath);
+                    CreateAndBindSeries(chartPanel, chartSeriesState.FilePath, chartSeriesState.Value);
             }
         }
 
@@ -388,6 +493,7 @@ public partial class ChartWidget : UserControl, IWidget, IDisposable
         public ChartPanel Panel { get; }
         public ISeries Series { get; }
         public string FilePath { get; }
+        public string ValuePath { get; set; } = "";   // for a statistic's file, the member plotted ("Score", "Mean.Mean"); "" otherwise
         public bool IsAttachedToChartControl { get; set; }
 
         protected SeriesBinding(ChartWidget ownerChartWidget, ChartPanel panel, ISeries series, string filePath)

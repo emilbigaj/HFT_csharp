@@ -93,6 +93,15 @@ public class Strategy
     public LoggableManager LoggableManager { get; } = new LoggableManager();
 
     public HashMap<string, Position> Positions = new HashMap<string, Position>(32);
+    public HashMap<Position, Markouts> MarkoutsByPosition = new HashMap<Position, Markouts>(32);   // one recorder per position, made when the position is first got
+
+    /// The markout durations of this strategy's positions, strictly ascending; set it before the first GetPosition to change them.
+    /// A negative one is before the fill: 20 microseconds is the tick-to-execution time at CME, so that book could still be acted on.
+    public Duration[] MarkoutDurations { get; set; } =
+    [
+        Duration.FromMicroseconds(-20), Duration.Zero, Duration.FromMilliseconds(100), Duration.FromSeconds(1), Duration.FromSeconds(10),
+        Duration.FromMinutes(1), Duration.FromMinutes(5), Duration.FromMinutes(10), Duration.FromMinutes(15),
+    ];
     public FileSystemPath DirectoryPath => Client.Context.DirectoryPath;
     public FileSystemPath SeriesDirectoryPath => Client.Context.SeriesDirectoryPath;
     public FileSystemPath FactorsDirectoryPath => Path.Combine(Client.Context.DirectoryPath, "Factors");
@@ -150,21 +159,27 @@ public class Strategy
         return series;
     }
 
-    /// Starts recording the markouts of every algo fill on this position, in Markouts/<symbol>/<today in Chicago>.markout.
-    public virtual Markouts NewMarkouts(Position position, Duration[] markoutDurations)
+    /// Makes the recorder of the markouts of every algo fill on this position, at this strategy's MarkoutDurations,
+    /// writing Markouts/<symbol>/<today, UTC>.markout.
+    protected virtual Markouts NewMarkouts(Position position)
     {
-        FileSystemPath filePath = Client.Context.GetMarkoutsFilePath(position.Instrument.Symbol, Session.CME.ConvertToLocal(Clock.Now));
+        FileSystemPath filePath = Client.Context.GetMarkoutsFilePath(position.Instrument.Symbol, Clock.Now.ToDateTime);
         Series<Markout> markoutSeries = new Series<Markout>(filePath, Client.Context.LoggingServerName);
         LoggableManager.OnLogging(markoutSeries);
-        return new Markouts(position, markoutSeries, markoutDurations);
+        return new Markouts(Client, position, markoutSeries, MarkoutDurations);
     }
 
+    /// The strategy's position in this instrument; the first time it is got, its markouts start recording.
     public Position GetPosition(Instrument instrument)
     {
         Position position = Client.GetPosition(instrument.InstrumentId);
-        Positions.TryAdd(position.Instrument.Symbol, position);
+        if (Positions.TryAdd(position.Instrument.Symbol, position))
+            MarkoutsByPosition.TryAdd(position, NewMarkouts(position));
         return position;
     }
+
+    /// The recorder of this position's markouts, to subscribe to its events and to set its FairValuePrice.
+    public Markouts GetMarkouts(Position position) => MarkoutsByPosition[position];
 
     public Series<Point> NewSeries(string name, ref Action<Timestamp> @event, Func<double> getValue)
     {
@@ -182,23 +197,36 @@ public class Strategy
     public virtual Factor NewFactor(string name, int meanHalfLife, int stdDevHalfLife)
         => AttachSeries<Factor, FactorPoint>(new Factor(name, meanHalfLife, stdDevHalfLife));
 
+    /// A mean saved in Factors/<name>.mean. A seed other than 0 starts it there, counted as one half-life of
+    /// observations, so it is IsInitialized at once; with no seed it is the plain average of its first values.
     public virtual Mean NewMean(string name, int halfLife, double seed = 0)
     {
         Mean mean = AttachSeries<Mean, MeanPoint>(new Mean(name, halfLife));
-        if (mean.Point.Count == 0)
-            mean.Point = new MeanPoint(double.NaN, 0, seed);
+        if (mean.Point.Count == 0 && seed != 0)
+            mean.Point = new MeanPoint(double.NaN, mean.HalfLife, seed);
         return mean;
     }
+
+    /// A standard deviation saved in Factors/<name>.stddev, seeded as NewMean is.
     public virtual StdDev NewStdDev(string name, int halfLife, double seed = 0)
     {
         StdDev stdDev = AttachSeries<StdDev, StdDevPoint>(new StdDev(name, halfLife));
-        if (stdDev.Point.Count == 0)
-            stdDev.Point = new StdDevPoint(double.NaN, 0, seed * seed, seed);
+        if (stdDev.Point.Count == 0 && seed != 0)
+            stdDev.Point = new StdDevPoint(double.NaN, stdDev.HalfLife, seed * seed, seed);
         return stdDev;
     }
 
+    /// A correlation saved in Factors/<name>.correl; in Realtime it carries on from the file's last point.
+    public virtual Correl NewCorrel(string name, int halfLife)
+        => AttachSeries<Correl, CorrelPoint>(new Correl(name, halfLife));
+
+    /// A regression saved as one Factors/<name> <input>-<input>.correl per pair of its series; in Realtime each
+    /// pair carries on from its file's last point, and the betas are solved from them at once.
+    public virtual Regression NewRegression(string name, string[] inputNames, int halfLife, double ridge)
+        => new Regression(name, inputNames, halfLife, ridge, NewCorrel);
+
     private TFactor AttachSeries<TFactor, TPoint>(TFactor factor)
-        where TFactor : Factor<TPoint>
+        where TFactor : Statistic<TPoint>
         where TPoint : unmanaged
     {
         FileSystemPath filePath = GetFactorFilePath<TFactor>(FactorsDirectoryPath, factor.Name);
