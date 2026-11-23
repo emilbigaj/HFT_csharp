@@ -1394,6 +1394,21 @@ server does everything else:
   (`MessageEfficiency.Reset`). Only when the reset changes the row (the group's first instrument to close) does the server
   post the day that ended on its audit channel, and Logging appends it to the group's file. The CoreGroup thread does no
   I/O. The row itself is the record: it starts with `Header<OrderType>` (`OrderType.MessageEfficiency = 18`).
+- **Which day the row moves to (2026-11-23, the user's change, made in the C++ server first).** A row's day ends at
+  `TradeDate + TradeTime` (16:00 CME local). When `Reset` finds that moment passed it starts a new day, and the new
+  `TradeDate` is **today's if it is still before today's `TradeTime`, otherwise tomorrow's**:
+  `TradeDate = dateTime.Date; if (dateTime >= TradeDate.Add(TradeTime)) TradeDate = TradeDate.AddDays(1);`. It used to be
+  always tomorrow's (`dateTime.Date.AddDays(1)`), which is right at a close and wrong at a restart before one. Worked
+  example, the day production lost: the file's last line is Thursday's closed day (`TradeDate` 2026-11-19). The server
+  restarts on Friday at 08:30; allocation loads that line and resets it, since Thursday 16:00 has passed. The old rule
+  moved the day's end to Saturday 16:00, so Friday's 16:00 close found nothing ended, posted nothing, and the counters
+  ran on. The new rule sets the day to Friday, 08:30 is before Friday 16:00, so it stays Friday and Friday's close
+  resets and posts as usual. A restart after the close (Friday 17:30) still moves to Saturday. A restart while the row is
+  already today's changes nothing: the outer test is false and the counts are kept. Known and accepted: a weekend
+  restart before 16:00 labels the next row with that weekend date, and a server that runs through a weekend labels
+  Monday's row Saturday; the counts and the posting are right in both cases, only the `TradeDate` label is off.
+  **C# does not have this yet**: `MessageEfficiency.Reset` in `Execution/RateLimit.cs` still moves to tomorrow. It only
+  matters live, where the server is the C++ one; the C# port is the same three lines.
 - **Shutdown.** `Server.Dispose` posts every group's row on the audit link's admin channel just before it releases that
   link (after the server socket, whose admin thread is that channel's other writer), and the process exits. Logging reads
   a closed link to its end, so the rows reach the files (see "Logging reads a link to its end" under "Socket close

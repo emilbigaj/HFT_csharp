@@ -837,7 +837,9 @@ A loaded line missing `Header` (written before 2026-10-13) still loads as type 1
 ```
 Reset(local):                          // local = CME local time ("Central Standard Time", DST observed)
   if local >= TradeDate + TradeTime:
-    TradeDate = local.Date + 1 day; RawMessages = 0; WeightedMessages = 0; EMTWeightedMessages = 0
+    TradeDate = local.Date                                        // since 2026-11-23, see the note below (was: local.Date + 1 day)
+    if local >= TradeDate + TradeTime: TradeDate = TradeDate + 1 day
+    RawMessages = 0; WeightedMessages = 0; EMTWeightedMessages = 0
     QuantityTraded = 0; InverseQuantityTraded = 1
     return true
   return false
@@ -1453,6 +1455,34 @@ Full write-up, with P51, C36 and the verification steps: `cpp_alignment_report_2
   `WriteOnlySocket::Reset` and `SharedMemory::Clear` had no other caller and are deleted.
 - **Port if** the C++ `OpenClient` has the `Reset` branch: collapse it and delete the four members. The C++ server runs
   with `Persistance`, so its behaviour does not change; this keeps the two files the same.
+
+### P52. ALREADY IN C++, NOTHING TO PORT: `MessageEfficiency.Reset` keeps today's close after a restart before it (C++ `Execution/RateLimit.hpp`, 2026-11-23)
+
+Recorded here so the two sides' documents agree; the change was made on the C++ side first, in the form the user gave
+(C++ `csharp_alignment_report_2026-10-12.md` §22), and **C# has not taken it yet**.
+
+- **Was:** when the row's day had ended, `Reset` moved it to tomorrow: `TradeDate = dateTime.Date().AddDays(1)`. Right at a
+  close; wrong at a restart before one. Production, Friday 2026-11-20: the file's last line was Thursday's closed day, the
+  server restarted at 08:30, allocation reset the loaded row and moved its end to Saturday 16:00, so Friday's 16:00 close
+  found nothing ended and posted nothing. Every group's file stops at 2026-11-19.
+- **Now:** the new day is today's if `dateTime` is still before today's `TradeTime`, else tomorrow's:
+
+  ```
+    TradeDate = dateTime.Date();
+    tradeDateTime = TradeDate.Add(TradeTime);
+    if (dateTime >= tradeDateTime)
+        TradeDate = TradeDate.AddDays(1);
+  ```
+
+  The outer test still uses the old `TradeDate`, so a restart while the row is already today's stays false and keeps its
+  counts. The pseudo-code under P24 above is updated to this.
+- **Known and accepted:** a weekend restart before 16:00 labels the next row with that weekend date, and a server running
+  through a weekend labels Monday's row Saturday. Counts and posting are right in both cases; only the label is off.
+- **C#:** `Execution/RateLimit.cs` `MessageEfficiency.Reset` still has `TradeDate = dateTime.Date.AddDays(1)`. It takes
+  the same three lines. Until then the C# row behaves the old way, which only shows in a C# server (the simulator).
+- **Not the same loss as C36.** C36 is the rows posted at shutdown, dropped by Logging. This is the row posted at the
+  close, never produced. With both, a restart before the close keeps the day's counts (the shutdown row is saved and
+  reloaded as today's) and, where no shutdown row was saved (a crash), still ends the day at that day's close.
 
 ---
 

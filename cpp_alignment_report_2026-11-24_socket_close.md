@@ -25,6 +25,13 @@ at the close on 2026-11-19, none on the restart days (2026-11-12, -15, -20).
 That is fixed in C# only (C36, §4). **Nothing to change in C++ for it.** After the C# Logging is deployed, a server
 restart appends one line to each claimed group's file.
 
+A second, separate cause of missing lines was fixed on the C++ side on 2026-11-23 (the user's change; P52 in the main
+report, §22 of the C++ side's `csharp_alignment_report_2026-10-12.md`). `MessageEfficiency::Reset` moved a row whose day
+had ended to tomorrow, so a restart before the 16:00 close pushed the day's end to the next day and that day's close
+posted nothing: Friday 2026-11-20 was lost this way after the 08:30 restart. It now moves to today when today's close
+is still ahead. The two fixes cover different rows: C36 the rows posted at shutdown, that one the row posted at the
+close.
+
 ### 1.2 The hazard found on the way, which is in shared code: a reader waits for ever on a half-written record
 
 A ring write is three steps (`Protocol::WriteToRing`):
